@@ -1,11 +1,10 @@
-"""Lucy core module.
-
-Exports:
-- agent: LucyAgent for OpenClaw integration
-- openclaw: HTTP client for OpenClaw gateway
-"""
+"""Lucy core: agent orchestrator, LLM client, and system prompt builder."""
 
 from lucy.core.openclaw import OpenClawClient
-from lucy.core.agent import LucyAgent
+from lucy.core.prompt import build_system_prompt
 
-__all__ = ["OpenClawClient", "LucyAgent"]
+__all__ = ["OpenClawClient", "build_system_prompt"]
+
+
+class LucyError(Exception):
+    """Root exception for all Lucy domain errors."""
