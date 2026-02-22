@@ -1,0 +1,36 @@
+---
+description: State management rules for database, memory, and task lifecycle
+globs: ["src/lucy/db/**/*.py", "src/lucy/tasks/**/*.py", "src/lucy/memory/**/*.py"]
+alwaysApply: false
+---
+
+# State Management Rules
+
+## Database (PostgreSQL)
+- PostgreSQL via SQLAlchemy async is the single source of truth for all persistent state.
+- Every query MUST be scoped by `workspace_id` — no exceptions, no shortcuts.
+- Use Alembic for all schema changes. Never modify the database schema outside of migrations.
+- Models live in `src/lucy/db/models.py`. Session factory in `src/lucy/db/session.py`.
+
+## Multi-Tenant Isolation
+- Workspace data is NEVER mixed. Every table that stores workspace-specific data has a `workspace_id` column.
+- Qdrant collections use namespace scoping: `ws:{team_id}`, `ch:{team_id}:{channel_id}`, `usr:{team_id}:{user_id}`.
+- Sandboxes are per-workspace isolated environments.
+- Credentials are encrypted per-workspace (AES-256).
+
+## In-Memory Caches
+- In-memory caches (capability index, integration registry) are TTL-bounded and never authoritative.
+- Cache misses fall through to the database.
+- Cache invalidation happens on write — never rely on TTL alone for correctness.
+
+## Task State Machine
+- Task lifecycle is enforced exclusively by `TaskRegistry` in `src/lucy/tasks/registry.py`.
+- Valid states: `CREATED → RUNNING → COMPLETED | FAILED | CANCELLED`
+- With approval: `CREATED → PENDING_APPROVAL → RUNNING → COMPLETED | FAILED`
+- No ad-hoc status changes. All transitions go through `TaskRegistry` methods.
+- Every state transition is logged to the `audit_log` table.
+
+## Memory Write-Through
+- Every user interaction triggers a memory write to Mem0/Qdrant (Layer 1).
+- Memory writes are non-blocking — failures are logged but do not break the response flow.
+- Deep brain writes (Layer 2, OpenClaw engram) are async and batched.

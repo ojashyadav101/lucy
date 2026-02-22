@@ -1,0 +1,37 @@
+---
+description: Slack interface standards for handlers, Block Kit, and messaging
+globs: ["src/lucy/slack/**/*.py"]
+alwaysApply: false
+---
+
+# Slack Interface Standards
+
+## Workspace Resolution
+- Every event handler MUST resolve `workspace_id` from the Slack event payload before any business logic.
+- Use `slack/middleware.py` for consistent workspace extraction and user lookup.
+- If workspace resolution fails, respond with a user-friendly error and log the raw event.
+
+## Message Composition
+- All user-facing messages go through `slack/blocks.py` composer functions.
+- Never construct Block Kit JSON inline in handler code.
+- Block Kit actions MUST be prefixed with `lucy_action_` namespace (e.g., `lucy_action_approve`, `lucy_action_reject`).
+
+## Thread Awareness
+- If the triggering message is in a thread, always reply in that thread (`thread_ts`).
+- If the triggering message is a top-level channel message, reply as a new thread on that message.
+- Never post a top-level channel message in response to a thread message.
+
+## Rate Limiting
+- Respect Slack's rate limits: 1 message per second per channel.
+- For batch operations (e.g., posting results of parallel sub-tasks), queue messages with 1-second spacing.
+- Use `chat.update` to modify existing messages rather than posting new ones when updating status.
+
+## Error Responses
+- On internal errors, post a brief apologetic message to the user thread.
+- Never expose stack traces, model names, or internal error details to Slack users.
+- Log the full error context with structlog for debugging.
+
+## Slash Commands
+- All slash commands start with `/lucy` (e.g., `/lucy costs`, `/lucy disconnect`).
+- Slash command handlers live in `slack/handlers.py`.
+- Respond with `response_type: "ephemeral"` for private data (costs, settings) and `"in_channel"` for team-visible actions.

@@ -1,0 +1,61 @@
+{
+  "total_mrr": 18644.666666666668,
+  "active_count": 191,
+  "monthly_count": 178,
+  "yearly_count": 13,
+  "by_plan": {
+    "Pro - Monthly": {
+      "count": 84,
+      "mrr": 7969.5
+    },
+    "Starter - Monthly": {
+      "count": 65,
+      "mrr": 2891.0
+    },
+    "Business - Monthly": {
+      "count": 14,
+      "mrr": 2587.0
+    },
+    "Business - Yearly": {
+      "count": 4,
+      "mrr": 497.5
+    },
+    "1000 Prompts - Yearly": {
+      "count": 1,
+      "mrr": 0.0
+    },
+    "Pro - Yearly": {
+      "count": 5,
+      "mrr": 330.0
+    },
+    "Starter - Yearly": {
+      "count": 2,
+      "mrr": 81.66666666666667
+    },
+    "100 Prompts - Monthly": {
+      "count": 1,
+      "mrr": 199.0
+    },
+    "Agency - Monthly": {
+      "count": 10,
+      "mrr": 3990.0
+    },
+    "50 Prompts - Monthly": {
+      "count": 1,
+      "mrr": 99.0
+    },
+    "Agency - Yearly": {
+      "count": 1,
+      "mrr": 0.0
+    },
+    "Starter Plan Monthly": {
+      "count": 2,
+      "mrr": 0.0
+    },
+    "Agency Plan Monthly": {
+      "count": 1,
+      "mrr": 0.0
+    }
+  },
+  "timestamp": "2026-02-14T19:05:46.268786"
+}

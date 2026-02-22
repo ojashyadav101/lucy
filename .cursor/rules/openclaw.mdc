@@ -1,0 +1,39 @@
+---
+description: OpenClaw integration protocol and conventions
+globs: ["src/lucy/core/**/*.py"]
+alwaysApply: false
+---
+
+# OpenClaw Integration Protocol
+
+## Gateway Access
+- All OpenClaw API calls route through `src/lucy/core/agent.py` — the `LucyAgent` class.
+- No other module should import or call OpenClaw endpoints directly.
+- Gateway base URL and API key come from `settings.openclaw_base_url` and `settings.openclaw_api_key`.
+
+## Health Check
+- On application startup, perform an OpenClaw gateway health check.
+- If the gateway is unreachable, fail fast with a clear error — do not silently degrade.
+
+## Sub-Agent Sessions
+- Spawn sub-agents exclusively via OpenClaw's `sessions_spawn` endpoint.
+- Every spawned session MUST have an explicit timeout (default: 120 seconds).
+- Track spawned session IDs in the `TaskRegistry` for lifecycle management.
+- Sub-agents can use different model tiers — prefer cheap tiers for simple sub-tasks.
+
+## Engram (Deep Memory)
+- Engram writes are async, fire-and-forget with retry (max 3 attempts, exponential backoff).
+- Engram reads are only triggered for complex multi-hop reasoning — never on the hot path.
+- The `openclaw-memory janitor` cron handles compression, archival, and deduplication.
+
+## System Prompt Assembly
+- System prompt is assembled in `src/lucy/core/soul.py` by combining:
+  1. `assets/SOUL.md` personality definition
+  2. Workspace-specific context from memory
+  3. Capability index (available tools summary)
+- The assembled prompt is passed to OpenClaw as the session system message.
+
+## Error Handling
+- OpenClaw 5xx errors: retry once after 2 seconds, then surface to user with an apologetic message.
+- OpenClaw 4xx errors: log the full request/response, do not retry, surface to user.
+- Never expose raw OpenClaw error payloads to Slack users.

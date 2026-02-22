@@ -1,0 +1,44 @@
+---
+description: Project-wide standards for all Lucy development
+globs: ["src/**/*.py", "tests/**/*.py"]
+alwaysApply: true
+---
+
+# Global Rules — Lucy Project
+
+## Language & Runtime
+- Python 3.12+ required. Use modern syntax: `type` statements, `X | Y` unions, `match/case`.
+- Strict type hints on all public functions, methods, and class attributes.
+- Use `from __future__ import annotations` at the top of every module.
+
+## Async-First
+- All I/O-bound operations (database, HTTP, Slack API, OpenClaw, Qdrant) MUST use `async`/`await`.
+- Never call `time.sleep()` — use `asyncio.sleep()`.
+- Never use synchronous `requests` — use `httpx.AsyncClient`.
+
+## Module Structure
+- Every package exposes its public API through `__init__.py`.
+- Internal helpers prefixed with `_` are not exported.
+- No circular imports. Dependency flows downward:
+  `slack → core → memory / routing / integrations → db`
+
+## Configuration
+- All config via `src/lucy/config.py` (Pydantic Settings).
+- Never hardcode URLs, tokens, or thresholds. Read from `settings`.
+- Environment variables prefixed with `LUCY_`.
+
+## Error Handling
+- Custom exception hierarchy rooted in `LucyError` (defined in `src/lucy/core/__init__.py`).
+- Never catch bare `Exception` unless re-raising.
+- External service failures must be logged with `structlog` and wrapped in a domain exception.
+
+## Logging
+- Use `structlog` with structured JSON output. Never use `print()`.
+- Every log event must include `workspace_id` when available.
+- Log levels: DEBUG for internals, INFO for actions, WARNING for degraded states, ERROR for failures.
+
+## Code Style
+- Max line length: 100 characters (enforced by ruff).
+- Imports sorted by ruff (isort-compatible).
+- No commented-out code in committed files.
+- No redundant comments that narrate what the code does.

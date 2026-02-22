@@ -1,0 +1,8 @@
+{
+  "path": "/reports/daily-revenue",
+  "cron": "30 3 * * 1-5",
+  "title": "Daily Mentions Revenue Report",
+  "description": "Script: /work/scripts/polar/daily_revenue_report.py",
+  "created_at": "2026-02-14T19:05:57.777766+00:00",
+  "updated_at": "2026-02-14T19:05:57.777766+00:00"
+}
