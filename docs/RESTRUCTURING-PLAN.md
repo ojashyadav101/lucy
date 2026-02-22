@@ -71,7 +71,7 @@ async def get_skill_descriptions_for_prompt(workspace_id: str) -> str:
 
 **New directory**: `workspace_seeds/skills/` containing adapted versions of Viktor's 18 platform skills.
 
-Each adapted from `viktor_workspace_export/skills/`:
+Each adapted from `reference/viktor/skills/`:
 - Replace "Viktor" with "Lucy"
 - Replace SDK tool references with Composio meta-tool patterns
 - Keep the structure, philosophy, instructions intact

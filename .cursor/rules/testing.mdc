@@ -7,30 +7,21 @@ alwaysApply: false
 # Testing Standards
 
 ## Structure
-- Unit tests in `tests/unit/`, mirroring `src/lucy/` structure (e.g., `tests/unit/core/test_agent.py`).
-- Integration tests in `tests/integration/` for cross-module and external service tests.
+- Tests in `tests/`, mirroring `src/lucy/` structure (e.g., `tests/core/test_agent.py`).
 - Shared fixtures in `tests/conftest.py`.
 
 ## Requirements
-- Every new module in `src/lucy/` MUST have a corresponding test file before it is considered complete.
+- Every new module MUST have a corresponding test file before it is considered complete.
 - Tests use `pytest` with `pytest-asyncio` for async test functions.
-- Test function names describe the behavior: `test_classify_intent_returns_tier1_for_simple_query`.
+- Test function names describe the behavior: `test_skill_parser_extracts_yaml_frontmatter`.
 
 ## Mocking
-- Unit tests mock all external services (Slack API, OpenClaw, Qdrant, Composio, LiteLLM).
+- Unit tests mock all external services (Slack API, OpenClaw, Composio).
 - Use `unittest.mock.AsyncMock` for async interfaces.
 - Never make real HTTP calls in unit tests.
-
-## Integration Tests
-- Use testcontainers for PostgreSQL and Qdrant when testing data layer interactions.
-- Integration tests are marked with `@pytest.mark.integration` and excluded from default `pytest` runs.
-- Integration tests may be slower — optimize for correctness over speed.
 
 ## Fixtures
 - `workspace_id` fixture: returns a deterministic test workspace ID.
 - `db_session` fixture: provides an async SQLAlchemy session against a test database.
 - `mock_slack_client` fixture: returns a pre-configured mock Slack WebClient.
-
-## Coverage
-- Target: 80%+ line coverage for `src/lucy/core/` and `src/lucy/tasks/`.
-- Do not chase 100% coverage on thin wrappers (e.g., `composio_client.py`).
+- `tmp_workspace` fixture: provides a temporary workspace directory for filesystem tests.

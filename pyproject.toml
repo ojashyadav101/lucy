@@ -4,28 +4,43 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lucy"
-version = "0.1.0"
-description = "AI coworker for Slack — built on OpenClaw"
+version = "0.2.0"
+description = "AI coworker for Slack — proactive, skill-driven, built on OpenClaw"
 requires-python = ">=3.12"
 dependencies = [
+    # Slack
     "slack-bolt>=1.21,<2",
+
+    # Web framework
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.34,<1",
+
+    # Config
     "pydantic-settings>=2.7,<3",
+
+    # Database
     "sqlalchemy[asyncio]>=2.0,<3",
     "asyncpg>=0.30,<1",
     "alembic>=1.14,<2",
-    "psycopg2-binary>=2.9,<3",
-    "qdrant-client>=1.12,<2",
-    "mem0ai>=0.1,<1",
-    "litellm>=1.59,<2",
-    "structlog>=24.4,<25",
+
+    # HTTP + resilience
     "httpx>=0.28,<1",
-    "python-dateutil>=2.9,<3",
+    "tenacity>=9.0,<10",
+
+    # Logging
+    "structlog>=24.4,<25",
+
+    # Integrations (Composio meta-tools)
+    "composio>=0.11,<1",
+
+    # Workspace filesystem
+    "aiofiles>=24.1,<25",
+    "pyyaml>=6.0,<7",
+
+    # Scheduling (crons / proactivity)
+    "apscheduler>=3.10,<4",
     "croniter>=6.0,<7",
-    "composio-core>=0.5,<1",
-    "composio-openai>=0.5,<1",
-    "psutil>=6.0,<7",
+    "python-dateutil>=2.9,<3",
 ]
 
 [project.optional-dependencies]

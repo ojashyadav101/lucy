@@ -12,7 +12,7 @@ alwaysApply: true
 - Use `from __future__ import annotations` at the top of every module.
 
 ## Async-First
-- All I/O-bound operations (database, HTTP, Slack API, OpenClaw, Qdrant) MUST use `async`/`await`.
+- All I/O-bound operations (database, HTTP, Slack API, OpenClaw, Composio) MUST use `async`/`await`.
 - Never call `time.sleep()` — use `asyncio.sleep()`.
 - Never use synchronous `requests` — use `httpx.AsyncClient`.
 
@@ -20,7 +20,15 @@ alwaysApply: true
 - Every package exposes its public API through `__init__.py`.
 - Internal helpers prefixed with `_` are not exported.
 - No circular imports. Dependency flows downward:
-  `slack → core → memory / routing / integrations → db`
+  `slack → core → workspace / crons / integrations → db`
+
+## Package Layout
+- `core/` — Agent orchestrator, OpenClaw client, system prompt builder.
+- `slack/` — Slack Bolt handlers, middleware, Block Kit composers.
+- `workspace/` — Filesystem memory: skills, activity logs, snapshots, onboarding.
+- `crons/` — APScheduler-based proactivity engine.
+- `integrations/` — Composio SDK client and connection registry.
+- `db/` — SQLAlchemy models and async session management.
 
 ## Configuration
 - All config via `src/lucy/config.py` (Pydantic Settings).

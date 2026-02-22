@@ -1,219 +1,130 @@
 # Lucy
 
-AI coworker that lives inside your Slack workspace. Built on [OpenClaw](https://github.com/open-claw) with a custom execution intelligence layer.
+AI coworker that lives in Slack. Proactive, skill-driven, and built on [OpenClaw](https://github.com/open-claw).
 
-Lucy executes real work — she doesn't just answer questions. She writes code, manages integrations, monitors infrastructure, orchestrates multi-step workflows, and gets smarter over time.
+Lucy doesn't just answer questions — she monitors channels, discovers workflows, executes real tasks with 10,000+ integrations, and gets smarter by writing everything she learns to her skill files.
 
 ## Architecture
 
 ```
-Slack → Slack Bolt + FastAPI → Orchestrator → OpenClaw Gateway
-                                    ├── Model Router (LiteLLM + RouteLLM)
-                                    ├── Memory (GPTCache → Mem0/Qdrant → Engram)
-                                    ├── Integrations (Composio + self-building)
-                                    ├── Tasks (registry, approvals, scheduler)
-                                    └── Security (LlamaFirewall + PII filter)
+Slack ←→ Slack Bolt (Socket Mode)
+              ↓
+         LucyAgent (core/agent.py)
+         ├── System Prompt (SOUL.md + skills + meta-tools)
+         ├── OpenClaw LLM Gateway (core/openclaw.py)
+         ├── Workspace Filesystem (workspace/)
+         │   ├── skills/  — SKILL.md knowledge files
+         │   ├── crons/   — proactive task definitions
+         │   ├── logs/    — daily activity logs
+         │   └── team/ company/ — organizational context
+         ├── Composio Meta-Tools (integrations/)
+         │   └── 5 tools → 10,000+ actions (Gmail, Calendar, GitHub, ...)
+         └── Cron Scheduler (crons/)
+             ├── Heartbeat (4x/day)
+             ├── Issue Monitor (every 2 min)
+             └── Workflow Discovery (Mon/Thu)
 ```
 
-See [Documentation/lucy-docs.md](Documentation/lucy-docs.md) for the full vision document and technical specification.
+## Project Structure
+
+```
+lucy/
+├── src/lucy/                # Main package
+│   ├── app.py               # FastAPI + Slack Bolt startup
+│   ├── config.py            # Pydantic Settings (all env vars)
+│   │
+│   ├── core/                # Agent + LLM
+│   │   ├── agent.py         # Main orchestrator
+│   │   ├── openclaw.py      # OpenClaw HTTP client
+│   │   └── types.py         # Shared dataclasses
+│   │
+│   ├── slack/               # Slack interface
+│   │   ├── handlers.py      # Event/command handlers
+│   │   ├── middleware.py     # Workspace/user resolution
+│   │   ├── blocks.py        # Block Kit composers
+│   │   └── thread_manager.py
+│   │
+│   ├── workspace/           # Filesystem knowledge layer
+│   │   └── (to build)       # skills, logs, snapshots, onboarding
+│   │
+│   ├── crons/               # Proactivity engine
+│   │   └── (to build)       # APScheduler-based scheduling
+│   │
+│   ├── integrations/        # Composio SDK
+│   │   ├── composio_client.py
+│   │   └── registry.py
+│   │
+│   └── db/                  # Database
+│       ├── models.py        # SQLAlchemy ORM models
+│       └── session.py       # Async session management
+│
+├── assets/                  # Static assets
+│   └── SOUL.md              # Lucy's personality definition
+│
+├── workspace_seeds/         # Templates for new workspaces
+│   ├── skills/              # Platform skill definitions
+│   └── crons/               # Default cron task definitions
+│
+├── reference/               # Viktor workspace export (read-only reference)
+│   └── viktor/              # Skills, crons, docs from Viktor
+│
+├── docs/                    # Planning documents
+│   ├── DREAM.md             # North star vision
+│   ├── GAP-ANALYSIS.md      # Feature gaps vs Viktor
+│   └── RESTRUCTURING-PLAN.md # 5-phase build plan
+│
+├── scripts/                 # Utilities
+│   ├── run.py               # Start Slack bot
+│   └── init_db.py           # Initialize database
+│
+├── tests/                   # Test suite
+│   ├── conftest.py          # Shared fixtures
+│   └── (to build)
+│
+├── migrations/              # Alembic database migrations
+├── .cursor/rules/           # IDE rules for consistent development
+├── docker-compose.yml       # PostgreSQL
+├── pyproject.toml           # Dependencies and tooling config
+├── slack-manifest.json      # Slack app manifest
+└── .env.example             # Environment variable template
+```
 
 ## Quick Start
-
-### 1. Prerequisites
-
-- Python 3.12+
-- PostgreSQL 16 (via Docker)
-- Qdrant (via Docker)
-- Slack app credentials
-
-### 2. Setup
 
 ```bash
 # Install dependencies
 pip install -e ".[dev]"
 
-# Start PostgreSQL and Qdrant
+# Start PostgreSQL
 docker compose up -d
 
-# Create test database
-docker exec lucy-postgres createdb -U lucy lucy_test
-
-# Initialize database schema
+# Initialize database
 python scripts/init_db.py
 
-# Run tests
-pytest tests/unit/test_models.py -v
-```
-
-### 3. Configure Environment
-
-```bash
+# Configure environment
 cp .env.example .env
 # Edit .env with your Slack tokens and OpenClaw credentials
-```
 
-### 4. Run Lucy
-
-**Socket Mode (recommended for development):**
-```bash
+# Run Lucy
 python scripts/run.py
-# or
-python -m scripts.run
 ```
 
-**HTTP Mode (for production):**
-```bash
-python scripts/run.py --http --port 3000
-```
-
-### 5. Test OpenClaw Connection
-
-```bash
-# Test connection to your VPS gateway (167.86.82.46:18791)
-python scripts/test_openclaw.py
-```
-
-This verifies:
-- Gateway is reachable
-- Health check passes
-- Session can be spawned
-- Simple message can be sent
-
-### 6. Test the Gate
-
-In Slack, type:
-```
-@Lucy hello
-```
-
-Lucy should respond: "Hello! I'm Lucy, your AI coworker. How can I help today?"
-
-Then try:
-```
-@Lucy generate a report
-```
-
-This will:
-1. Create a task
-2. Spawn OpenClaw session with Kimi K2.5
-3. Execute task
-4. Send result back to Slack
-
----
-
-## Running the Worker (Background Task Processing)
-
-For production, run the worker separately to process tasks:
-
-```bash
-# Terminal 1: Run Slack bot
-python scripts/run.py
-
-# Terminal 2: Run background worker
-python scripts/worker.py
-
-# Or run one batch and exit
-python scripts/worker.py --once
-```
-
----
-
-## Development Commands
-
-```bash
-# Linting
-ruff check src/ tests/
-ruff format src/ tests/
-
-# Type checking
-mypy src/
-
-# Tests
-pytest tests/unit/ -v                    # Unit tests
-pytest tests/integration/ -v             # Integration tests
-pytest -v                                 # All tests
-
-# Test Connections
-python scripts/test_slack_connection.py              # Test Slack API
-python scripts/test_slack_connection.py --send-test  # Send test message
-python scripts/test_openclaw.py                      # Test OpenClaw gateway
-
-# Database
-python scripts/init_db.py                # Create tables (dev)
-python scripts/init_db.py --migrate       # Run Alembic migrations
-alembic revision --autogenerate -m "add_feature"  # Create migration
-
-# Run Services
-python scripts/run.py                     # Slack bot (Socket Mode)
-python scripts/run.py --http --port 3000  # HTTP mode
-python scripts/worker.py                  # Background task worker
-python scripts/worker.py --once           # Process one batch
-```
-
-## Project Structure
-
-### Current (Step 2 Complete)
-
-```
-src/lucy/
-├── app.py              # Entry point (Slack Bolt + FastAPI)
-├── config.py           # Pydantic Settings
-├── core/               # OpenClaw integration (NEW)
-│   ├── __init__.py
-│   ├── openclaw.py     # HTTP client for VPS gateway
-│   └── agent.py        # Task execution orchestrator
-├── db/
-│   ├── __init__.py
-│   ├── models.py       # 17 production-grade models
-│   └── session.py      # Async SQLAlchemy session management
-└── slack/
-    ├── __init__.py
-    ├── middleware.py   # Workspace/user resolution (lazy onboarding)
-    ├── handlers.py     # Event handlers (@Lucy, /lucy, Block Kit)
-    └── blocks.py       # Block Kit message templates
-
-migrations/             # Alembic migrations
-scripts/
-├── init_db.py          # Database initialization
-├── run.py              # Run Slack bot (Socket Mode or HTTP)
-├── worker.py           # Background task worker (NEW)
-├── test_openclaw.py    # Test OpenClaw connection (NEW)
-└── test_slack_connection.py  # Test Slack connection
-
-tests/
-├── unit/
-│   └── test_models.py
-├── integration/
-│   ├── test_slack_handlers.py
-│   └── test_openclaw.py  # OpenClaw tests (NEW)
-└── conftest.py
-```
-
-### Planned (90-Day Roadmap)
-
-```
-src/lucy/
-├── core/               # LucyAgent, OpenClaw integration (Day 7)
-├── memory/             # Three-layer memory system (Day 14)
-├── routing/            # LiteLLM + RouteLLM (Day 14)
-├── integrations/       # Composio + self-builder (Day 30)
-├── tasks/              # Task registry, scheduler (Day 21)
-├── security/           # LlamaFirewall, PII filter (Day 21)
-├── knowledge/          # RAG pipeline (Day 45)
-├── monitors/           # Heartbeats, patterns (Day 60)
-├── sandbox/            # E2B code execution (Day 45)
-├── browser/            # CamoFox stealth browser (Day 60)
-├── costs/              # Per-workspace cost tracking (Day 30)
-└── observability/      # Langfuse tracing (Day 14)
-```
+Then in Slack: `@Lucy hello`
 
 ## Development
 
 ```bash
-ruff check src/ tests/        # lint
-mypy src/                     # type check
-pytest                        # test
+ruff check src/ tests/       # lint
+ruff format src/ tests/      # format
+mypy src/                    # type check
+pytest                       # test
 ```
+
+## Key Docs
+
+- **[docs/DREAM.md](docs/DREAM.md)** — Vision and architecture decisions
+- **[docs/GAP-ANALYSIS.md](docs/GAP-ANALYSIS.md)** — Feature comparison with Viktor
+- **[docs/RESTRUCTURING-PLAN.md](docs/RESTRUCTURING-PLAN.md)** — Phased implementation plan
 
 ## License
 

@@ -48,6 +48,9 @@ keys.json
 *.log
 logs/
 
+# Runtime workspace data
+workspaces/
+
 # OS
 .DS_Store
 Thumbs.db

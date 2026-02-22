@@ -1,36 +1,35 @@
 ---
-description: State management rules for database, memory, and task lifecycle
-globs: ["src/lucy/db/**/*.py", "src/lucy/tasks/**/*.py", "src/lucy/memory/**/*.py"]
+description: State management rules for database and workspace filesystem
+globs: ["src/lucy/db/**/*.py", "src/lucy/workspace/**/*.py"]
 alwaysApply: false
 ---
 
 # State Management Rules
 
 ## Database (PostgreSQL)
-- PostgreSQL via SQLAlchemy async is the single source of truth for all persistent state.
-- Every query MUST be scoped by `workspace_id` — no exceptions, no shortcuts.
-- Use Alembic for all schema changes. Never modify the database schema outside of migrations.
+- PostgreSQL via SQLAlchemy async is the single source of truth for relational state (workspaces, users, connections).
+- Every query MUST be scoped by `workspace_id` — no exceptions.
+- Use Alembic for all schema changes. Never modify the database outside of migrations.
 - Models live in `src/lucy/db/models.py`. Session factory in `src/lucy/db/session.py`.
 
+## Workspace Filesystem (Knowledge Layer)
+- All knowledge, skills, learnings, and activity logs live as plain files on the local filesystem.
+- No vector databases, no embeddings, no RAG. Use `grep` / file search for retrieval.
+- Workspace root: `{LUCY_WORKSPACE_ROOT}/{workspace_id}/`
+- Standard layout inside each workspace:
+  - `skills/` — SKILL.md files with YAML frontmatter
+  - `crons/` — task.json definitions and LEARNINGS.md per cron
+  - `company/SKILL.md` — company profile and context
+  - `team/SKILL.md` — team member profiles
+  - `logs/` — daily activity logs (YYYY-MM-DD.md)
+  - `state.json` — workspace runtime state
+
 ## Multi-Tenant Isolation
-- Workspace data is NEVER mixed. Every table that stores workspace-specific data has a `workspace_id` column.
-- Qdrant collections use namespace scoping: `ws:{team_id}`, `ch:{team_id}:{channel_id}`, `usr:{team_id}:{user_id}`.
-- Sandboxes are per-workspace isolated environments.
-- Credentials are encrypted per-workspace (AES-256).
+- Workspace data is NEVER mixed. Every DB table has `workspace_id`.
+- Each workspace has its own filesystem directory.
+- Credentials are scoped per-workspace via Composio entity IDs.
 
-## In-Memory Caches
-- In-memory caches (capability index, integration registry) are TTL-bounded and never authoritative.
-- Cache misses fall through to the database.
-- Cache invalidation happens on write — never rely on TTL alone for correctness.
-
-## Task State Machine
-- Task lifecycle is enforced exclusively by `TaskRegistry` in `src/lucy/tasks/registry.py`.
-- Valid states: `CREATED → RUNNING → COMPLETED | FAILED | CANCELLED`
-- With approval: `CREATED → PENDING_APPROVAL → RUNNING → COMPLETED | FAILED`
-- No ad-hoc status changes. All transitions go through `TaskRegistry` methods.
-- Every state transition is logged to the `audit_log` table.
-
-## Memory Write-Through
-- Every user interaction triggers a memory write to Mem0/Qdrant (Layer 1).
-- Memory writes are non-blocking — failures are logged but do not break the response flow.
-- Deep brain writes (Layer 2, OpenClaw engram) are async and batched.
+## File Writes
+- All workspace file operations go through `src/lucy/workspace/filesystem.py`.
+- Never write workspace files directly — always use the `WorkspaceFS` interface.
+- File writes are atomic (write to temp, then rename).
