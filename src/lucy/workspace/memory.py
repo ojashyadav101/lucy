@@ -24,6 +24,7 @@ This module provides that bridge.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -36,6 +37,15 @@ from lucy.workspace.skills import parse_frontmatter
 
 logger = structlog.get_logger()
 
+_workspace_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_workspace_lock(workspace_id: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for the given workspace."""
+    if workspace_id not in _workspace_locks:
+        _workspace_locks[workspace_id] = asyncio.Lock()
+    return _workspace_locks[workspace_id]
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MEMORY EXTRACTION — What should be remembered?
 # ═══════════════════════════════════════════════════════════════════════════
@@ -46,6 +56,7 @@ _REMEMBER_SIGNALS = re.compile(
     r"going forward|from now on|always|never|our (?:target|goal|kpi)|"
     r"my (?:name|role|email|timezone|preference)|"
     r"we use|we switched to|our stack|we're moving to|"
+    r"our (?:company|team|product) (?:use[sd]?|is|has|runs?)|"
     r"(?:new|updated?) (?:target|goal|deadline|process)|"
     r"i(?:'m| am) (?:the|a|responsible for)|"
     r"(?:my|our) (?:mrr|revenue|arr|budget|runway) is"
@@ -57,7 +68,8 @@ _COMPANY_SIGNALS = re.compile(
     r"\b(?:"
     r"our company|we(?:'re| are) (?:a|an)|our product|our service|"
     r"our (?:mrr|arr|revenue|valuation|headcount|team size)|"
-    r"we use|our stack|we(?:'re| are) (?:based|located)|"
+    r"we (?:use|switched to|moved to|migrated to)|our stack|"
+    r"we(?:'re| are) (?:based|located)|"
     r"our (?:clients?|customers?)|(?:founded|started) in"
     r")\b",
     re.IGNORECASE,
@@ -134,23 +146,29 @@ async def add_session_fact(
     source: str = "conversation",
     category: str = "general",
 ) -> None:
-    """Add a fact to session memory. Deduplicates by content."""
-    items = await read_session_memory(ws)
+    """Add a fact to session memory. Deduplicates by content.
 
-    fact_lower = fact.lower().strip()
-    for existing in items:
-        if existing.get("fact", "").lower().strip() == fact_lower:
-            return
+    Uses a per-workspace lock to prevent concurrent read-modify-write
+    races that could lose data.
+    """
+    lock = _get_workspace_lock(ws.workspace_id)
+    async with lock:
+        items = await read_session_memory(ws)
 
-    items.append({
-        "fact": fact,
-        "source": source,
-        "category": category,
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
+        fact_lower = fact.lower().strip()
+        for existing in items:
+            if existing.get("fact", "").lower().strip() == fact_lower:
+                return
 
-    await write_session_memory(ws, items)
-    logger.info("session_fact_added", fact=fact[:100], category=category)
+        items.append({
+            "fact": fact,
+            "source": source,
+            "category": category,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+
+        await write_session_memory(ws, items)
+        logger.info("session_fact_added", fact=fact[:100], category=category)
 
 
 async def get_session_context_for_prompt(ws: WorkspaceFS) -> str:
@@ -176,66 +194,76 @@ async def append_to_company_knowledge(
     ws: WorkspaceFS,
     fact: str,
 ) -> None:
-    """Append a fact to company/SKILL.md."""
-    path = "company/SKILL.md"
-    content = await ws.read_file(path)
+    """Append a fact to company/SKILL.md.
 
-    if not content:
-        content = (
-            "---\n"
-            "name: company\n"
-            "description: Company overview, context, and key business information.\n"
-            "---\n\n"
-            "# Company Info\n\n"
-            "(Not yet configured — will be enriched as Lucy learns.)\n"
-        )
+    Uses a per-workspace lock to prevent concurrent write corruption.
+    """
+    lock = _get_workspace_lock(ws.workspace_id)
+    async with lock:
+        path = "company/SKILL.md"
+        content = await ws.read_file(path)
 
-    if fact.strip() in content:
-        return
+        if not content:
+            content = (
+                "---\n"
+                "name: company\n"
+                "description: Company overview, context, and key business information.\n"
+                "---\n\n"
+                "# Company Info\n\n"
+                "(Not yet configured — will be enriched as Lucy learns.)\n"
+            )
 
-    section_header = "## Learned Context"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if fact.strip() in content:
+            return
 
-    if section_header in content:
-        content += f"\n- {fact} ({timestamp})"
-    else:
-        content += f"\n\n{section_header}\n\n- {fact} ({timestamp})"
+        section_header = "## Learned Context"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    await ws.write_file(path, content)
-    logger.info("company_knowledge_updated", fact=fact[:100])
+        if section_header in content:
+            content += f"\n- {fact} ({timestamp})"
+        else:
+            content += f"\n\n{section_header}\n\n- {fact} ({timestamp})"
+
+        await ws.write_file(path, content)
+        logger.info("company_knowledge_updated", fact=fact[:100])
 
 
 async def append_to_team_knowledge(
     ws: WorkspaceFS,
     fact: str,
 ) -> None:
-    """Append a fact to team/SKILL.md."""
-    path = "team/SKILL.md"
-    content = await ws.read_file(path)
+    """Append a fact to team/SKILL.md.
 
-    if not content:
-        content = (
-            "---\n"
-            "name: team\n"
-            "description: Team members, roles, and preferences.\n"
-            "---\n\n"
-            "# Team Directory\n\n"
-            "(Not yet configured — will be enriched as Lucy learns.)\n"
-        )
+    Uses a per-workspace lock to prevent concurrent write corruption.
+    """
+    lock = _get_workspace_lock(ws.workspace_id)
+    async with lock:
+        path = "team/SKILL.md"
+        content = await ws.read_file(path)
 
-    if fact.strip() in content:
-        return
+        if not content:
+            content = (
+                "---\n"
+                "name: team\n"
+                "description: Team members, roles, and preferences.\n"
+                "---\n\n"
+                "# Team Directory\n\n"
+                "(Not yet configured — will be enriched as Lucy learns.)\n"
+            )
 
-    section_header = "## Learned Context"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if fact.strip() in content:
+            return
 
-    if section_header in content:
-        content += f"\n- {fact} ({timestamp})"
-    else:
-        content += f"\n\n{section_header}\n\n- {fact} ({timestamp})"
+        section_header = "## Learned Context"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    await ws.write_file(path, content)
-    logger.info("team_knowledge_updated", fact=fact[:100])
+        if section_header in content:
+            content += f"\n- {fact} ({timestamp})"
+        else:
+            content += f"\n\n{section_header}\n\n- {fact} ({timestamp})"
+
+        await ws.write_file(path, content)
+        logger.info("team_knowledge_updated", fact=fact[:100])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -245,30 +273,45 @@ async def append_to_team_knowledge(
 async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     """Promote high-value session facts to permanent knowledge files.
 
-    Returns the number of facts promoted.
+    Returns the number of facts promoted.  The per-workspace lock is
+    acquired by the individual write helpers, so we only hold the session
+    lock for the read-then-write-back of the remaining items.
     """
-    items = await read_session_memory(ws)
-    promoted = 0
-    remaining = []
+    lock = _get_workspace_lock(ws.workspace_id)
 
-    for item in items:
-        cat = item.get("category", "general")
-        fact = item.get("fact", "").strip()
+    async with lock:
+        items = await read_session_memory(ws)
+        promoted = 0
+        remaining = []
 
-        if not fact:
-            continue
+        for item in items:
+            cat = item.get("category", "general")
+            fact = item.get("fact", "").strip()
 
-        if cat == "company":
+            if not fact:
+                continue
+
+            if cat in ("company", "team"):
+                promoted += 1
+            else:
+                remaining.append(item)
+
+        promote_items = [
+            item for item in items
+            if item.get("category") in ("company", "team") and item.get("fact", "").strip()
+        ]
+
+        if promoted > 0:
+            await write_session_memory(ws, remaining)
+
+    for item in promote_items:
+        fact = item["fact"].strip()
+        if item["category"] == "company":
             await append_to_company_knowledge(ws, fact)
-            promoted += 1
-        elif cat == "team":
-            await append_to_team_knowledge(ws, fact)
-            promoted += 1
         else:
-            remaining.append(item)
+            await append_to_team_knowledge(ws, fact)
 
     if promoted > 0:
-        await write_session_memory(ws, remaining)
         logger.info(
             "memory_consolidation_complete",
             workspace_id=ws.workspace_id,

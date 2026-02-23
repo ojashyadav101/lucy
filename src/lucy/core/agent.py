@@ -251,6 +251,7 @@ class LucyAgent:
         response_text = ""
         repeated_sigs: dict[str, int] = {}
         progress_sent = False
+        progress_ts: str | None = None
 
         tool_names = {
             t.get("function", {}).get("name", "")
@@ -370,17 +371,17 @@ class LucyAgent:
                 if completed_tools:
                     progress = _describe_progress(completed_tools, turn)
                     try:
-                        if not hasattr(self, "_progress_ts") or not self._progress_ts:
+                        if not progress_ts:
                             result = await slack_client.chat_postMessage(
                                 channel=ctx.channel_id,
                                 thread_ts=ctx.thread_ts,
                                 text=progress,
                             )
-                            self._progress_ts = result.get("ts")
+                            progress_ts = result.get("ts")
                         else:
                             await slack_client.chat_update(
                                 channel=ctx.channel_id,
-                                ts=self._progress_ts,
+                                ts=progress_ts,
                                 text=progress,
                             )
                     except Exception:

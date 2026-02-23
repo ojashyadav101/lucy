@@ -20,7 +20,28 @@ from slack_bolt.async_app import AsyncAck, AsyncApp, AsyncBoltContext, AsyncSay
 logger = structlog.get_logger()
 
 _processed_events: dict[str, float] = {}
+_dedup_lock: asyncio.Lock | None = None
 EVENT_DEDUP_TTL = 30.0
+
+
+_agent_semaphore: asyncio.Semaphore | None = None
+MAX_CONCURRENT_AGENTS = 10
+
+
+def _get_dedup_lock() -> asyncio.Lock:
+    """Lazily create the dedup lock inside the running event loop."""
+    global _dedup_lock
+    if _dedup_lock is None:
+        _dedup_lock = asyncio.Lock()
+    return _dedup_lock
+
+
+def _get_agent_semaphore() -> asyncio.Semaphore:
+    """Lazily create the agent concurrency semaphore."""
+    global _agent_semaphore
+    if _agent_semaphore is None:
+        _agent_semaphore = asyncio.Semaphore(MAX_CONCURRENT_AGENTS)
+    return _agent_semaphore
 
 
 def register_handlers(app: AsyncApp) -> None:
@@ -242,15 +263,17 @@ async def _handle_message(
     global _processed_events
 
     if event_ts:
-        now = time.monotonic()
-        if event_ts in _processed_events:
-            logger.debug("event_dedup_skip", event_ts=event_ts)
-            return
-        _processed_events[event_ts] = now
-        _processed_events = {
-            k: v for k, v in _processed_events.items()
-            if now - v < EVENT_DEDUP_TTL
-        }
+        lock = _get_dedup_lock()
+        async with lock:
+            now = time.monotonic()
+            if event_ts in _processed_events:
+                logger.debug("event_dedup_skip", event_ts=event_ts)
+                return
+            _processed_events[event_ts] = now
+            _processed_events = {
+                k: v for k, v in _processed_events.items()
+                if now - v < EVENT_DEDUP_TTL
+            }
 
     workspace_id = context.get("workspace_id")
     if not workspace_id:
@@ -302,9 +325,11 @@ async def _handle_message(
             thread_ts=thread_ts,
         )
 
-        response_text = await _run_with_recovery(
-            agent, text, ctx, client, workspace_id,
-        )
+        sem = _get_agent_semaphore()
+        async with sem:
+            response_text = await _run_with_recovery(
+                agent, text, ctx, client, workspace_id,
+            )
 
         from lucy.core.output import process_output
         from lucy.slack.blockkit import text_to_blocks
