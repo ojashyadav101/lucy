@@ -141,6 +141,10 @@ _TONE_REJECT_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"try rephrasing", re.IGNORECASE),
     re.compile(r"after several attempts", re.IGNORECASE),
     re.compile(r"I was(?:n't| not) able to complete", re.IGNORECASE),
+    re.compile(r"(?:great|excellent|wonderful|fantastic) question", re.IGNORECASE),
+    re.compile(r"(?:I'd be )?happy to help", re.IGNORECASE),
+    re.compile(r"it's worth noting", re.IGNORECASE),
+    re.compile(r"let me delve into", re.IGNORECASE),
 ]
 
 _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
@@ -159,6 +163,22 @@ _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"Something went wrong[^.]*\.?", re.IGNORECASE),
         "Working on getting that sorted.",
+    ),
+    (
+        re.compile(r"(?:That's a |This is a |What a )?(?:great|excellent|wonderful|fantastic) question[!.,]?\s*", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"I'd be happy to help[!.,]?\s*", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"[Ii]t's worth noting that\s*", re.IGNORECASE),
+        "",
+    ),
+    (
+        re.compile(r"[Ll]et me delve into\s*", re.IGNORECASE),
+        "Here's ",
     ),
 ]
 

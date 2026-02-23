@@ -120,7 +120,14 @@ def classify_and_route(
         )
 
     # 3. Coding tasks (removed "build" — "build me a report" is not code)
-    if _CODE_KEYWORDS.search(text):
+    has_code = _CODE_KEYWORDS.search(text)
+    if has_code:
+        if _CHECK_PATTERNS.search(text) and len(text) < 80:
+            return ModelChoice(
+                intent="tool_use",
+                model=MODEL_TIERS["default"],
+                tier="default",
+            )
         if _RESEARCH_KEYWORDS.search(text) and len(text) > 80:
             return ModelChoice(
                 intent="code_reasoning",
@@ -133,8 +140,9 @@ def classify_and_route(
             tier="code",
         )
 
-    # 4. Deep research / analysis
-    if _RESEARCH_KEYWORDS.search(text) and len(text) > 60:
+    # 4. Deep research / analysis (multiple signals = lower threshold)
+    research_matches = _RESEARCH_KEYWORDS.findall(text)
+    if research_matches and (len(text) > 60 or len(research_matches) >= 2):
         return ModelChoice(
             intent="reasoning",
             model=MODEL_TIERS["frontier"],

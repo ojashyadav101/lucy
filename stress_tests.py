@@ -32,14 +32,8 @@ import certifi
 
 # ── Configuration ───────────────────────────────────────────────────────
 
-TOKEN = os.environ.get(
-    "SLACK_USER_TOKEN",
-    "xoxp-4131935301158-4138553919170-10541136382135-3e53106a1f95de8ae377e543affa0bb0",
-)
-BOT_TOKEN = os.environ.get(
-    "SLACK_BOT_TOKEN",
-    "xoxb-4131935301158-10552709351157-XWa5YmNyXCb2L8XcpR0m4uuY",
-)
+TOKEN = os.environ.get("SLACK_USER_TOKEN", "")
+BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 CHANNEL = os.environ.get("SLACK_CHANNEL", "C0AEZ241C3V")
 LUCY_ID = os.environ.get("LUCY_BOT_ID", "U0AG8LVAB4M")
 WORKSPACE_ROOT = Path(os.environ.get(
