@@ -94,6 +94,9 @@ class CronScheduler:
                         error=str(e),
                     )
 
+            self._schedule_slack_sync(ws_id)
+            total_jobs += 1
+
         self.scheduler.start()
         self._running = True
         logger.info("cron_scheduler_started", total_jobs=total_jobs)
@@ -164,6 +167,64 @@ class CronScheduler:
                 ),
             })
         return jobs
+
+    def _schedule_slack_sync(self, workspace_id: str) -> None:
+        """Register the lightweight Slack message sync cron for a workspace."""
+        job_id = f"{workspace_id}:_slack_sync"
+        try:
+            self.scheduler.add_job(
+                self._run_slack_sync,
+                trigger=CronTrigger.from_crontab("*/10 * * * *"),
+                args=[workspace_id],
+                id=job_id,
+                name=f"Slack sync ({workspace_id})",
+                replace_existing=True,
+            )
+            logger.info("slack_sync_cron_scheduled", workspace_id=workspace_id)
+        except Exception as e:
+            logger.error(
+                "slack_sync_cron_schedule_failed",
+                workspace_id=workspace_id,
+                error=str(e),
+            )
+
+    async def _run_slack_sync(self, workspace_id: str) -> None:
+        """Execute the Slack message sync (no agent needed — direct I/O)."""
+        if not self.slack_client:
+            return
+
+        import time as _time
+
+        t0 = _time.monotonic()
+        ws = get_workspace(workspace_id)
+
+        try:
+            from lucy.workspace.slack_sync import (
+                get_last_sync_ts,
+                save_last_sync_ts,
+                sync_channel_messages,
+            )
+
+            since_ts = await get_last_sync_ts(ws)
+            count = await sync_channel_messages(ws, self.slack_client, since_ts)
+
+            now_ts = str(_time.time())
+            await save_last_sync_ts(ws, now_ts)
+
+            elapsed_ms = round((_time.monotonic() - t0) * 1000)
+            logger.info(
+                "slack_sync_cron_complete",
+                workspace_id=workspace_id,
+                messages_synced=count,
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception as e:
+            logger.error(
+                "slack_sync_cron_failed",
+                workspace_id=workspace_id,
+                error=str(e),
+                exc_info=True,
+            )
 
     # ── Internal ────────────────────────────────────────────────────────
 

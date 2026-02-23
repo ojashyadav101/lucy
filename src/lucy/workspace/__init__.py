@@ -1,4 +1,4 @@
-"""Filesystem-based workspace: skills, memory, activity logs, execution, snapshots, timezone."""
+"""Filesystem-based workspace: skills, memory, activity logs, execution, snapshots, timezone, Slack sync."""
 
 from lucy.workspace.activity_log import get_recent_activity, log_activity
 from lucy.workspace.executor import (

@@ -366,7 +366,7 @@ class LucyAgent:
 
             # Execute tool calls in parallel
             tool_results = await self._execute_tools_parallel(
-                tool_calls, tool_names, ctx, trace,
+                tool_calls, tool_names, ctx, trace, slack_client,
             )
 
             for call_id, result_str in tool_results:
@@ -455,6 +455,7 @@ class LucyAgent:
         tool_names: set[str],
         ctx: AgentContext,
         trace: Trace,
+        slack_client: Any | None = None,
     ) -> list[tuple[str, str]]:
         """Execute all tool calls from a single LLM turn in parallel."""
         async def _run_one(i: int, tc: dict[str, Any]) -> tuple[str, str]:
@@ -476,6 +477,29 @@ class LucyAgent:
                 return call_id, json.dumps({
                     "error": f"Tool '{name}' is not available."
                 })
+
+            if name == "COMPOSIO_MULTI_EXECUTE_TOOL":
+                from lucy.slack.hitl import is_destructive_tool_call
+                actions = params.get("actions") or []
+                for act in actions:
+                    act_name = act if isinstance(act, str) else (act.get("action") or act.get("tool") or "")
+                    if is_destructive_tool_call(str(act_name)):
+                        from lucy.slack.hitl import create_pending_action
+                        action_id = create_pending_action(
+                            tool_name=name,
+                            parameters=params,
+                            description=f"Destructive action detected: {act_name}",
+                            workspace_id=ctx.workspace_id,
+                        )
+                        return call_id, json.dumps({
+                            "status": "pending_approval",
+                            "action_id": action_id,
+                            "message": (
+                                "This action requires user confirmation before execution. "
+                                "Present an approval prompt to the user describing what "
+                                "you're about to do. Include the action_id in your response."
+                            ),
+                        })
 
             async with trace.span(f"tool_exec_{name}", tool=name):
                 result = await self._execute_tool(

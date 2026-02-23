@@ -1,0 +1,8 @@
+{
+  "path": "slack-sync",
+  "cron": "*/10 * * * *",
+  "title": "Slack Message Sync",
+  "description": "Sync recent Slack messages from all channels to the workspace filesystem. This gives you instant grep access to message history without rate-limited API calls. Run silently — do NOT post any messages to Slack during this cron. Just sync the data.",
+  "created_at": "2026-02-23",
+  "updated_at": "2026-02-23"
+}

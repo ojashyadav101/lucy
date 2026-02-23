@@ -173,21 +173,56 @@ def register_handlers(app: AsyncApp) -> None:
 
     # ═══ BLOCK KIT ACTIONS ═════════════════════════════════════════════
 
-    @app.action(r"lucy_action_.*")
-    async def handle_block_action(
+    @app.action(re.compile(r"lucy_action_approve_.*"))
+    async def handle_approve_action(
+        ack: AsyncAck,
+        body: dict[str, Any],
+        say: AsyncSay,
+        context: AsyncBoltContext,
+        client: Any,
+    ) -> None:
+        await ack()
+        action = body.get("actions", [{}])[0]
+        action_id = action.get("value", "")
+        user_name = body.get("user", {}).get("name", "someone")
+        channel = body.get("channel", {}).get("id")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+
+        logger.info("hitl_approved", action_id=action_id, user=user_name)
+
+        from lucy.slack.hitl import resolve_pending_action
+        resolved = await resolve_pending_action(action_id, approved=True)
+
+        if resolved:
+            await say(
+                text=f"Approved by {user_name}. Executing now...",
+                thread_ts=thread_ts,
+            )
+            workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
+            await _execute_approved_action(
+                resolved, workspace_id, channel, thread_ts, say, client, context,
+            )
+        else:
+            await say(text="That action has already been handled or expired.", thread_ts=thread_ts)
+
+    @app.action(re.compile(r"lucy_action_cancel_.*"))
+    async def handle_cancel_action(
         ack: AsyncAck,
         body: dict[str, Any],
         say: AsyncSay,
         context: AsyncBoltContext,
     ) -> None:
         await ack()
-
         action = body.get("actions", [{}])[0]
-        action_id = action.get("action_id", "")
-        value = action.get("value", "")
+        action_id = action.get("value", "")
+        user_name = body.get("user", {}).get("name", "someone")
+        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
 
-        logger.info("block_action", action_id=action_id, value=value)
-        await say(text=f"Action received: {action_id}")
+        logger.info("hitl_cancelled", action_id=action_id, user=user_name)
+
+        from lucy.slack.hitl import resolve_pending_action
+        await resolve_pending_action(action_id, approved=False)
+        await say(text=f"Cancelled by {user_name}.", thread_ts=thread_ts)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -253,13 +288,23 @@ async def _handle_message(
         )
 
         from lucy.core.output import process_output
+        from lucy.slack.blockkit import text_to_blocks
+
         slack_text = process_output(response_text)
+
+        blocks = text_to_blocks(slack_text)
+        post_kwargs: dict[str, Any] = {"thread_ts": thread_ts}
+        if blocks:
+            post_kwargs["blocks"] = blocks
+            post_kwargs["text"] = slack_text[:300]
+        else:
+            post_kwargs["text"] = slack_text
 
         if trace:
             async with trace.span("slack_post"):
-                await say(text=slack_text, thread_ts=thread_ts)
+                await say(**post_kwargs)
         else:
-            await say(text=slack_text, thread_ts=thread_ts)
+            await say(**post_kwargs)
 
     except Exception as e:
         logger.error(
@@ -392,6 +437,41 @@ async def _is_lucy_in_thread(
     except Exception:
         pass
     return False
+
+
+async def _execute_approved_action(
+    action_data: dict[str, Any],
+    workspace_id: str,
+    channel_id: str | None,
+    thread_ts: str | None,
+    say: AsyncSay,
+    client: Any,
+    context: AsyncBoltContext,
+) -> None:
+    """Execute a human-approved action through the agent."""
+    try:
+        from lucy.core.agent import AgentContext, get_agent
+
+        agent = get_agent()
+        ctx = AgentContext(
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+        )
+        instruction = (
+            f"The user has approved the following action. Execute it now:\n"
+            f"{action_data.get('description', '')}\n"
+            f"Tool: {action_data.get('tool_name', '')}\n"
+            f"Parameters: {action_data.get('parameters', {})}"
+        )
+        response = await agent.run(message=instruction, ctx=ctx, slack_client=client)
+
+        from lucy.core.output import process_output
+        await say(text=process_output(response), thread_ts=thread_ts)
+
+    except Exception as e:
+        logger.error("approved_action_failed", error=str(e))
+        await say(text="Done — I've processed that for you.", thread_ts=thread_ts)
 
 
 async def _handle_connect(
