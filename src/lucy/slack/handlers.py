@@ -330,6 +330,30 @@ async def _handle_message(
         await say(text=fast.response, thread_ts=thread_ts)
         return
 
+    # ── Edge case: status queries & task cancellation ─────────────────
+    from lucy.core.edge_cases import (
+        decide_thread_interrupt,
+        format_task_status,
+        handle_task_cancellation,
+        is_status_query,
+        is_task_cancellation,
+    )
+
+    if is_status_query(text):
+        status = await format_task_status(workspace_id)
+        if status:
+            await say(
+                text=f"Here's what I'm working on:\n{status}",
+                thread_ts=thread_ts,
+            )
+            return  # Don't start a new agent run for status checks
+
+    if is_task_cancellation(text):
+        result = await handle_task_cancellation(workspace_id, thread_ts)
+        if result:
+            await say(text=result, thread_ts=thread_ts)
+            return
+
     # ── Full agent loop path ──────────────────────────────────────────
     working_emoji = get_working_emoji(text)
     if client and channel_id and event_ts:
@@ -560,7 +584,19 @@ async def _run_with_recovery(
     except Exception as e:
         logger.warning("agent_attempt_3_error", error=str(e), workspace_id=workspace_id)
 
-    raise RuntimeError("All recovery attempts exhausted")
+    # All 3 attempts failed — give user a warm degradation message
+    from lucy.core.edge_cases import classify_error_for_degradation, get_degradation_message
+    # Use the last exception for classification
+    import sys
+    last_exc = sys.exc_info()[1]
+    error_type = classify_error_for_degradation(last_exc) if last_exc else "unknown"
+    degradation_msg = get_degradation_message(error_type)
+    logger.error(
+        "all_recovery_attempts_exhausted",
+        workspace_id=workspace_id,
+        error_type=error_type,
+    )
+    raise RuntimeError(f"All recovery attempts exhausted: {degradation_msg}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

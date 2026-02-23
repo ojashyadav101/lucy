@@ -68,6 +68,7 @@ class LucyAgent:
 
     def __init__(self, openclaw: OpenClawClient | None = None) -> None:
         self.openclaw = openclaw
+        self._recent_tool_calls: list[tuple[str, dict, float]] = []
 
     async def _get_client(self) -> OpenClawClient:
         if self.openclaw is None:
@@ -536,6 +537,28 @@ class LucyAgent:
                 return call_id, json.dumps({
                     "error": f"Tool '{name}' is not available."
                 })
+
+            # ── Duplicate mutating call protection ────────────────────
+            from lucy.core.edge_cases import should_deduplicate_tool_call
+            if should_deduplicate_tool_call(
+                name, params, self._recent_tool_calls
+            ):
+                return call_id, json.dumps({
+                    "error": (
+                        f"Duplicate call to '{name}' blocked — "
+                        f"this exact call was made <5 seconds ago. "
+                        f"If you need to retry, wait a moment."
+                    ),
+                })
+
+            # Track this call for dedup
+            import time as _time
+            self._recent_tool_calls.append((name, params, _time.monotonic()))
+            # Prune old entries (keep last 30 seconds)
+            cutoff = _time.monotonic() - 30.0
+            self._recent_tool_calls = [
+                c for c in self._recent_tool_calls if c[2] > cutoff
+            ]
 
             # ── External API rate limiting ────────────────────────────
             from lucy.core.rate_limiter import get_rate_limiter
