@@ -266,9 +266,28 @@ async def _handle_message(
         return
     workspace_id = str(workspace_id)
 
-    # Add thinking reaction
+    # ── Contextual emoji reaction ─────────────────────────────────────
+    from lucy.slack.reactions import classify_reaction, get_working_emoji
+
+    reaction = classify_reaction(text)
+
+    if reaction.react_only:
+        if client and channel_id and event_ts:
+            try:
+                await client.reactions_add(
+                    channel=channel_id,
+                    name=reaction.emoji,
+                    timestamp=event_ts,
+                )
+            except Exception:
+                pass
+        return
+
+    working_emoji = get_working_emoji(text)
     if client and channel_id and event_ts:
-        asyncio.create_task(_add_reaction(client, channel_id, event_ts))
+        asyncio.create_task(
+            _add_reaction(client, channel_id, event_ts, emoji=working_emoji)
+        )
 
     from lucy.core.trace import Trace
     trace = Trace.current()
@@ -289,22 +308,48 @@ async def _handle_message(
 
         from lucy.core.output import process_output
         from lucy.slack.blockkit import text_to_blocks
+        from lucy.slack.rich_output import (
+            enhance_blocks,
+            format_links,
+            should_split_response,
+            split_response,
+        )
 
         slack_text = process_output(response_text)
+        slack_text = format_links(slack_text)
 
-        blocks = text_to_blocks(slack_text)
-        post_kwargs: dict[str, Any] = {"thread_ts": thread_ts}
-        if blocks:
-            post_kwargs["blocks"] = blocks
-            post_kwargs["text"] = slack_text[:300]
+        if should_split_response(slack_text):
+            chunks = split_response(slack_text)
+            for i, chunk in enumerate(chunks):
+                blocks = text_to_blocks(chunk)
+                chunk_kwargs: dict[str, Any] = {"thread_ts": thread_ts}
+                if blocks:
+                    blocks = enhance_blocks(blocks)
+                    chunk_kwargs["blocks"] = blocks
+                    chunk_kwargs["text"] = chunk[:300]
+                else:
+                    chunk_kwargs["text"] = chunk
+
+                if trace and i == 0:
+                    async with trace.span("slack_post"):
+                        await say(**chunk_kwargs)
+                else:
+                    await say(**chunk_kwargs)
         else:
-            post_kwargs["text"] = slack_text
+            blocks = text_to_blocks(slack_text)
+            post_kwargs: dict[str, Any] = {"thread_ts": thread_ts}
+            if blocks:
+                blocks = enhance_blocks(blocks)
+                post_kwargs["blocks"] = blocks
+                post_kwargs["text"] = slack_text[:300]
+            else:
+                post_kwargs["text"] = slack_text
 
-        if trace:
-            async with trace.span("slack_post"):
+            if trace:
+                async with trace.span("slack_post"):
+                    await say(**post_kwargs)
+            else:
                 await say(**post_kwargs)
-        else:
-            await say(**post_kwargs)
 
     except Exception as e:
         logger.error(
@@ -313,16 +358,33 @@ async def _handle_message(
             error=str(e),
             exc_info=True,
         )
-        fallback = (
-            "I'm pulling together some details on that — "
-            "give me a moment and I'll follow up right here."
-        )
+        error_str = str(e).lower()
+        if "timeout" in error_str or "timed out" in error_str:
+            fallback = (
+                "That one's taking longer than expected — I'm still "
+                "working on it and will follow up here shortly."
+            )
+        elif "rate limit" in error_str or "429" in error_str:
+            fallback = (
+                "I'm getting a lot of requests right now — give me "
+                "a moment and I'll get back to you on this."
+            )
+        elif "connection" in error_str:
+            fallback = (
+                "Having a bit of trouble reaching one of the services "
+                "I need. Let me retry in a moment."
+            )
+        else:
+            fallback = (
+                "Working on getting that sorted — I'll follow up "
+                "right here in a moment."
+            )
         await say(text=fallback, thread_ts=thread_ts)
 
     finally:
         if client and channel_id and event_ts:
             asyncio.create_task(
-                _remove_reaction(client, channel_id, event_ts)
+                _remove_reaction(client, channel_id, event_ts, emoji=working_emoji)
             )
 
 
@@ -396,12 +458,15 @@ def _clean_mention(text: str) -> str:
 
 
 async def _add_reaction(
-    client: Any, channel: str, timestamp: str
+    client: Any,
+    channel: str,
+    timestamp: str,
+    emoji: str = "hourglass_flowing_sand",
 ) -> None:
     try:
         await client.reactions_add(
             channel=channel,
-            name="hourglass_flowing_sand",
+            name=emoji,
             timestamp=timestamp,
         )
     except Exception:
@@ -409,12 +474,15 @@ async def _add_reaction(
 
 
 async def _remove_reaction(
-    client: Any, channel: str, timestamp: str
+    client: Any,
+    channel: str,
+    timestamp: str,
+    emoji: str = "hourglass_flowing_sand",
 ) -> None:
     try:
         await client.reactions_remove(
             channel=channel,
-            name="hourglass_flowing_sand",
+            name=emoji,
             timestamp=timestamp,
         )
     except Exception:

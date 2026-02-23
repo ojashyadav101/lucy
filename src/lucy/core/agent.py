@@ -170,6 +170,37 @@ class LucyAgent:
             slack_client=slack_client,
         )
 
+        # 6b. Post-response: persist memorable facts to memory
+        try:
+            from lucy.workspace.memory import (
+                add_session_fact,
+                append_to_company_knowledge,
+                append_to_team_knowledge,
+                classify_memory_target,
+                should_persist_memory,
+            )
+            if should_persist_memory(message):
+                target = classify_memory_target(message)
+                fact = message.strip()
+                if len(fact) > 300:
+                    fact = fact[:300] + "..."
+
+                if target == "company":
+                    await append_to_company_knowledge(ws, fact)
+                elif target == "team":
+                    await append_to_team_knowledge(ws, fact)
+                else:
+                    await add_session_fact(
+                        ws, fact, source="conversation", category=target,
+                    )
+                logger.debug(
+                    "memory_persisted",
+                    target=target,
+                    workspace_id=ctx.workspace_id,
+                )
+        except Exception as e:
+            logger.warning("memory_persist_error", error=str(e))
+
         # 7. Log activity
         from lucy.workspace.activity_log import log_activity
 
@@ -324,23 +355,34 @@ class LucyAgent:
                 workspace_id=ctx.workspace_id,
             )
 
-            if (
-                turn >= 1
-                and not progress_sent
-                and slack_client
+            should_update = (
+                slack_client
                 and ctx.channel_id
                 and ctx.thread_ts
-            ):
+                and (
+                    (turn == 1 and not progress_sent)
+                    or (turn > 1 and turn % 3 == 0)
+                )
+            )
+            if should_update:
                 progress_sent = True
                 completed_tools = list(trace.tool_calls_made)
                 if completed_tools:
-                    progress = _describe_progress(completed_tools)
+                    progress = _describe_progress(completed_tools, turn)
                     try:
-                        await slack_client.chat_postMessage(
-                            channel=ctx.channel_id,
-                            thread_ts=ctx.thread_ts,
-                            text=progress,
-                        )
+                        if not hasattr(self, "_progress_ts") or not self._progress_ts:
+                            result = await slack_client.chat_postMessage(
+                                channel=ctx.channel_id,
+                                thread_ts=ctx.thread_ts,
+                                text=progress,
+                            )
+                            self._progress_ts = result.get("ts")
+                        else:
+                            await slack_client.chat_update(
+                                channel=ctx.channel_id,
+                                ts=self._progress_ts,
+                                text=progress,
+                            )
                     except Exception:
                         pass
 
@@ -743,18 +785,22 @@ def _trim_tool_results(
     return trimmed
 
 
-def _describe_progress(tool_calls: list[str]) -> str:
-    """Generate a human-readable progress message from completed tool names."""
+def _describe_progress(tool_calls: list[str], turn: int = 0) -> str:
+    """Generate a human-readable progress message from completed tool names.
+
+    Updates are edited in-place (same message gets updated) so the user
+    sees a single evolving status, not a stream of separate messages.
+    """
     tool_map = {
-        "COMPOSIO_SEARCH_TOOLS": "searched for available tools",
-        "COMPOSIO_MANAGE_CONNECTIONS": "checked integrations",
-        "COMPOSIO_MULTI_EXECUTE_TOOL": "ran some actions",
-        "COMPOSIO_GET_TOOL_SCHEMAS": "looked up tool details",
+        "COMPOSIO_SEARCH_TOOLS": "found the right tools",
+        "COMPOSIO_MANAGE_CONNECTIONS": "checked your integrations",
+        "COMPOSIO_MULTI_EXECUTE_TOOL": "executed some actions",
+        "COMPOSIO_GET_TOOL_SCHEMAS": "gathered tool details",
         "COMPOSIO_REMOTE_WORKBENCH": "ran some code",
         "COMPOSIO_REMOTE_BASH_TOOL": "ran a script",
     }
     steps = []
-    seen = set()
+    seen: set[str] = set()
     for tc in tool_calls:
         desc = tool_map.get(tc, tc.lower().replace("_", " "))
         if desc not in seen:
@@ -762,7 +808,14 @@ def _describe_progress(tool_calls: list[str]) -> str:
             seen.add(desc)
     if not steps:
         return "Still working on this..."
-    return f"Working on it — so far I've {', '.join(steps[:3])}. Almost there..."
+
+    prefix = "Working on it"
+    if turn >= 6:
+        prefix = "Still on it — this is a deep one"
+    elif turn >= 3:
+        prefix = "Making progress"
+
+    return f"{prefix} — so far I've {', '.join(steps[:4])}. Almost there..."
 
 
 # ── Singleton ───────────────────────────────────────────────────────────

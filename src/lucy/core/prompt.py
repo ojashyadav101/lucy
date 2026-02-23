@@ -81,6 +81,11 @@ async def build_system_prompt(
     if key_content:
         full_prompt += f"\n\n<knowledge>\n{key_content}\n</knowledge>"
 
+    from lucy.workspace.memory import get_session_context_for_prompt
+    session_ctx = await get_session_context_for_prompt(ws)
+    if session_ctx:
+        full_prompt += f"\n\n<session_memory>\n{session_ctx}\n</session_memory>"
+
     if connected_services:
         services_str = ", ".join(connected_services)
         env_block = (

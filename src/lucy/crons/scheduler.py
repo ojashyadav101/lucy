@@ -95,7 +95,8 @@ class CronScheduler:
                     )
 
             self._schedule_slack_sync(ws_id)
-            total_jobs += 1
+            self._schedule_memory_consolidation(ws_id)
+            total_jobs += 2
 
         self.scheduler.start()
         self._running = True
@@ -167,6 +168,48 @@ class CronScheduler:
                 ),
             })
         return jobs
+
+    def _schedule_memory_consolidation(self, workspace_id: str) -> None:
+        """Schedule periodic memory consolidation for a workspace.
+
+        Every 6 hours, promote session facts to permanent knowledge files.
+        """
+        job_id = f"{workspace_id}:_memory_consolidation"
+        try:
+            self.scheduler.add_job(
+                self._run_memory_consolidation,
+                trigger=CronTrigger.from_crontab("0 */6 * * *"),
+                args=[workspace_id],
+                id=job_id,
+                name=f"Memory consolidation ({workspace_id})",
+                replace_existing=True,
+            )
+            logger.info("memory_consolidation_cron_scheduled", workspace_id=workspace_id)
+        except Exception as e:
+            logger.error(
+                "memory_consolidation_cron_schedule_failed",
+                workspace_id=workspace_id,
+                error=str(e),
+            )
+
+    async def _run_memory_consolidation(self, workspace_id: str) -> None:
+        """Execute memory consolidation — session facts to permanent knowledge."""
+        ws = get_workspace(workspace_id)
+        try:
+            from lucy.workspace.memory import consolidate_session_to_knowledge
+            promoted = await consolidate_session_to_knowledge(ws)
+            if promoted > 0:
+                logger.info(
+                    "memory_consolidation_run",
+                    workspace_id=workspace_id,
+                    promoted=promoted,
+                )
+        except Exception as e:
+            logger.error(
+                "memory_consolidation_failed",
+                workspace_id=workspace_id,
+                error=str(e),
+            )
 
     def _schedule_slack_sync(self, workspace_id: str) -> None:
         """Register the lightweight Slack message sync cron for a workspace."""
