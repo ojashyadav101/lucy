@@ -10,6 +10,7 @@ Skills are plain markdown files with YAML frontmatter:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,57 @@ from lucy.workspace.filesystem import WorkspaceFS
 logger = structlog.get_logger()
 
 FRONTMATTER_DELIMITER = "---"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INTENT → SKILL MAPPING
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SKILL_TRIGGERS: dict[str, list[str]] = {
+    "pdf-creation": [
+        r"\bpdf\b", r"\breport\b", r"\bdocument\b", r"\binvoice\b",
+        r"\bgenerate.*(?:doc|file)\b",
+    ],
+    "excel-editing": [
+        r"\bexcel\b", r"\bxlsx?\b", r"\bspreadsheet\b",
+        r"\bworkbook\b", r"\bcsv.*format\b",
+    ],
+    "docx-editing": [
+        r"\bdocx?\b", r"\bword\s*(?:doc|file)?\b", r"\bproposal\b",
+        r"\bletter\b", r"\bmemo\b",
+    ],
+    "pptx-editing": [
+        r"\bpptx?\b", r"\bpowerpoint\b", r"\bslide\b", r"\bpresentation\b",
+        r"\bdeck\b", r"\bpitch\b",
+    ],
+    "browser": [
+        r"\bbrowse\b", r"\bscrape\b", r"\bwebsite\b", r"\bweb\s*page\b",
+        r"\bfill.*form\b", r"\bnavigate\b",
+    ],
+    "codebase-engineering": [
+        r"\bgit(?:hub)?\b", r"\bpull\s*request\b", r"\bPR\b", r"\bcommit\b",
+        r"\bbranch\b", r"\brepository\b", r"\brepo\b", r"\bcode\s*review\b",
+        r"\bmerge\b", r"\bdeploy\b",
+    ],
+    "scheduled-crons": [
+        r"\bschedule\b", r"\bcron\b", r"\brecurring\b", r"\bautomate\b",
+        r"\bevery\s*(?:day|week|hour|morning)\b",
+    ],
+    "integrations": [
+        r"\bintegrat(?:e|ion)\b", r"\bconnect\b", r"\bauthoriz\b",
+        r"\bOAuth\b",
+    ],
+    "slack-admin": [
+        r"\bchannel\b", r"\binvite\b", r"\bworkspace\b",
+        r"\bslack\s*(?:user|member)\b",
+    ],
+}
+
+_COMPILED_TRIGGERS: dict[str, list[re.Pattern[str]]] = {
+    skill: [re.compile(p, re.IGNORECASE) for p in patterns]
+    for skill, patterns in _SKILL_TRIGGERS.items()
+}
+
+_MAX_INJECTED_SKILLS = 3
 
 
 @dataclass
@@ -140,6 +192,88 @@ async def get_skill_descriptions_for_prompt(ws: WorkspaceFS) -> str:
         lines.append(f"- {skill.name}: {skill.description}")
 
     return "\n".join(lines)
+
+
+def detect_relevant_skills(message: str) -> list[str]:
+    """Detect which skills are relevant based on message content.
+
+    Returns up to _MAX_INJECTED_SKILLS skill names sorted by match count.
+    """
+    scores: dict[str, int] = {}
+
+    for skill_name, patterns in _COMPILED_TRIGGERS.items():
+        match_count = sum(1 for p in patterns if p.search(message))
+        if match_count > 0:
+            scores[skill_name] = match_count
+
+    ranked = sorted(scores.keys(), key=lambda s: scores[s], reverse=True)
+    selected = ranked[:_MAX_INJECTED_SKILLS]
+
+    if selected:
+        logger.debug(
+            "skills_detected",
+            skills=selected,
+            scores={s: scores[s] for s in selected},
+        )
+
+    return selected
+
+
+async def load_relevant_skill_content(
+    ws: WorkspaceFS,
+    message: str,
+) -> str:
+    """Detect and load full skill content relevant to the user's message.
+
+    Instead of the model only seeing one-line descriptions, it gets full
+    implementation details, code examples, and best practices for skills
+    that match the current request.
+    """
+    skill_names = detect_relevant_skills(message)
+    if not skill_names:
+        return ""
+
+    all_skills = await list_skills(ws)
+    name_to_path: dict[str, str] = {s.name: s.path for s in all_skills}
+
+    sections: list[str] = []
+    total_chars = 0
+    max_chars = 8000
+
+    for name in skill_names:
+        path = name_to_path.get(name)
+        if not path:
+            continue
+
+        content = await ws.read_file(path)
+        if not content:
+            continue
+
+        _, body = parse_frontmatter(content)
+        if not body.strip():
+            continue
+
+        if total_chars + len(body) > max_chars:
+            remaining = max_chars - total_chars
+            if remaining > 500:
+                body = body[:remaining] + "\n\n[... truncated for brevity]"
+            else:
+                break
+
+        sections.append(f"### Skill: {name}\n{body.strip()}")
+        total_chars += len(body)
+
+    if not sections:
+        return ""
+
+    result = "\n\n".join(sections)
+    logger.info(
+        "skill_content_loaded",
+        workspace_id=ws.workspace_id,
+        skills_loaded=[s for s in skill_names if s in name_to_path],
+        total_chars=total_chars,
+    )
+    return result
 
 
 async def get_key_skill_content(ws: WorkspaceFS) -> str:

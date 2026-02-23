@@ -55,13 +55,15 @@ class ComposioClient:
     (search results, connection state) is preserved across calls.
     """
 
+    _MAX_CACHED_SESSIONS = 200
+
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or settings.composio_api_key
         self._composio: Any = None
         self._session_cache: dict[str, tuple[datetime, Any]] = {}
         self._session_id_cache: dict[str, str] = {}
         self._tools_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
-        self._cache_ttl = timedelta(minutes=10)
+        self._cache_ttl = timedelta(minutes=30)
         self._toolkit_versions: dict[str, str] = {}
         self._cache_lock = asyncio.Lock()
         self._session_lock = threading.Lock()
@@ -79,16 +81,32 @@ class ComposioClient:
     def _get_session(self, workspace_id: str) -> Any:
         """Get or create a Composio session for a workspace.
 
-        Thread-safe: called from asyncio.to_thread contexts.
+        Thread-safe with double-checked locking. Includes LRU eviction
+        (max _MAX_CACHED_SESSIONS) and stale session auto-recovery.
         """
         if not self._composio:
             raise RuntimeError("Composio SDK not initialized")
 
+        now = datetime.now(timezone.utc)
+
+        cached = self._session_cache.get(workspace_id)
+        if cached and cached[0] > now:
+            return cached[1]
+
         with self._session_lock:
-            now = datetime.now(timezone.utc)
             cached = self._session_cache.get(workspace_id)
             if cached and cached[0] > now:
                 return cached[1]
+
+            if len(self._session_cache) >= self._MAX_CACHED_SESSIONS:
+                oldest_key = min(
+                    self._session_cache,
+                    key=lambda k: self._session_cache[k][0],
+                )
+                self._session_cache.pop(oldest_key, None)
+                self._session_id_cache.pop(oldest_key, None)
+                self._tools_cache.pop(oldest_key, None)
+                logger.debug("composio_lru_eviction", evicted=oldest_key)
 
             session = self._composio.create(user_id=workspace_id)
             self._session_cache[workspace_id] = (now + self._cache_ttl, session)
@@ -99,6 +117,21 @@ class ComposioClient:
 
         logger.debug("composio_session_created", workspace_id=workspace_id)
         return session
+
+    def _get_session_with_recovery(self, workspace_id: str) -> Any:
+        """Get session with auto-recovery on stale/expired sessions."""
+        try:
+            return self._get_session(workspace_id)
+        except Exception as e:
+            logger.warning(
+                "composio_session_stale_recovering",
+                workspace_id=workspace_id,
+                error=str(e),
+            )
+            with self._session_lock:
+                self._session_cache.pop(workspace_id, None)
+                self._session_id_cache.pop(workspace_id, None)
+            return self._get_session(workspace_id)
 
     async def get_tools(self, workspace_id: str) -> list[dict[str, Any]]:
         """Get the 5 meta-tool schemas for a workspace.
@@ -118,7 +151,7 @@ class ComposioClient:
 
         try:
             def _fetch() -> list:
-                session = self._get_session(workspace_id)
+                session = self._get_session_with_recovery(workspace_id)
                 return session.tools()
 
             tools = await asyncio.to_thread(_fetch)
@@ -170,7 +203,7 @@ class ComposioClient:
         async def _execute_with_retry() -> dict[str, Any]:
             try:
                 def _exec() -> Any:
-                    session = self._get_session(workspace_id)
+                    session = self._get_session_with_recovery(workspace_id)
                     if hasattr(session, "handle_tool_call"):
                         return session.handle_tool_call(
                             tool_name=tool_name, arguments=arguments
@@ -251,7 +284,7 @@ class ComposioClient:
 
         try:
             def _auth() -> str | None:
-                session = self._get_session(workspace_id)
+                session = self._get_session_with_recovery(workspace_id)
                 request = session.authorize(toolkit)
                 return (
                     getattr(request, "redirect_url", None)
@@ -282,7 +315,7 @@ class ComposioClient:
 
         try:
             def _fetch() -> list[dict[str, Any]]:
-                session = self._get_session(workspace_id)
+                session = self._get_session_with_recovery(workspace_id)
                 toolkits = session.toolkits()
                 items = getattr(toolkits, "items", [])
                 result: list[dict[str, Any]] = []

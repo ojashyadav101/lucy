@@ -11,7 +11,11 @@ from pathlib import Path
 import structlog
 
 from lucy.workspace.filesystem import WorkspaceFS
-from lucy.workspace.skills import get_key_skill_content, get_skill_descriptions_for_prompt
+from lucy.workspace.skills import (
+    get_key_skill_content,
+    get_skill_descriptions_for_prompt,
+    load_relevant_skill_content,
+)
 
 logger = structlog.get_logger()
 
@@ -40,6 +44,7 @@ def _load_template() -> str:
 async def build_system_prompt(
     ws: WorkspaceFS,
     connected_services: list[str] | None = None,
+    user_message: str | None = None,
 ) -> str:
     """Build the complete system prompt for a workspace.
 
@@ -47,8 +52,9 @@ async def build_system_prompt(
     1. SOUL.md — personality traits and voice
     2. SYSTEM_PROMPT.md — structured instructions with {available_skills} placeholder
     3. Dynamic skill descriptions from the workspace
-    4. Connected services environment block (runtime)
-    5. Team/company knowledge
+    4. Full content of skills relevant to the user's message
+    5. Connected services environment block (runtime)
+    6. Team/company knowledge
     """
     soul = _load_soul()
     template = _load_template()
@@ -58,6 +64,19 @@ async def build_system_prompt(
     prompt = template.replace("{available_skills}", skill_descriptions)
 
     full_prompt = f"{soul}\n\n---\n\n{prompt}"
+
+    relevant_skills = ""
+    if user_message:
+        relevant_skills = await load_relevant_skill_content(ws, user_message)
+        if relevant_skills:
+            full_prompt += (
+                "\n\n<relevant_skill_details>\n"
+                "The following skill details are relevant to the current request. "
+                "Use these implementation details, code patterns, and best practices "
+                "to deliver high-quality output.\n\n"
+                f"{relevant_skills}\n"
+                "</relevant_skill_details>"
+            )
 
     if key_content:
         full_prompt += f"\n\n<knowledge>\n{key_content}\n</knowledge>"
@@ -80,6 +99,7 @@ async def build_system_prompt(
         workspace_id=ws.workspace_id,
         prompt_length=len(full_prompt),
         connected_services=connected_services or [],
+        has_relevant_skills=bool(relevant_skills),
     )
     return full_prompt
 

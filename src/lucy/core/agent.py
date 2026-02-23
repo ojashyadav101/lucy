@@ -90,17 +90,28 @@ class LucyAgent:
         from lucy.core.router import classify_and_route
 
         thread_depth = 0
+        prev_had_tool_calls = False
         if ctx.thread_ts and ctx.channel_id and slack_client:
             try:
                 result = await slack_client.conversations_replies(
                     channel=ctx.channel_id, ts=ctx.thread_ts, limit=50,
                 )
-                thread_depth = len(result.get("messages", []))
+                thread_msgs = result.get("messages", [])
+                thread_depth = len(thread_msgs)
+                for msg in reversed(thread_msgs):
+                    if msg.get("bot_id") and msg.get("text", ""):
+                        bot_text = msg.get("text", "").lower()
+                        if any(kw in bot_text for kw in [
+                            "working on", "checking", "looking into",
+                            "i'll", "let me", "pulling", "found",
+                        ]):
+                            prev_had_tool_calls = True
+                        break
             except Exception:
                 pass
 
         async with trace.span("classify_route"):
-            route = classify_and_route(message, thread_depth)
+            route = classify_and_route(message, thread_depth, prev_had_tool_calls)
             model = model_override or route.model
             trace.model_used = model
             trace.intent = route.intent
@@ -135,7 +146,9 @@ class LucyAgent:
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
             system_prompt = await build_system_prompt(
-                ws, connected_services=connected_services,
+                ws,
+                connected_services=connected_services,
+                user_message=message,
             )
             utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             system_prompt += f"\n\n## Current Time\nUTC: {utc_now}\n"
@@ -312,7 +325,7 @@ class LucyAgent:
             )
 
             if (
-                turn >= 2
+                turn >= 1
                 and not progress_sent
                 and slack_client
                 and ctx.channel_id

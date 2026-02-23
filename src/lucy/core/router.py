@@ -26,7 +26,7 @@ MODEL_TIERS: dict[str, str] = {
 }
 
 _CODE_KEYWORDS = re.compile(
-    r"\b(code|build|deploy|script|function|debug|refactor|implement|"
+    r"\b(code|deploy|script|function|debug|refactor|implement|"
     r"write a? ?program|create a? ?app|lambda|api endpoint|pull request|"
     r"regex|algorithm|class|module|package|dockerfile|ci/cd|pipeline)\b",
     re.IGNORECASE,
@@ -50,6 +50,16 @@ _SIMPLE_QUESTION = re.compile(
     re.IGNORECASE,
 )
 
+_ACTION_VERBS = re.compile(
+    r"\b(do|send|run|execute|delete|cancel|merge|deploy|schedule|create|update|remove)\b",
+    re.IGNORECASE,
+)
+
+_CHECK_PATTERNS = re.compile(
+    r"\b(check|verify|look|find|search|pull|get|fetch|show|list)\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ModelChoice:
@@ -58,38 +68,72 @@ class ModelChoice:
     tier: str
 
 
-def classify_and_route(message: str, thread_depth: int = 0) -> ModelChoice:
+def classify_and_route(
+    message: str,
+    thread_depth: int = 0,
+    prev_had_tool_calls: bool = False,
+) -> ModelChoice:
     """Classify message intent and select the best model.
 
     Runs in <1ms — no LLM calls, pure regex + heuristics.
+
+    Args:
+        message: The user's message text
+        thread_depth: How deep in a thread this message is
+        prev_had_tool_calls: Whether the previous assistant message in
+            this thread contained tool calls / active work indicators.
     """
     text = message.strip()
 
-    # 1. Greetings, confirmations, very short messages
+    # 1. Pure greetings/acknowledgments
     if _GREETING_PATTERNS.match(text):
+        if prev_had_tool_calls:
+            return ModelChoice(
+                intent="confirmation",
+                model=MODEL_TIERS["default"],
+                tier="default",
+            )
         return ModelChoice(
             intent="chat",
             model=MODEL_TIERS["fast"],
             tier="fast",
         )
 
-    # 2. Short follow-ups deep in a thread
+    # 2. Short messages deep in threads
     if thread_depth > 5 and len(text) < 50:
+        if prev_had_tool_calls:
+            return ModelChoice(
+                intent="followup",
+                model=MODEL_TIERS["default"],
+                tier="default",
+            )
+        if _ACTION_VERBS.search(text):
+            return ModelChoice(
+                intent="command",
+                model=MODEL_TIERS["default"],
+                tier="default",
+            )
         return ModelChoice(
             intent="followup",
             model=MODEL_TIERS["fast"],
             tier="fast",
         )
 
-    # 3. Coding tasks
+    # 3. Coding tasks (removed "build" — "build me a report" is not code)
     if _CODE_KEYWORDS.search(text):
+        if _RESEARCH_KEYWORDS.search(text) and len(text) > 80:
+            return ModelChoice(
+                intent="code_reasoning",
+                model=MODEL_TIERS["frontier"],
+                tier="frontier",
+            )
         return ModelChoice(
             intent="code",
             model=MODEL_TIERS["code"],
             tier="code",
         )
 
-    # 4. Deep research / analysis (longer message + research keywords)
+    # 4. Deep research / analysis
     if _RESEARCH_KEYWORDS.search(text) and len(text) > 60:
         return ModelChoice(
             intent="reasoning",
@@ -97,15 +141,24 @@ def classify_and_route(message: str, thread_depth: int = 0) -> ModelChoice:
             tier="frontier",
         )
 
-    # 5. Simple lookups — short questions with no action verb
-    if len(text) < 40 and _SIMPLE_QUESTION.match(text):
+    # 5. Short check/verify requests — need tool calls, not fast tier
+    if len(text) < 60 and _CHECK_PATTERNS.search(text):
         return ModelChoice(
-            intent="lookup",
-            model=MODEL_TIERS["fast"],
-            tier="fast",
+            intent="tool_use",
+            model=MODEL_TIERS["default"],
+            tier="default",
         )
 
-    # 6. Default — tool-calling, general tasks
+    # 6. Simple lookups — truly simple questions only
+    if len(text) < 40 and _SIMPLE_QUESTION.match(text):
+        if not _CHECK_PATTERNS.search(text):
+            return ModelChoice(
+                intent="lookup",
+                model=MODEL_TIERS["fast"],
+                tier="fast",
+            )
+
+    # 7. Default — tool-calling, general tasks
     return ModelChoice(
         intent="tool_use",
         model=MODEL_TIERS["default"],
