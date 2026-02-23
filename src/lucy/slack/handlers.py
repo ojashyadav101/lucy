@@ -27,6 +27,9 @@ EVENT_DEDUP_TTL = 30.0
 _agent_semaphore: asyncio.Semaphore | None = None
 MAX_CONCURRENT_AGENTS = 10
 
+# Request queue (initialized lazily on first message)
+_request_queue_started = False
+
 
 def _get_dedup_lock() -> asyncio.Lock:
     """Lazily create the dedup lock inside the running event loop."""
@@ -314,6 +317,35 @@ async def _handle_message(
 
     from lucy.core.trace import Trace
     trace = Trace.current()
+
+    # ── Route through priority queue if available ─────────────────────
+    from lucy.core.request_queue import (
+        Priority,
+        classify_priority,
+        get_request_queue,
+    )
+    from lucy.core.router import classify_and_route
+
+    route = classify_and_route(text)
+    priority = classify_priority(text, route.tier)
+
+    # If queue is busy and this is a HIGH priority request, tell the user
+    queue = get_request_queue()
+    if queue.is_busy and priority == Priority.LOW:
+        logger.info(
+            "backpressure_signaled",
+            workspace_id=workspace_id,
+            queue_size=queue.metrics["queue_size"],
+        )
+        if client and channel_id and event_ts:
+            try:
+                await client.reactions_add(
+                    channel=channel_id,
+                    name="hourglass_flowing_sand",
+                    timestamp=event_ts,
+                )
+            except Exception:
+                pass
 
     try:
         from lucy.core.agent import AgentContext, get_agent
