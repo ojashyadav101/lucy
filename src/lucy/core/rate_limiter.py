@@ -244,7 +244,10 @@ class RateLimiter:
         name_lower = tool_name.lower()
         actions = params.get("actions", [])
 
-        # Check Composio multi-execute actions
+        # Check tool name directly (covers single-tool calls)
+        all_names = [name_lower]
+
+        # Also check Composio multi-execute actions
         for action in actions:
             action_name = ""
             if isinstance(action, str):
@@ -254,25 +257,25 @@ class RateLimiter:
                     action.get("action", "") or action.get("tool", "")
                 ).lower()
 
-            if not action_name:
-                continue
+            if action_name:
+                all_names.append(action_name)
 
-            # Map action prefixes to APIs
-            if "googlecalendar" in action_name or "google_calendar" in action_name or "gcal" in action_name:
+        for candidate in all_names:
+            if "googlecalendar" in candidate or "google_calendar" in candidate or "gcal" in candidate:
                 return "google_calendar"
-            if "googlesheets" in action_name or "google_sheets" in action_name or "gsheet" in action_name:
+            if "googlesheets" in candidate or "google_sheets" in candidate or "gsheet" in candidate:
                 return "google_sheets"
-            if "googledrive" in action_name or "google_drive" in action_name or "gdrive" in action_name:
+            if "googledrive" in candidate or "google_drive" in candidate or "gdrive" in candidate:
                 return "google_drive"
-            if "gmail" in action_name:
+            if "gmail" in candidate:
                 return "gmail"
-            if "github" in action_name:
+            if "github" in candidate:
                 return "github"
-            if "linear" in action_name:
+            if "linear" in candidate:
                 return "linear"
-            if "slack" in action_name:
+            if "slack" in candidate and "lucy_" not in candidate:
                 return "slack"
-            if "clickup" in action_name:
+            if "clickup" in candidate:
                 return "clickup"
 
         return None

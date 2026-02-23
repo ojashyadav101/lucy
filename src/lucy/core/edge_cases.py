@@ -38,8 +38,9 @@ _STATUS_PATTERNS = re.compile(
 
 _TASK_REFERENCE_PATTERNS = re.compile(
     r"(?i)\b(?:"
-    r"(?:cancel|stop|abort|kill|nevermind|never mind) (?:that|it|the (?:task|research|analysis))"
-    r"|(?:don't|dont) (?:bother|worry about)"
+    r"(?:cancel|stop|abort|kill) (?:that|it|the (?:task|research|analysis))"
+    r"|(?:nevermind|never\s*mind)"
+    r"|(?:don'?t|dont) (?:bother|worry about)"
     r"|(?:scratch|forget) (?:that|it)"
     r")\b"
 )

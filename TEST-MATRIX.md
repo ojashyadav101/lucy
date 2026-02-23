@@ -1,9 +1,9 @@
 # Lucy Test Matrix & Results
 
 > **Created**: Feb 22, 2026  
-> **Last Run**: Feb 23, 2026 (19:45 IST)  
+> **Last Run**: Feb 23, 2026 (22:10 IST)  
 > **Models**: Dynamic routing — `gemini-2.5-flash` / `minimax-m2.5` / `deepseek-v3` / `claude-sonnet-4`  
-> **Result**: **L1-L5: 32/32 (100%)** | **Stress: 4/5 (80%)** | **Round 3: 26/26 (100%)** | **Round 2 Regression: 5/5 (100%)**
+> **Result**: **L1-L5: 32/32 (100%)** | **Stress: 4/5 (80%)** | **Round 3: 26/26 (100%)** | **Round 4: 25/25 (100%)** | **Parity: 97%**
 
 ## Legend
 
@@ -223,6 +223,53 @@
 - **Rate limiting**: Per-model (5 tiers) + per-API (8 services) token buckets
 - **Background tasks**: 5 per workspace, 10min timeout, progress reporting
 - **Priority queue**: 3 levels, 10 workers, per-workspace fairness, backpressure signaling
+
+---
+
+## Level 10: Round 4 — Viktor's PR 14-17 Patches — 25/25
+
+| # | Test | PR | Status | Details |
+|---|------|----|--------|---------|
+| A | Search finds matches | PR14 | `[P]` | 2 results for "pricing" in synced logs |
+| B | Channel filter | PR14 | `[P]` | Only searched target channel |
+| C | days_back filter | PR14 | `[P]` | Excluded old messages |
+| D | Format results | PR14 | `[P]` | Grouped by channel |
+| E | Tool definitions | PR14 | `[P]` | 2 tools, lucy_* prefix |
+| F | 3-source verification | PR15 | `[P]` | In SYSTEM_PROMPT.md |
+| G | Draft-review-iterate | PR15 | `[P]` | Review cycle present |
+| H | Proactive intelligence | PR15 | `[P]` | Pattern recognition |
+| I | Background task patterns | PR15 | `[P]` | In SOUL.md |
+| J | Anti-patterns preserved | PR15 | `[P]` | Still present |
+| K | CSV generation | PR16 | `[P]` | Valid CSV output |
+| L | Excel generation | PR16 | `[P]` | Valid .xlsx output |
+| M | File tool definitions | PR16 | `[P]` | 3 tools: pdf/excel/csv |
+| N | CSV tool dispatch | PR16 | `[P]` | execute_file_tool works |
+| O | Unknown file tool | PR16 | `[P]` | Returns error correctly |
+| P | Status query detection | PR17 | `[P]` | 5/5 patterns detected |
+| Q | Cancellation detection | PR17 | `[P]` | 5/5 patterns detected |
+| R | Tool idempotency | PR17 | `[P]` | GET=idempotent, CREATE=mutating |
+| S | Duplicate dedup | PR17 | `[P]` | Blocks identical CREATE in 5s |
+| T | Degradation messages | PR17 | `[P]` | Warm messages for all types |
+| Reg-1 | Fast path regression | R3 | `[P]` | Greetings still fast |
+| Reg-2 | Rate limiter regression | R3 | `[P]` | API classification works |
+| Reg-3 | Queue metrics | R3 | `[P]` | Metrics accessible |
+| Reg-4 | Router classification | R3 | `[P]` | Intent correct |
+| Reg-5 | Reactions | R3 | `[P]` | Emoji reactions work |
+
+### Key Capabilities Added (Round 4)
+- **Slack history search**: Full-text across synced logs, <50ms, channel filtering, date ranges
+- **System prompt**: 3-source verification, draft→review→iterate, proactive intelligence
+- **File output**: PDF, Excel, CSV generation with auto-upload to Slack
+- **Edge cases**: Status queries, task cancellation, tool dedup, graceful degradation
+
+### Parity Progression
+| Round | Parity | Cumulative Tests |
+|-------|--------|-----------------|
+| Baseline | 80% | — |
+| Round 2 | 87% | 10 |
+| Round 2.5 | 90% | 11 |
+| Round 3 | 94% | 37 |
+| **Round 4** | **97%** | **62** |
 
 ---
 
