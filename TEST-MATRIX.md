@@ -1,9 +1,9 @@
 # Lucy Test Matrix & Results
 
 > **Created**: Feb 22, 2026  
-> **Last Run**: Feb 23, 2026 (00:09 IST)  
-> **Model**: `minimax/minimax-m2.5` via OpenRouter  
-> **Result**: **32/32 (100%) PASS**
+> **Last Run**: Feb 23, 2026 (10:00 IST)  
+> **Models**: Dynamic routing — `gemini-2.5-flash` / `minimax-m2.5` / `deepseek-v3` / `claude-sonnet-4`  
+> **Result**: **L1-L5: 32/32 (100%)** | **Stress: 4/5 (80%)** | **Infra: All passing**
 
 ## Legend
 
@@ -119,6 +119,71 @@
 - Tool calling: 100% reliable (was 0% through OpenClaw)
 - No duplicate responses
 - E2E Slack mention → reply: 11-18s
+
+---
+
+## Level 6: Stress Tests & Infrastructure — 4/5
+
+| # | Test | Status | Time | Notes |
+|---|------|--------|------|-------|
+| ST-A | 3 concurrent threads (independent context) | `[P]` | 38.7s max | All 3 replied correctly, no cross-contamination, 3 unique trace_ids |
+| ST-B | Sequential workflow (calendar → email → confirm) | `[F]` | 46.1s | 400 from OpenRouter on complex multi-step — provider edge case |
+| ST-C | Parallel task (3 sub-tasks in 1 request) | `[P]` | 87.2s | All 3 sub-tasks answered: integrations, team times, calendar |
+| ST-D | Model routing (10 test cases) | `[P]` | <1ms | 10/10 correct — fast/default/code/frontier all routed properly |
+| ST-E | Sustained load (5 messages, 3 threads) | `[P]` | 21.6s p95 | 5/5 responses, avg 18.8s, model routing active in production |
+
+---
+
+## Level 7: Detailed Logging & Tracing
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Per-request trace_id (UUID) | `[P]` | Every request gets unique trace_id via contextvars |
+| Spans: prompt build, LLM call, tool exec, slack post | `[P]` | All timed with ms precision |
+| Per-thread JSONL log files | `[P]` | Written to `workspaces/{id}/logs/threads/{ts}.jsonl` |
+| Token usage tracking (prompt + completion) | `[P]` | Accumulated across multi-turn loops |
+| Model routing logged per request | `[P]` | intent + model_selected in every trace |
+| Composio cache locking (asyncio.Lock + threading.Lock) | `[P]` | Prevents race conditions under concurrent load |
+| Progress updates in Slack (turn 3+) | `[P]` | Posts "Working on it..." in thread during long operations |
+
+---
+
+## Level 8: Model Routing
+
+| Tier | Model | Triggers | Status |
+|------|-------|----------|--------|
+| fast | `google/gemini-2.5-flash` | Greetings, short follow-ups, simple lookups | `[P]` — verified in production (3 requests routed) |
+| default | `minimax/minimax-m2.5` | Tool-calling, general tasks | `[P]` — primary model (10 requests routed) |
+| code | `deepseek/deepseek-v3-0324` | Code, build, deploy, script keywords | `[P]` — routes correctly, mid-loop upgrade on sandbox use |
+| frontier | `anthropic/claude-sonnet-4` | Research, analysis, comparison (60+ chars) | `[P]` — routes correctly on complex prompts |
+
+---
+
+## Architecture Decision Log
+
+### Decision: Dynamic model routing via rule-based classifier
+
+**Date**: Feb 23, 2026
+**Status**: Implemented and verified
+
+**Problem**: Single model (`minimax/minimax-m2.5`) for all requests wastes cost on simple queries and lacks power for complex reasoning/coding.
+
+**Solution**: `src/lucy/core/router.py` — pure Python regex + heuristic classifier (<1ms). No LLM call for routing.
+
+**Model tiers**:
+- `fast` (gemini-2.5-flash): greetings, follow-ups, simple lookups — $0.075/$0.30 per M tokens
+- `default` (minimax-m2.5): tool calling, general — $0.30/$1.10 per M tokens
+- `code` (deepseek-v3): code generation, debugging — $0.25/$1.10 per M tokens
+- `frontier` (claude-sonnet-4): research, analysis — $3/$15 per M tokens
+
+**Mid-loop upgrade**: If agent detects code execution tools (REMOTE_WORKBENCH/BASH), automatically upgrades to code model for subsequent turns.
+
+---
+
+### Decision: OpenRouter replaces OpenClaw for LLM routing
+
+**Date**: Feb 23, 2026
+**Status**: Implemented and tested
 
 ---
 

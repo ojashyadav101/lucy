@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Any
 
 import structlog
 from slack_bolt.async_app import AsyncAck, AsyncApp, AsyncBoltContext, AsyncSay
 
 logger = structlog.get_logger()
+
+_processed_events: dict[str, float] = {}
+EVENT_DEDUP_TTL = 30.0
 
 
 def register_handlers(app: AsyncApp) -> None:
@@ -84,6 +88,9 @@ def register_handlers(app: AsyncApp) -> None:
         event_ts = event.get("ts")
 
         if not text.strip():
+            return
+
+        if bot_user_id and re.search(rf"<@{bot_user_id}>", text):
             return
 
         # DMs: always respond
@@ -197,6 +204,19 @@ async def _handle_message(
     context: AsyncBoltContext,
 ) -> None:
     """Handle a user message: add reaction, run agent, post response."""
+    global _processed_events
+
+    if event_ts:
+        now = time.monotonic()
+        if event_ts in _processed_events:
+            logger.debug("event_dedup_skip", event_ts=event_ts)
+            return
+        _processed_events[event_ts] = now
+        _processed_events = {
+            k: v for k, v in _processed_events.items()
+            if now - v < EVENT_DEDUP_TTL
+        }
+
     workspace_id = context.get("workspace_id")
     if not workspace_id:
         team_id = context.get("team_id")
@@ -215,6 +235,9 @@ async def _handle_message(
     if client and channel_id and event_ts:
         asyncio.create_task(_add_reaction(client, channel_id, event_ts))
 
+    from lucy.core.trace import Trace
+    trace = Trace.current()
+
     try:
         from lucy.core.agent import AgentContext, get_agent
 
@@ -225,32 +248,97 @@ async def _handle_message(
             thread_ts=thread_ts,
         )
 
-        response_text = await agent.run(
-            message=text,
-            ctx=ctx,
-            slack_client=client,
+        response_text = await _run_with_recovery(
+            agent, text, ctx, client, workspace_id,
         )
 
-        slack_text = _to_slack_mrkdwn(response_text)
-        await say(text=slack_text, thread_ts=thread_ts)
+        from lucy.core.output import process_output
+        slack_text = process_output(response_text)
+
+        if trace:
+            async with trace.span("slack_post"):
+                await say(text=slack_text, thread_ts=thread_ts)
+        else:
+            await say(text=slack_text, thread_ts=thread_ts)
 
     except Exception as e:
         logger.error(
-            "agent_run_failed",
+            "agent_run_failed_all_retries",
             workspace_id=workspace_id,
             error=str(e),
             exc_info=True,
         )
-        await say(
-            text="Something went wrong while processing your request. Please try again.",
-            thread_ts=thread_ts,
+        fallback = (
+            "I'm pulling together some details on that — "
+            "give me a moment and I'll follow up right here."
         )
+        await say(text=fallback, thread_ts=thread_ts)
 
     finally:
         if client and channel_id and event_ts:
             asyncio.create_task(
                 _remove_reaction(client, channel_id, event_ts)
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SILENT RECOVERY CASCADE
+# ═══════════════════════════════════════════════════════════════════════
+
+async def _run_with_recovery(
+    agent: Any,
+    text: str,
+    ctx: Any,
+    slack_client: Any,
+    workspace_id: str,
+) -> str:
+    """Run agent with silent retry cascade. Never surface raw errors."""
+    from lucy.core.openclaw import OpenClawError
+
+    # Attempt 1: normal run
+    try:
+        return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
+    except OpenClawError as e:
+        logger.warning(
+            "agent_attempt_1_failed",
+            status_code=e.status_code,
+            workspace_id=workspace_id,
+        )
+    except Exception as e:
+        logger.warning("agent_attempt_1_error", error=str(e), workspace_id=workspace_id)
+
+    # Attempt 2: wait briefly and retry
+    await asyncio.sleep(2)
+    try:
+        return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
+    except OpenClawError as e:
+        logger.warning(
+            "agent_attempt_2_failed",
+            status_code=e.status_code,
+            workspace_id=workspace_id,
+        )
+    except Exception as e:
+        logger.warning("agent_attempt_2_error", error=str(e), workspace_id=workspace_id)
+
+    # Attempt 3: downgrade to fast model with simplified prompt
+    try:
+        from lucy.core.router import MODEL_TIERS
+        fast_model = MODEL_TIERS.get("fast", "google/gemini-2.5-flash")
+        ctx_simple = type(ctx)(
+            workspace_id=ctx.workspace_id,
+            channel_id=ctx.channel_id,
+            thread_ts=ctx.thread_ts,
+        )
+        return await agent.run(
+            message=text,
+            ctx=ctx_simple,
+            slack_client=slack_client,
+            model_override=fast_model,
+        )
+    except Exception as e:
+        logger.warning("agent_attempt_3_error", error=str(e), workspace_id=workspace_id)
+
+    raise RuntimeError("All recovery attempts exhausted")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -263,12 +351,104 @@ def _clean_mention(text: str) -> str:
 
 
 def _to_slack_mrkdwn(text: str) -> str:
-    """Convert common Markdown to Slack mrkdwn."""
-    converted = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    """Convert Markdown to Slack mrkdwn with table→list conversion."""
+    converted = text
+
+    # Convert Markdown tables to bullet lists
+    converted = _convert_tables_to_lists(converted)
+
+    # **bold** → *bold* (Slack uses single asterisks)
+    converted = re.sub(r"\*\*(.+?)\*\*", r"*\1*", converted)
+
+    # ### Heading → *Heading* (bold, with newline)
+    converted = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", converted, flags=re.MULTILINE)
+
+    # [text](url) → <url|text>
     converted = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", converted
     )
-    return converted
+
+    # Strip internal paths that might leak through
+    converted = re.sub(r"/home/user/[^\s)\"']+", "[internal]", converted)
+    converted = re.sub(r"workspace_seeds/[^\s)\"']+", "[internal]", converted)
+    converted = re.sub(r"workspaces/[^\s)\"']+", "[internal]", converted)
+
+    # Strip COMPOSIO_ tool names that might leak
+    converted = re.sub(
+        r"COMPOSIO_[A-Z_]+",
+        lambda m: _humanize_tool_name(m.group(0)),
+        converted,
+    )
+
+    # Clean up excessive blank lines
+    converted = re.sub(r"\n{3,}", "\n\n", converted)
+
+    return converted.strip()
+
+
+def _convert_tables_to_lists(text: str) -> str:
+    """Convert Markdown pipe tables into Slack-friendly bullet lists."""
+    lines = text.split("\n")
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if "|" in line and line.startswith("|"):
+            table_lines = []
+            while i < len(lines) and "|" in lines[i].strip() and lines[i].strip().startswith("|"):
+                table_lines.append(lines[i].strip())
+                i += 1
+            result.extend(_table_to_bullets(table_lines))
+        else:
+            result.append(lines[i])
+            i += 1
+    return "\n".join(result)
+
+
+def _table_to_bullets(table_lines: list[str]) -> list[str]:
+    """Convert parsed table lines into bullet list."""
+    rows: list[list[str]] = []
+    for line in table_lines:
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        cells = [c for c in cells if c]
+        if cells and not all(c.replace("-", "").replace(":", "").strip() == "" for c in cells):
+            rows.append(cells)
+
+    if len(rows) < 2:
+        return table_lines
+
+    headers = rows[0]
+    data_rows = rows[1:]
+    bullets: list[str] = []
+
+    for row in data_rows:
+        if len(headers) >= 2 and len(row) >= 2:
+            label = row[0]
+            details = " — ".join(
+                f"{headers[j]}: {row[j]}" for j in range(1, min(len(headers), len(row)))
+                if row[j].strip()
+            )
+            if details:
+                bullets.append(f"• *{label}* — {details}")
+            else:
+                bullets.append(f"• *{label}*")
+        else:
+            bullets.append(f"• {' | '.join(row)}")
+
+    return [""] + bullets + [""]
+
+
+def _humanize_tool_name(name: str) -> str:
+    """Convert internal tool names to human-readable descriptions."""
+    mapping = {
+        "COMPOSIO_SEARCH_TOOLS": "tool search",
+        "COMPOSIO_MANAGE_CONNECTIONS": "connection manager",
+        "COMPOSIO_MULTI_EXECUTE_TOOL": "action runner",
+        "COMPOSIO_REMOTE_WORKBENCH": "code runner",
+        "COMPOSIO_REMOTE_BASH_TOOL": "script runner",
+        "COMPOSIO_GET_TOOL_SCHEMAS": "tool lookup",
+    }
+    return mapping.get(name, "internal tool")
 
 
 async def _add_reaction(

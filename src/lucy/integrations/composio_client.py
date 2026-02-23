@@ -16,6 +16,7 @@ Execution flows through the session object so meta-tools share context
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -62,6 +63,8 @@ class ComposioClient:
         self._tools_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
         self._cache_ttl = timedelta(minutes=10)
         self._toolkit_versions: dict[str, str] = {}
+        self._cache_lock = asyncio.Lock()
+        self._session_lock = threading.Lock()
         self._init_sdk()
 
     def _init_sdk(self) -> None:
@@ -74,21 +77,25 @@ class ComposioClient:
             self._composio = None
 
     def _get_session(self, workspace_id: str) -> Any:
-        """Get or create a Composio session for a workspace."""
+        """Get or create a Composio session for a workspace.
+
+        Thread-safe: called from asyncio.to_thread contexts.
+        """
         if not self._composio:
             raise RuntimeError("Composio SDK not initialized")
 
-        now = datetime.now(timezone.utc)
-        cached = self._session_cache.get(workspace_id)
-        if cached and cached[0] > now:
-            return cached[1]
+        with self._session_lock:
+            now = datetime.now(timezone.utc)
+            cached = self._session_cache.get(workspace_id)
+            if cached and cached[0] > now:
+                return cached[1]
 
-        session = self._composio.create(user_id=workspace_id)
-        self._session_cache[workspace_id] = (now + self._cache_ttl, session)
+            session = self._composio.create(user_id=workspace_id)
+            self._session_cache[workspace_id] = (now + self._cache_ttl, session)
 
-        session_id = getattr(session, "id", None) or getattr(session, "session_id", None)
-        if session_id:
-            self._session_id_cache[workspace_id] = str(session_id)
+            session_id = getattr(session, "id", None) or getattr(session, "session_id", None)
+            if session_id:
+                self._session_id_cache[workspace_id] = str(session_id)
 
         logger.debug("composio_session_created", workspace_id=workspace_id)
         return session
@@ -103,9 +110,11 @@ class ComposioClient:
             return []
 
         now = datetime.now(timezone.utc)
-        cached = self._tools_cache.get(workspace_id)
-        if cached and cached[0] > now:
-            return cached[1]
+
+        async with self._cache_lock:
+            cached = self._tools_cache.get(workspace_id)
+            if cached and cached[0] > now:
+                return cached[1]
 
         try:
             def _fetch() -> list:
@@ -123,7 +132,9 @@ class ComposioClient:
                 elif hasattr(t, "__dict__"):
                     tool_list.append(vars(t))
 
-            self._tools_cache[workspace_id] = (now + self._cache_ttl, tool_list)
+            async with self._cache_lock:
+                self._tools_cache[workspace_id] = (now + self._cache_ttl, tool_list)
+
             logger.info(
                 "composio_meta_tools_fetched",
                 workspace_id=workspace_id,
@@ -290,6 +301,11 @@ class ComposioClient:
         except Exception as e:
             logger.warning("composio_get_apps_failed", error=str(e))
             return []
+
+    async def get_connected_app_names(self, workspace_id: str) -> list[str]:
+        """Return just the names of actively connected apps."""
+        apps = await self.get_connected_apps(workspace_id)
+        return [a["name"] for a in apps if a.get("connected")]
 
     def invalidate_cache(self, workspace_id: str | None = None) -> None:
         """Clear cached sessions and tools for a workspace (or all)."""

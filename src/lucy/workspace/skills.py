@@ -129,19 +129,33 @@ async def write_skill(
 async def get_skill_descriptions_for_prompt(ws: WorkspaceFS) -> str:
     """Format all skill descriptions for injection into the system prompt.
 
-    Returns a string like:
-        - skills/browser: Browse websites and scrape data. Use when interacting with websites.
-        - skills/integrations/linear: Linear project management. Use when creating issues.
-        - company: Company profile and context.
-        - team: Team member profiles.
+    Returns skill names and descriptions (no internal paths exposed).
     """
     skills = await list_skills(ws)
     if not skills:
-        return "(No skills loaded yet — workspace is brand new)"
+        return "(No skills loaded yet)"
 
     lines: list[str] = []
-    for skill in sorted(skills, key=lambda s: s.path):
-        display_path = skill.path.replace("/SKILL.md", "")
-        lines.append(f"- {display_path}: {skill.description}")
+    for skill in sorted(skills, key=lambda s: s.name):
+        lines.append(f"- {skill.name}: {skill.description}")
 
     return "\n".join(lines)
+
+
+async def get_key_skill_content(ws: WorkspaceFS) -> str:
+    """Load full content of team and company skills for direct prompt injection.
+
+    These are small, frequently-needed files that the model should always
+    have access to without needing to make tool calls.
+    """
+    sections: list[str] = []
+
+    for subdir, label in [("team", "Team Directory"), ("company", "Company Info")]:
+        skill_path = f"{subdir}/SKILL.md"
+        content = await ws.read_file(skill_path)
+        if content:
+            _, body = parse_frontmatter(content)
+            if body.strip():
+                sections.append(f"### {label}\n{body.strip()}")
+
+    return "\n\n".join(sections) if sections else ""

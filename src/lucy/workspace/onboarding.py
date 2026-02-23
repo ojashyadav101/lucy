@@ -61,8 +61,8 @@ async def onboard_workspace(
     if slack_client:
         await _profile_team(ws, slack_client)
 
-    # Step 5: Create stub company/SKILL.md
-    await _create_company_stub(ws)
+    # Step 5: Create company/SKILL.md (enriched from Slack metadata if available)
+    await _create_company_profile(ws, slack_client)
 
     # Step 6: Update state
     await ws.update_state({
@@ -182,31 +182,90 @@ working hours, communication styles, and areas of responsibility.
     await ws.write_file("team/SKILL.md", content)
 
 
+async def _create_company_profile(
+    ws: WorkspaceFS,
+    slack_client: object | None = None,
+) -> None:
+    """Create company/SKILL.md enriched from Slack workspace metadata."""
+    team_name = ""
+    team_domain = ""
+    channels: list[str] = []
+
+    if slack_client:
+        try:
+            info = await slack_client.team_info()  # type: ignore[attr-defined]
+            team = info.get("team", {})
+            team_name = team.get("name", "")
+            team_domain = team.get("domain", "")
+        except Exception as e:
+            logger.debug("team_info_fetch_failed", error=str(e))
+
+        try:
+            ch_result = await slack_client.conversations_list(  # type: ignore[attr-defined]
+                types="public_channel", limit=50,
+            )
+            for ch in ch_result.get("channels", []):
+                name = ch.get("name", "")
+                purpose = ch.get("purpose", {}).get("value", "")
+                if name and not name.startswith("general"):
+                    label = f"{name}" + (f" — {purpose}" if purpose else "")
+                    channels.append(label)
+        except Exception as e:
+            logger.debug("channels_fetch_failed", error=str(e))
+
+    lines = [
+        "---",
+        "name: company",
+        "description: Company profile, products, and organizational context. Use when you need company-specific context.",
+        "---",
+        "",
+        "# Company Profile",
+        "",
+    ]
+
+    if team_name:
+        lines.append(f"**Name:** {team_name}")
+    if team_domain:
+        lines.append(f"**Slack domain:** {team_domain}.slack.com")
+    if not team_name:
+        lines.append("(Lucy will populate this as she learns about the organization.)")
+
+    lines.extend(["", "## Channels (inferred context)", ""])
+    if channels:
+        for ch in channels[:15]:
+            lines.append(f"- #{ch}")
+        lines.append("")
+        lines.append("Use channel names and descriptions to infer what the team works on.")
+    else:
+        lines.append("- (Will be discovered from Slack)")
+
+    lines.extend([
+        "",
+        "## Products / Services",
+        "",
+        "- (To be discovered from conversations)",
+        "",
+        "## Key Context",
+        "",
+        "- (To be discovered from conversations)",
+        "",
+        "## Culture & Norms",
+        "",
+        "- (To be discovered from conversations)",
+    ])
+
+    await ws.write_file("company/SKILL.md", "\n".join(lines))
+    logger.info(
+        "company_profile_created",
+        workspace_id=ws.workspace_id,
+        team_name=team_name or "(unknown)",
+        channel_count=len(channels),
+    )
+
+
 async def _create_company_stub(ws: WorkspaceFS) -> None:
-    """Create a placeholder company/SKILL.md."""
-    content = """\
----
-name: company
-description: Company profile, products, and organizational context. Use when you need company-specific context.
----
-
-# Company Profile
-
-(Lucy will update this as she learns about the organization.)
-
-## Products / Services
-
-- (To be discovered)
-
-## Key Context
-
-- (To be discovered)
-
-## Culture & Norms
-
-- (To be discovered)
-"""
-    await ws.write_file("company/SKILL.md", content)
+    """Create a placeholder company/SKILL.md (legacy fallback)."""
+    await _create_company_profile(ws, slack_client=None)
 
 
 async def ensure_workspace(

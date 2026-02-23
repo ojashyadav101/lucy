@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     openclaw_model: str = "minimax/minimax-m2.5"
     openclaw_read_timeout: float = 120.0
 
+    # Model tiers for dynamic routing
+    model_tier_fast: str = "google/gemini-2.5-flash"
+    model_tier_default: str = "minimax/minimax-m2.5"
+    model_tier_code: str = "deepseek/deepseek-v3-0324"
+    model_tier_frontier: str = "anthropic/claude-sonnet-4"
+
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)
     openclaw_base_url: str = "http://167.86.82.46:18791"
     openclaw_api_key: str = ""

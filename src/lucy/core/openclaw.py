@@ -13,16 +13,33 @@ Primary model: minimax/minimax-m2.5
 from __future__ import annotations
 
 import json as _json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import certifi
 import httpx
 import structlog
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from lucy.config import settings
 
 logger = structlog.get_logger()
+
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    if isinstance(exc, OpenClawError) and exc.status_code in _RETRYABLE_STATUS_CODES:
+        return True
+    if isinstance(exc, httpx.ReadTimeout | httpx.ConnectTimeout | httpx.PoolTimeout):
+        return True
+    return False
 
 
 @dataclass
@@ -154,53 +171,74 @@ class OpenClawClient:
             tool_count=len(config.tools) if config.tools else 0,
         )
 
-        try:
-            response = await self._client.post(
-                "/chat/completions", json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+        @retry(
+            retry=retry_if_exception(_is_retryable_llm_error),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=4),
+            reraise=True,
+        )
+        async def _do_request() -> OpenClawResponse:
+            try:
+                t0 = time.monotonic()
+                response = await self._client.post(
+                    "/chat/completions", json=payload,
+                )
+                llm_ms = round((time.monotonic() - t0) * 1000)
+                response.raise_for_status()
+                data = response.json()
 
-            choices = data.get("choices", [])
-            content = ""
-            tool_calls = None
+                choices = data.get("choices", [])
+                content = ""
+                tool_calls = None
 
-            if choices:
-                message = choices[0].get("message", {})
-                content = message.get("content") or ""
-                raw_tool_calls = message.get("tool_calls")
-                if raw_tool_calls:
-                    tool_calls = self._parse_tool_calls(raw_tool_calls)
+                if choices:
+                    message = choices[0].get("message", {})
+                    content = message.get("content") or ""
+                    raw_tool_calls = message.get("tool_calls")
+                    if raw_tool_calls:
+                        tool_calls = self._parse_tool_calls(raw_tool_calls)
 
-            result = OpenClawResponse(
-                content=content,
-                tool_calls=tool_calls,
-                usage=data.get("usage"),
-            )
+                result = OpenClawResponse(
+                    content=content,
+                    tool_calls=tool_calls,
+                    usage=data.get("usage"),
+                )
 
-            logger.info(
-                "chat_completion_success",
-                content_length=len(result.content),
-                has_tool_calls=bool(result.tool_calls),
-                tool_call_count=(
-                    len(result.tool_calls) if result.tool_calls else 0
-                ),
-            )
-            return result
+                logger.info(
+                    "chat_completion_success",
+                    model=model,
+                    llm_ms=llm_ms,
+                    content_length=len(result.content),
+                    has_tool_calls=bool(result.tool_calls),
+                    tool_call_count=(
+                        len(result.tool_calls) if result.tool_calls else 0
+                    ),
+                    prompt_tokens=result.usage.get("prompt_tokens") if result.usage else None,
+                    completion_tokens=result.usage.get("completion_tokens") if result.usage else None,
+                )
+                return result
 
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "chat_completion_failed",
-                status_code=e.response.status_code,
-                response=e.response.text[:500],
-            )
-            raise OpenClawError(
-                f"Chat completion failed: {e.response.status_code}",
-                status_code=e.response.status_code,
-            )
-        except Exception as e:
-            logger.error("chat_completion_error", error=str(e))
-            raise OpenClawError(f"Chat completion error: {e}")
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                logger.error(
+                    "chat_completion_failed",
+                    status_code=status,
+                    response=e.response.text[:500],
+                )
+                raise OpenClawError(
+                    f"Chat completion failed: {status}",
+                    status_code=status,
+                )
+            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+                logger.warning("chat_completion_timeout", error=str(e))
+                raise
+            except OpenClawError:
+                raise
+            except Exception as e:
+                logger.error("chat_completion_error", error=str(e))
+                raise OpenClawError(f"Chat completion error: {e}")
+
+        return await _do_request()
 
     @staticmethod
     def _parse_tool_calls(

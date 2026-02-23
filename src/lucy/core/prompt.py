@@ -11,7 +11,7 @@ from pathlib import Path
 import structlog
 
 from lucy.workspace.filesystem import WorkspaceFS
-from lucy.workspace.skills import get_skill_descriptions_for_prompt
+from lucy.workspace.skills import get_key_skill_content, get_skill_descriptions_for_prompt
 
 logger = structlog.get_logger()
 
@@ -19,64 +19,70 @@ _ASSETS_DIR = Path(__file__).parent.parent.parent.parent / "assets"
 _SOUL_PATH = _ASSETS_DIR / "SOUL.md"
 _PROMPT_TEMPLATE_PATH = _ASSETS_DIR / "SYSTEM_PROMPT.md"
 
-_soul_cache: str | None = None
-_template_cache: str | None = None
-
-
 def _load_soul() -> str:
-    global _soul_cache
-    if _soul_cache is None:
-        if _SOUL_PATH.exists():
-            _soul_cache = _SOUL_PATH.read_text(encoding="utf-8")
-        else:
-            _soul_cache = (
-                "You are Lucy, an AI coworker. Direct, helpful, gets things done. "
-                "Lives in Slack with access to tools and integrations."
-            )
-    return _soul_cache
+    if _SOUL_PATH.exists():
+        return _SOUL_PATH.read_text(encoding="utf-8")
+    return (
+        "You are Lucy, an AI coworker. Direct, helpful, gets things done. "
+        "Lives in Slack with access to tools and integrations."
+    )
 
 
 def _load_template() -> str:
-    global _template_cache
-    if _template_cache is None:
-        if _PROMPT_TEMPLATE_PATH.exists():
-            _template_cache = _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
-        else:
-            _template_cache = (
-                "You are Lucy, an AI coworker in Slack.\n\n"
-                "<available_skills>\n{available_skills}\n</available_skills>"
-            )
-    return _template_cache
+    if _PROMPT_TEMPLATE_PATH.exists():
+        return _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    return (
+        "You are Lucy, an AI coworker in Slack.\n\n"
+        "<available_skills>\n{available_skills}\n</available_skills>"
+    )
 
 
-async def build_system_prompt(ws: WorkspaceFS) -> str:
+async def build_system_prompt(
+    ws: WorkspaceFS,
+    connected_services: list[str] | None = None,
+) -> str:
     """Build the complete system prompt for a workspace.
 
     Combines:
     1. SOUL.md — personality traits and voice
     2. SYSTEM_PROMPT.md — structured instructions with {available_skills} placeholder
     3. Dynamic skill descriptions from the workspace
+    4. Connected services environment block (runtime)
+    5. Team/company knowledge
     """
     soul = _load_soul()
     template = _load_template()
     skill_descriptions = await get_skill_descriptions_for_prompt(ws)
+    key_content = await get_key_skill_content(ws)
 
     prompt = template.replace("{available_skills}", skill_descriptions)
 
-    # Prepend soul as personality context
     full_prompt = f"{soul}\n\n---\n\n{prompt}"
+
+    if key_content:
+        full_prompt += f"\n\n<knowledge>\n{key_content}\n</knowledge>"
+
+    if connected_services:
+        services_str = ", ".join(connected_services)
+        env_block = (
+            "\n\n<current_environment>\n"
+            "You are communicating via: Slack (already connected and authenticated)\n"
+            f"Connected integrations: {services_str}\n"
+            f"DO NOT ask users to connect any of these — they are already active.\n"
+            "You are ON Slack — never suggest 'connecting to Slack'.\n"
+            "When a user asks what integrations are available, list ONLY these.\n"
+            "</current_environment>"
+        )
+        full_prompt += env_block
 
     logger.debug(
         "system_prompt_built",
         workspace_id=ws.workspace_id,
         prompt_length=len(full_prompt),
-        skill_count=skill_descriptions.count("\n- ") + (1 if skill_descriptions.startswith("- ") else 0),
+        connected_services=connected_services or [],
     )
     return full_prompt
 
 
 def reset_caches() -> None:
-    """Clear cached files (useful for testing or hot-reload)."""
-    global _soul_cache, _template_cache
-    _soul_cache = None
-    _template_cache = None
+    """No-op. Prompt files are re-read on every call now."""
