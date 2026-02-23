@@ -84,6 +84,10 @@ class LucyAgent:
         model_override: str | None = None,
     ) -> str:
         """Run the full agent loop and return the final response text."""
+        self._current_slack_client = slack_client
+        self._current_channel_id = ctx.channel_id
+        self._current_thread_ts = ctx.thread_ts
+
         trace = Trace.start()
         trace.user_message = message
 
@@ -144,9 +148,12 @@ class LucyAgent:
                 tools_coro, connections_coro,
             )
 
-            # Inject internal tools (Slack history search)
+            # Inject internal tools (Slack history search + file generation)
             from lucy.workspace.history_search import get_history_tool_definitions
             tools.extend(get_history_tool_definitions())
+
+            from lucy.tools.file_generator import get_file_tool_definitions
+            tools.extend(get_file_tool_definitions())
 
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
@@ -679,6 +686,16 @@ class LucyAgent:
                 from lucy.workspace.history_search import execute_history_tool
                 result_text = await execute_history_tool(ws, tool_name, parameters)
                 return {"result": result_text}
+
+            if tool_name.startswith("lucy_generate_"):
+                from lucy.tools.file_generator import execute_file_tool
+                return await execute_file_tool(
+                    tool_name=tool_name,
+                    parameters=parameters,
+                    slack_client=self._current_slack_client,
+                    channel_id=self._current_channel_id,
+                    thread_ts=self._current_thread_ts,
+                )
 
             logger.warning("unknown_internal_tool", tool=tool_name)
             return {"error": f"Unknown internal tool: {tool_name}"}
