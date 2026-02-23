@@ -32,10 +32,18 @@ class Settings(BaseSettings):
     slack_app_token: str = ""
     slack_signing_secret: str = ""
 
-    # OpenClaw Gateway
+    # LLM via OpenRouter (all requests go through OpenRouter)
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openclaw_model: str = "minimax/minimax-m2.5"
+    openclaw_read_timeout: float = 120.0
+
+    # OpenClaw Gateway (available for sandbox/memory, not used for chat)
     openclaw_base_url: str = "http://167.86.82.46:18791"
     openclaw_api_key: str = ""
-    openclaw_model: str = "kimi"
+
+    # CamoFox browser
+    camofox_url: str = "http://localhost:9377"
 
     # Database
     database_url: str = "postgresql+asyncpg://lucy:lucy@localhost:5432/lucy"
@@ -55,9 +63,14 @@ class Settings(BaseSettings):
         keys = _load_keys_json()
 
         if not self.openclaw_api_key:
-            oc_key = keys.get("openclaw_lucy", {}).get("api_key")
+            oc_key = keys.get("openclaw_lucy", {}).get("gateway_token")
             if oc_key:
                 self.openclaw_api_key = oc_key
+
+        if not self.openrouter_api_key:
+            or_key = keys.get("openclaw_lucy", {}).get("openrouter_api_key")
+            if or_key:
+                self.openrouter_api_key = or_key
 
         if not self.composio_api_key:
             comp_key = keys.get("composio", {}).get("api_key")

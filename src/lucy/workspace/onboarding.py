@@ -32,6 +32,7 @@ async def onboard_workspace(
     3. Profile team members (if Slack client available)
     4. Stub company/SKILL.md
     5. Set up default cron placeholders
+    6. Reload cron scheduler for this workspace
 
     Returns the initialized WorkspaceFS.
     """
@@ -46,14 +47,14 @@ async def onboard_workspace(
     # Step 1: Create directory structure
     await ws.ensure_structure()
 
-    # Step 2: Copy platform skills
+    # Step 2: Copy platform skills into skills/ subdirectory
     skills_dir = _SEEDS_DIR / "skills"
-    skill_count = await ws.copy_seeds(skills_dir)
+    skill_count = await ws.copy_seeds(skills_dir, target_subdir="skills")
     logger.info("skills_seeded", workspace_id=workspace_id, count=skill_count)
 
-    # Step 3: Copy default cron definitions
+    # Step 3: Copy default cron definitions into crons/ subdirectory
     crons_dir = _SEEDS_DIR / "crons"
-    cron_count = await ws.copy_seeds(crons_dir)
+    cron_count = await ws.copy_seeds(crons_dir, target_subdir="crons")
     logger.info("crons_seeded", workspace_id=workspace_id, count=cron_count)
 
     # Step 4: Profile team members from Slack
@@ -70,6 +71,20 @@ async def onboard_workspace(
         "status": "onboarded",
     })
 
+    # Step 7: Reload cron scheduler so new crons are picked up immediately
+    try:
+        from lucy.crons.scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        loaded = await scheduler.reload_workspace(workspace_id)
+        logger.info(
+            "onboarding_crons_loaded",
+            workspace_id=workspace_id,
+            count=loaded,
+        )
+    except Exception as e:
+        logger.warning("onboarding_cron_reload_failed", error=str(e))
+
     logger.info(
         "onboarding_complete",
         workspace_id=workspace_id,
@@ -80,7 +95,7 @@ async def onboard_workspace(
 
 
 async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:
-    """Fetch team members from Slack and create team/SKILL.md."""
+    """Fetch team members from Slack and create team/SKILL.md with timezone data."""
     try:
         result = await slack_client.users_list()  # type: ignore[attr-defined]
         members = result.get("members", [])
@@ -88,13 +103,13 @@ async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:
         lines = [
             "---",
             "name: team",
-            "description: Team member profiles and roles. Use when personalizing responses or reaching out to individuals.",
+            "description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.",
             "---",
             "",
             "# Team Members",
             "",
-            "| Name | Display Name | Email | Title | Timezone |",
-            "| ---- | ------------ | ----- | ----- | -------- |",
+            "| Name | Display Name | Email | Title | Slack ID | Timezone | TZ Offset (s) |",
+            "| ---- | ------------ | ----- | ----- | -------- | -------- | -------------- |",
         ]
 
         for member in members:
@@ -105,10 +120,22 @@ async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:
             display = profile.get("display_name", "")
             email = profile.get("email", "")
             title = profile.get("title", "")
+            slack_id = member.get("id", "")
             tz = member.get("tz", "")
-            lines.append(f"| {name} | {display} | {email} | {title} | {tz} |")
+            tz_offset = member.get("tz_offset", "")
+            lines.append(
+                f"| {name} | {display} | {email} | {title} "
+                f"| {slack_id} | {tz} | {tz_offset} |"
+            )
 
         lines.extend([
+            "",
+            "## Timezone Notes",
+            "",
+            "- `Timezone` is the IANA identifier (e.g. `America/New_York`)",
+            "- `TZ Offset` is seconds from UTC (changes with DST — refresh periodically)",
+            "- To compute a user's local time: `UTC + tz_offset`",
+            "- Don't cache tz_offset for long periods — Slack updates it silently for DST",
             "",
             "## Notes",
             "",
@@ -120,7 +147,9 @@ async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:
         logger.info(
             "team_profiled",
             workspace_id=ws.workspace_id,
-            member_count=len([m for m in members if not m.get("is_bot") and not m.get("deleted")]),
+            member_count=len(
+                [m for m in members if not m.get("is_bot") and not m.get("deleted")]
+            ),
         )
 
     except Exception as e:
@@ -133,12 +162,17 @@ async def _create_team_stub(ws: WorkspaceFS) -> None:
     content = """\
 ---
 name: team
-description: Team member profiles and roles. Use when personalizing responses or reaching out to individuals.
+description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.
 ---
 
 # Team Members
 
 (Not yet profiled — Lucy will populate this after connecting to Slack.)
+
+## Timezone Notes
+
+- Timezone data will be populated from Slack user profiles
+- Each user has: tz (IANA identifier), tz_offset (seconds from UTC)
 
 ## Notes
 

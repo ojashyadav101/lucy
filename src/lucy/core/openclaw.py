@@ -1,16 +1,22 @@
-"""OpenClaw HTTP client for Lucy.
+"""LLM client for Lucy.
 
-Connects to the OpenClaw gateway on your VPS (167.86.82.46:18791)
-and provides methods for chat completions and memory access.
+Routes all requests through OpenRouter (openrouter.ai/api/v1).
+OpenClaw stripped tool parameters, so we bypass it entirely.
+OpenRouter provides OpenAI-compatible tool calling across 224+ models.
+
+Primary model: minimax/minimax-m2.5
+- Native interleaved thinking between tool calls
+- #1 on OpenRouter for programming/technology
+- $0.30/$1.10 per M tokens, 197K context
 """
 
 from __future__ import annotations
 
-import asyncio
+import json as _json
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
-from uuid import UUID
+from typing import Any
 
+import certifi
 import httpx
 import structlog
 
@@ -21,9 +27,9 @@ logger = structlog.get_logger()
 
 @dataclass
 class ChatConfig:
-    """Configuration for an OpenClaw chat completion."""
+    """Configuration for a chat completion."""
 
-    model: str = "kimi"
+    model: str = ""
     temperature: float = 0.7
     max_tokens: int = 4096
     system_prompt: str | None = None
@@ -32,7 +38,7 @@ class ChatConfig:
 
 @dataclass
 class OpenClawResponse:
-    """Response from OpenClaw chat completion."""
+    """Response from chat completion."""
 
     content: str
     tool_calls: list[dict[str, Any]] | None = None
@@ -42,7 +48,7 @@ class OpenClawResponse:
 
 
 class OpenClawError(Exception):
-    """OpenClaw API error."""
+    """LLM API error."""
 
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -50,210 +56,215 @@ class OpenClawError(Exception):
 
 
 class OpenClawClient:
-    """HTTP client for OpenClaw gateway using OpenAI-compatible endpoints."""
+    """HTTP client for LLM via OpenRouter.
 
-    def __init__(self, base_url: str | None = None, api_key: str | None = None):
-        """Initialize client."""
-        self.base_url = (base_url or settings.openclaw_base_url).rstrip("/")
-        self.api_key = api_key or settings.openclaw_api_key
-        
+    Named OpenClawClient for backward compatibility with imports.
+    All requests route through OpenRouter for reliable tool calling.
+    """
+
+    def __init__(self) -> None:
+        api_key = settings.openrouter_api_key
+        if not api_key:
+            raise RuntimeError(
+                "LUCY_OPENROUTER_API_KEY not set. "
+                "Add openrouter_api_key to keys.json under openclaw_lucy."
+            )
+
         self._client = httpx.AsyncClient(
-            base_url=self.base_url,
+            base_url=settings.openrouter_base_url,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "X-Title": "Lucy AI Agent",
             },
-            timeout=httpx.Timeout(15.0, connect=5.0, read=30.0, write=5.0),
+            verify=certifi.where(),
+            timeout=httpx.Timeout(
+                connect=5.0,
+                read=settings.openclaw_read_timeout,
+                write=5.0,
+                pool=15.0,
+            ),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
-        
+
         logger.info(
-            "openclaw_client_initialized",
-            base_url=self.base_url,
+            "llm_client_initialized",
+            base_url=settings.openrouter_base_url,
+            model=settings.openclaw_model,
         )
 
     async def close(self) -> None:
-        """Close HTTP client."""
         await self._client.aclose()
-        logger.info("openclaw_client_closed")
+        logger.info("llm_client_closed")
 
     async def health_check(self) -> dict[str, Any]:
-        """Check OpenClaw gateway health."""
+        """Quick model check via OpenRouter."""
         try:
-            # The root path / returns the control UI HTML, which means the server is up.
-            response = await self._client.get("/")
-            response.raise_for_status()
-            return {"status": "ok", "message": "Gateway is reachable"}
-        except httpx.HTTPStatusError as e:
-            logger.error(
-                "health_check_failed",
-                status_code=e.response.status_code,
-                error=str(e),
+            resp = await self._client.post(
+                "/chat/completions",
+                json={
+                    "model": settings.openclaw_model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 3,
+                },
             )
-            raise OpenClawError(
-                f"Health check failed: {e.response.status_code}",
-                status_code=e.response.status_code,
-            )
+            resp.raise_for_status()
+            return {"status": "ok", "model": settings.openclaw_model}
         except Exception as e:
-            logger.error("health_check_error", error=str(e))
             raise OpenClawError(f"Health check error: {e}")
 
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
         config: ChatConfig | None = None,
-        workspace_id: UUID | None = None,
-        user_id: UUID | None = None,
+        workspace_id: str | None = None,
+        user_id: str | None = None,
     ) -> OpenClawResponse:
-        """Send a chat completion request to OpenClaw.
-
-        Args:
-            messages: List of message dicts (role, content)
-            config: Chat configuration
-            workspace_id: Optional workspace ID for context tracking
-            user_id: Optional user ID for context tracking
-
-        Returns:
-            OpenClawResponse with content and metadata.
-        """
         config = config or ChatConfig()
-        
-        # Prepare messages array. Ensure system prompt is first if provided.
-        final_messages = []
+        model = config.model or settings.openclaw_model
+
+        final_messages: list[dict[str, Any]] = []
         if config.system_prompt:
-            final_messages.append({"role": "system", "content": config.system_prompt})
+            final_messages.append(
+                {"role": "system", "content": config.system_prompt}
+            )
         else:
-            soul = self._load_soul()
+            soul = load_soul()
             if soul:
                 final_messages.append({"role": "system", "content": soul})
-                
+
         final_messages.extend(messages)
-        
-        payload = {
-            "model": config.model,
+
+        payload: dict[str, Any] = {
+            "model": model,
             "messages": final_messages,
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
         }
-        
-        # Include tools if provided (OpenAI-compatible function calling)
+
         if config.tools:
             payload["tools"] = config.tools
-            # Explicitly tell the model it can use tools
             payload["tool_choice"] = "auto"
-        
-        # Optionally pass metadata in headers if OpenClaw supports it
-        headers = {}
-        if workspace_id:
-            headers["x-workspace-id"] = str(workspace_id)
-        if user_id:
-            headers["x-user-id"] = str(user_id)
-            
+
+        logger.info(
+            "chat_completion_request",
+            model=model,
+            message_count=len(final_messages),
+            has_tools=bool(config.tools),
+            tool_count=len(config.tools) if config.tools else 0,
+        )
+
         try:
-            logger.info(
-                "chat_completion_request",
-                model=config.model,
-                message_count=len(final_messages),
-                has_tools=bool(config.tools),
-                tool_count=len(config.tools) if config.tools else 0,
-            )
-            
             response = await self._client.post(
-                "/v1/chat/completions",
-                json=payload,
-                headers=headers
+                "/chat/completions", json=payload,
             )
             response.raise_for_status()
             data = response.json()
-            
-            # OpenAI response format
+
             choices = data.get("choices", [])
             content = ""
             tool_calls = None
-            
+
             if choices:
                 message = choices[0].get("message", {})
-                content = message.get("content", "")
-                # Extract tool calls from response
+                content = message.get("content") or ""
                 raw_tool_calls = message.get("tool_calls")
                 if raw_tool_calls:
-                    import json
-                    tool_calls = []
-                    for tc in raw_tool_calls:
-                        args = tc.get("function", {}).get("arguments", "{}")
-                        parse_error = None
-                        # Parse JSON string arguments if needed
-                        if isinstance(args, str):
-                            try:
-                                args = json.loads(args)
-                            except json.JSONDecodeError:
-                                parse_error = "invalid_json_arguments"
-                                args = {}
-                        tool_calls.append({
-                            "id": tc.get("id"),
-                            "name": tc.get("function", {}).get("name"),
-                            "parameters": args,
-                            "parse_error": parse_error,
-                        })
-            
-            usage = data.get("usage")
-            
+                    tool_calls = self._parse_tool_calls(raw_tool_calls)
+
             result = OpenClawResponse(
                 content=content,
                 tool_calls=tool_calls,
-                usage=usage,
+                usage=data.get("usage"),
             )
-            
+
             logger.info(
                 "chat_completion_success",
                 content_length=len(result.content),
                 has_tool_calls=bool(result.tool_calls),
-                tool_call_count=len(result.tool_calls) if result.tool_calls else 0,
+                tool_call_count=(
+                    len(result.tool_calls) if result.tool_calls else 0
+                ),
             )
-            
             return result
-            
+
         except httpx.HTTPStatusError as e:
             logger.error(
                 "chat_completion_failed",
                 status_code=e.response.status_code,
-                response=e.response.text,
+                response=e.response.text[:500],
             )
             raise OpenClawError(
-                f"Failed chat completion: {e.response.status_code} - {e.response.text}",
+                f"Chat completion failed: {e.response.status_code}",
                 status_code=e.response.status_code,
             )
         except Exception as e:
             logger.error("chat_completion_error", error=str(e))
             raise OpenClawError(f"Chat completion error: {e}")
 
+    @staticmethod
+    def _parse_tool_calls(
+        raw_tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """Parse OpenAI-format tool calls into our internal format."""
+        parsed = []
+        for tc in raw_tool_calls:
+            fn = tc.get("function")
+            if not fn or not isinstance(fn, dict):
+                continue
+            fn_name = fn.get("name")
+            if not fn_name:
+                continue
+
+            args = fn.get("arguments", "{}")
+            parse_error = None
+            if isinstance(args, str):
+                try:
+                    args = _json.loads(args)
+                except _json.JSONDecodeError:
+                    parse_error = "invalid_json_arguments"
+                    args = {}
+            elif not isinstance(args, dict):
+                parse_error = "unexpected_arguments_type"
+                args = {}
+
+            parsed.append({
+                "id": tc.get("id"),
+                "name": fn_name,
+                "parameters": args,
+                "parse_error": parse_error,
+            })
+        return parsed or None
+
     def _load_soul(self) -> str:
-        """Load SOUL.md for system prompt."""
         return load_soul()
 
 
 def load_soul() -> str:
-    """Load SOUL.md system prompt (standalone function)."""
+    """Load SOUL.md system prompt."""
     try:
         import pathlib
-        # Path: src/lucy/core/openclaw.py -> project root -> assets/SOUL.md
-        soul_path = pathlib.Path(__file__).parent.parent.parent.parent / "assets" / "SOUL.md"
+
+        soul_path = (
+            pathlib.Path(__file__).parent.parent.parent.parent
+            / "assets"
+            / "SOUL.md"
+        )
         if soul_path.exists():
             return soul_path.read_text()
     except Exception as e:
         logger.warning("failed_to_load_soul", error=str(e))
     return (
-        "You are Lucy, an AI coworker. You are direct, helpful, and get things done. "
-        "You work inside Slack and have access to various tools and integrations."
+        "You are Lucy, an AI coworker. You are direct, helpful, "
+        "and get things done. You work inside Slack and have access "
+        "to various tools and integrations."
     )
 
 
-# Singleton instance for application use
 _client: OpenClawClient | None = None
 
 
 async def get_openclaw_client() -> OpenClawClient:
-    """Get or create singleton OpenClaw client."""
     global _client
     if _client is None:
         _client = OpenClawClient()
@@ -261,7 +272,6 @@ async def get_openclaw_client() -> OpenClawClient:
 
 
 async def close_openclaw_client() -> None:
-    """Close singleton OpenClaw client."""
     global _client
     if _client is not None:
         await _client.close()

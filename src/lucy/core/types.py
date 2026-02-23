@@ -1,23 +1,19 @@
-"""Shared types for the Lucy core module.
-
-Kept in a separate file to avoid circular imports between agent.py and memory/sync.py.
-"""
+"""Shared types for the Lucy core module."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from uuid import UUID
-
-from lucy.db.models import Task, Workspace, User
 
 
 @dataclass
-class TaskContext:
-    """Context for executing a task."""
+class AgentContext:
+    """Lightweight context for an agent run.
 
-    task: Task
-    workspace: Workspace
-    requester: User | None
-    session_id: str | None = None
-    slack_channel_id: str | None = None
-    slack_thread_ts: str | None = None
+    Re-exported from agent.py for convenience. Use the one in agent.py
+    as the canonical definition.
+    """
+
+    workspace_id: str
+    channel_id: str | None = None
+    thread_ts: str | None = None
+    user_name: str | None = None

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lucy"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI coworker for Slack — proactive, skill-driven, built on OpenClaw"
 requires-python = ">=3.12"
 dependencies = [
@@ -41,6 +41,9 @@ dependencies = [
     "apscheduler>=3.10,<4",
     "croniter>=6.0,<7",
     "python-dateutil>=2.9,<3",
+
+    # SSL
+    "certifi",
 ]
 
 [project.optional-dependencies]

@@ -23,5 +23,18 @@ services:
       timeout: 5s
       retries: 5
 
+  camofox:
+    image: ghcr.io/redf0x1/camofox-browser:latest
+    container_name: lucy-camofox
+    ports:
+      - "9377:9377"
+    environment:
+      - PORT=9377
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+
 volumes:
   postgres_data:

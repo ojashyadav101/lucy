@@ -155,8 +155,15 @@ class WorkspaceFS:
                 })
         return results
 
-    async def copy_seeds(self, seeds_dir: Path) -> int:
+    async def copy_seeds(
+        self, seeds_dir: Path, target_subdir: str = "",
+    ) -> int:
         """Copy seed files into the workspace, preserving directory structure.
+
+        Args:
+            seeds_dir: Source directory containing seed files.
+            target_subdir: Subdirectory within workspace to copy into
+                           (e.g. "skills", "crons"). Empty string means root.
 
         Returns the number of files copied.
         """
@@ -164,11 +171,12 @@ class WorkspaceFS:
             logger.warning("seeds_dir_not_found", path=str(seeds_dir))
             return 0
 
+        dest_base = self.root / target_subdir if target_subdir else self.root
         count = 0
         for src_file in seeds_dir.rglob("*"):
             if src_file.is_file() and src_file.name != ".gitkeep":
                 rel = src_file.relative_to(seeds_dir)
-                dest = self.root / rel
+                dest = dest_base / rel
                 if not dest.exists():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src_file, dest)
@@ -179,6 +187,7 @@ class WorkspaceFS:
             workspace_id=self.workspace_id,
             count=count,
             source=str(seeds_dir),
+            target=target_subdir or "(root)",
         )
         return count
 
