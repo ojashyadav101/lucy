@@ -379,6 +379,42 @@ async def _handle_message(
             thread_ts=thread_ts,
         )
 
+        # ── Check if this should run as a background task ───────────
+        from lucy.core.router import classify_and_route
+        from lucy.core.task_manager import (
+            get_task_manager,
+            should_run_as_background_task,
+        )
+
+        route = classify_and_route(text)
+
+        if should_run_as_background_task(text, route.tier):
+            task_mgr = get_task_manager()
+
+            async def _bg_handler() -> str:
+                sem = _get_agent_semaphore()
+                async with sem:
+                    return await _run_with_recovery(
+                        agent, text, ctx, client, workspace_id,
+                    )
+
+            try:
+                await task_mgr.start_task(
+                    workspace_id=workspace_id,
+                    channel_id=channel_id or "",
+                    thread_ts=thread_ts or "",
+                    description=text[:100],
+                    handler=_bg_handler,
+                    slack_client=client,
+                )
+                # Task acknowledged — don't post response here,
+                # the task will post its own result when done
+                return
+            except RuntimeError as e:
+                # Too many background tasks — fall through to sync
+                logger.warning("background_task_limit", error=str(e))
+
+        # ── Normal synchronous path ───────────────────────────────────
         sem = _get_agent_semaphore()
         async with sem:
             response_text = await _run_with_recovery(

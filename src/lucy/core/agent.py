@@ -36,6 +36,7 @@ from lucy.core.trace import Trace
 logger = structlog.get_logger()
 
 MAX_TOOL_TURNS = 12
+MAX_TOOL_TURNS_FRONTIER = 20  # Deep research gets more room
 MAX_CONTEXT_MESSAGES = 40
 TOOL_RESULT_MAX_CHARS = 12_000
 TOOL_RESULT_SUMMARY_THRESHOLD = 4_000
@@ -261,7 +262,11 @@ class LucyAgent:
 
         current_model = model
 
-        for turn in range(MAX_TOOL_TURNS):
+        # Frontier tasks get more turns for deep research
+        is_frontier = "frontier" in (model or "")
+        max_turns = MAX_TOOL_TURNS_FRONTIER if is_frontier else MAX_TOOL_TURNS
+
+        for turn in range(max_turns):
             config = ChatConfig(
                 model=current_model,
                 system_prompt=system_prompt,
