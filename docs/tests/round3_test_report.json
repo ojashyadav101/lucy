@@ -1,0 +1,210 @@
+[
+  {
+    "id": "PR10-01",
+    "name": "Queue module imports",
+    "pr": "PR10",
+    "status": "PASS",
+    "ms": 219.8,
+    "details": "RequestQueue, Priority, classify_priority, get_request_queue"
+  },
+  {
+    "id": "PR10-02",
+    "name": "3 priority levels (HIGH/NORMAL/LOW)",
+    "pr": "PR10",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "HIGH=True, NORMAL=True, LOW=True"
+  },
+  {
+    "id": "PR10-03",
+    "name": "Priority classification correct",
+    "pr": "PR10",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "fast\u2192HIGH, default\u2192NORMAL, frontier\u2192LOW"
+  },
+  {
+    "id": "PR10-04",
+    "name": "Queue has metrics + backpressure",
+    "pr": "PR10",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "metrics=True, is_busy=True"
+  },
+  {
+    "id": "PR10-05",
+    "name": "Enqueue accepts requests",
+    "pr": "PR10",
+    "status": "PASS",
+    "ms": 0.1,
+    "details": "enqueued=True, queue_size=1"
+  },
+  {
+    "id": "PR11-01",
+    "name": "Fast path module imports",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.7,
+    "details": "FastPathResult, evaluate_fast_path"
+  },
+  {
+    "id": "PR11-02",
+    "name": "Greetings trigger fast path",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.1,
+    "details": "5/5 greetings detected"
+  },
+  {
+    "id": "PR11-03",
+    "name": "Complex queries skip fast path",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "4/4 correctly skipped"
+  },
+  {
+    "id": "PR11-04",
+    "name": "In-thread messages skip fast path",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "is_fast=False, reason=in_thread"
+  },
+  {
+    "id": "PR11-05",
+    "name": "Status checks get fast response",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "response='Online and ready. What's up?'"
+  },
+  {
+    "id": "PR11-06",
+    "name": "Help request gets capabilities overview",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "has_capabilities=True"
+  },
+  {
+    "id": "PR11-07",
+    "name": "Fast path latency <1ms (avg 0.010ms)",
+    "pr": "PR11",
+    "status": "PASS",
+    "ms": 1.0,
+    "details": "100 evaluations in 1.0ms"
+  },
+  {
+    "id": "PR12-01",
+    "name": "Rate limiter module imports",
+    "pr": "PR12",
+    "status": "PASS",
+    "ms": 3.1,
+    "details": "RateLimiter, TokenBucket, get_rate_limiter"
+  },
+  {
+    "id": "PR12-02",
+    "name": "Model rate limit acquire works",
+    "pr": "PR12",
+    "status": "PASS",
+    "ms": 0.4,
+    "details": "google/gemini acquired=True"
+  },
+  {
+    "id": "PR12-03",
+    "name": "API rate limit acquire works",
+    "pr": "PR12",
+    "status": "PASS",
+    "ms": 0.2,
+    "details": "google_calendar acquired=True"
+  },
+  {
+    "id": "PR12-04",
+    "name": "classify_api_from_tool detects API",
+    "pr": "PR12",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "detected=google_calendar"
+  },
+  {
+    "id": "PR12-05",
+    "name": "Token bucket enforces capacity",
+    "pr": "PR12",
+    "status": "PASS",
+    "ms": 0.2,
+    "details": "3 acquired, 4th rejected=True"
+  },
+  {
+    "id": "PR13-01",
+    "name": "Task manager module imports",
+    "pr": "PR13",
+    "status": "PASS",
+    "ms": 1.0,
+    "details": "TaskManager, TaskState, BackgroundTask, should_run_as_background_task"
+  },
+  {
+    "id": "PR13-02",
+    "name": "6 task states defined",
+    "pr": "PR13",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "states=['pending', 'acknowledged', 'working', 'completed', 'failed', 'cancelled']"
+  },
+  {
+    "id": "PR13-03",
+    "name": "Background task classification",
+    "pr": "PR13",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "research+frontier=True, hi+fast=False, calendar+default=False"
+  },
+  {
+    "id": "PR13-04",
+    "name": "Task manager metrics",
+    "pr": "PR13",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "metrics={'total_tasks': 0, 'by_state': {}, 'workspace_counts': {}}"
+  },
+  {
+    "id": "PR13-05",
+    "name": "Background task completes",
+    "pr": "PR13",
+    "status": "PASS",
+    "ms": 201.5,
+    "details": "state=completed, result=done"
+  },
+  {
+    "id": "INT-01",
+    "name": "Handlers use fast path",
+    "pr": "INT",
+    "status": "PASS",
+    "ms": 1.4,
+    "details": "fast_path in handlers.py"
+  },
+  {
+    "id": "INT-02",
+    "name": "Handlers use request queue",
+    "pr": "INT",
+    "status": "PASS",
+    "ms": 0.1,
+    "details": "request_queue in handlers.py"
+  },
+  {
+    "id": "INT-03",
+    "name": "Agent uses rate limiter",
+    "pr": "INT",
+    "status": "PASS",
+    "ms": 0.3,
+    "details": "rate_limiter in agent.py"
+  },
+  {
+    "id": "INT-04",
+    "name": "Handlers use task manager",
+    "pr": "INT",
+    "status": "PASS",
+    "ms": 0.0,
+    "details": "task_manager in handlers.py"
+  }
+]

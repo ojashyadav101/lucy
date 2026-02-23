@@ -1,9 +1,9 @@
 # Lucy Test Matrix & Results
 
 > **Created**: Feb 22, 2026  
-> **Last Run**: Feb 23, 2026 (10:00 IST)  
+> **Last Run**: Feb 23, 2026 (19:45 IST)  
 > **Models**: Dynamic routing — `gemini-2.5-flash` / `minimax-m2.5` / `deepseek-v3` / `claude-sonnet-4`  
-> **Result**: **L1-L5: 32/32 (100%)** | **Stress: 4/5 (80%)** | **Infra: All passing**
+> **Result**: **L1-L5: 32/32 (100%)** | **Stress: 4/5 (80%)** | **Round 3: 26/26 (100%)** | **Round 2 Regression: 5/5 (100%)**
 
 ## Legend
 
@@ -184,6 +184,45 @@
 
 **Date**: Feb 23, 2026
 **Status**: Implemented and tested
+
+---
+
+## Level 9: Round 3 — Viktor's PR 10-13 Patches — 26/26
+
+| # | Test | PR | Status | Time | Details |
+|---|------|----|--------|------|---------|
+| PR10-01 | Queue module imports | PR10 | `[P]` | 220ms | RequestQueue, Priority, classify_priority |
+| PR10-02 | 3 priority levels | PR10 | `[P]` | <1ms | HIGH, NORMAL, LOW |
+| PR10-03 | Priority classification | PR10 | `[P]` | <1ms | fast→HIGH, default→NORMAL, frontier→LOW |
+| PR10-04 | Metrics + backpressure | PR10 | `[P]` | <1ms | metrics + is_busy property |
+| PR10-05 | Enqueue accepts requests | PR10 | `[P]` | <1ms | queue_size=1 after enqueue |
+| PR11-01 | Fast path imports | PR11 | `[P]` | 1ms | FastPathResult, evaluate_fast_path |
+| PR11-02 | Greetings fast path | PR11 | `[P]` | <1ms | 5/5 greetings detected |
+| PR11-03 | Complex skip fast path | PR11 | `[P]` | <1ms | 4/4 correctly bypassed |
+| PR11-04 | In-thread skip | PR11 | `[P]` | <1ms | reason=in_thread |
+| PR11-05 | Status checks | PR11 | `[P]` | <1ms | "Online and ready. What's up?" |
+| PR11-06 | Help capabilities | PR11 | `[P]` | <1ms | Detailed capabilities overview |
+| PR11-07 | Fast path latency | PR11 | `[P]` | 1ms | 0.010ms avg (100 evals) |
+| PR12-01 | Rate limiter imports | PR12 | `[P]` | 3ms | RateLimiter, TokenBucket |
+| PR12-02 | Model acquire | PR12 | `[P]` | <1ms | google/gemini acquired |
+| PR12-03 | API acquire | PR12 | `[P]` | <1ms | google_calendar acquired |
+| PR12-04 | classify_api_from_tool | PR12 | `[P]` | <1ms | Detects google_calendar |
+| PR12-05 | Token bucket capacity | PR12 | `[P]` | <1ms | 3 acquired, 4th rejected |
+| PR13-01 | Task manager imports | PR13 | `[P]` | 1ms | TaskManager, should_run_as_background_task |
+| PR13-02 | 6 task states | PR13 | `[P]` | <1ms | PENDING→CANCELLED lifecycle |
+| PR13-03 | Background classification | PR13 | `[P]` | <1ms | frontier+research=bg, else=sync |
+| PR13-04 | Task manager metrics | PR13 | `[P]` | <1ms | Empty on init |
+| PR13-05 | Background task completes | PR13 | `[P]` | 201ms | state=completed, result=done |
+| INT-01 | Fast path in handlers | INT | `[P]` | 1ms | evaluate_fast_path wired |
+| INT-02 | Queue in handlers | INT | `[P]` | <1ms | classify_priority wired |
+| INT-03 | Rate limiter in agent | INT | `[P]` | <1ms | rate_limiter in agent.py + openclaw.py |
+| INT-04 | Task manager in handlers | INT | `[P]` | <1ms | should_run_as_background wired |
+
+### Key Performance Wins (Viktor's Patches)
+- **Fast path latency**: Greetings from ~25,700ms → 0.010ms (2,570,000x improvement)
+- **Rate limiting**: Per-model (5 tiers) + per-API (8 services) token buckets
+- **Background tasks**: 5 per workspace, 10min timeout, progress reporting
+- **Priority queue**: 3 levels, 10 workers, per-workspace fairness, backpressure signaling
 
 ---
 

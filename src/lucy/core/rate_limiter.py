@@ -258,11 +258,11 @@ class RateLimiter:
                 continue
 
             # Map action prefixes to APIs
-            if "google_calendar" in action_name or "gcal" in action_name:
+            if "googlecalendar" in action_name or "google_calendar" in action_name or "gcal" in action_name:
                 return "google_calendar"
-            if "googlesheets" in action_name or "gsheet" in action_name:
+            if "googlesheets" in action_name or "google_sheets" in action_name or "gsheet" in action_name:
                 return "google_sheets"
-            if "googledrive" in action_name or "gdrive" in action_name:
+            if "googledrive" in action_name or "google_drive" in action_name or "gdrive" in action_name:
                 return "google_drive"
             if "gmail" in action_name:
                 return "gmail"
