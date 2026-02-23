@@ -144,6 +144,10 @@ class LucyAgent:
                 tools_coro, connections_coro,
             )
 
+            # Inject internal tools (Slack history search)
+            from lucy.workspace.history_search import get_history_tool_definitions
+            tools.extend(get_history_tool_definitions())
+
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
             system_prompt = await build_system_prompt(
@@ -621,7 +625,18 @@ class LucyAgent:
         parameters: dict[str, Any],
         workspace_id: str,
     ) -> dict[str, Any]:
-        """Execute a single tool call via Composio."""
+        """Execute a single tool call.
+
+        Internal tools (lucy_*) are handled locally.
+        Everything else routes through Composio.
+        """
+        # ── Internal tools (no external API needed) ──────────────────
+        if tool_name.startswith("lucy_"):
+            return await self._execute_internal_tool(
+                tool_name, parameters, workspace_id
+            )
+
+        # ── External tools (via Composio) ────────────────────────────
         try:
             from lucy.integrations.composio_client import get_composio_client
 
@@ -642,6 +657,35 @@ class LucyAgent:
         except Exception as e:
             logger.error(
                 "tool_execution_failed",
+                tool=tool_name,
+                error=str(e),
+            )
+            return {"error": str(e)}
+
+    async def _execute_internal_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Execute an internal (lucy_*) tool — no Composio, no external API."""
+        from lucy.workspace.filesystem import get_workspace
+
+        ws = get_workspace(workspace_id)
+
+        try:
+            if tool_name.startswith("lucy_search_slack_history") or \
+               tool_name.startswith("lucy_get_channel_history"):
+                from lucy.workspace.history_search import execute_history_tool
+                result_text = await execute_history_tool(ws, tool_name, parameters)
+                return {"result": result_text}
+
+            logger.warning("unknown_internal_tool", tool=tool_name)
+            return {"error": f"Unknown internal tool: {tool_name}"}
+
+        except Exception as e:
+            logger.error(
+                "internal_tool_failed",
                 tool=tool_name,
                 error=str(e),
             )
