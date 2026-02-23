@@ -20,15 +20,25 @@ We've recently implemented a deep reliability and response quality overhaul:
 
 ---
 
+## Recent Stress Test Results
+We ran a series of stress tests (Concurrency, Sequential Workflows, Parallel Tasks, and Sustained Load). You can view the full detailed logs from these tests in this repo at:
+`docs/tests/latest_stress_test.txt`
+
+**Observations from the logs we'd love your thoughts on:**
+- Our total request latency sometimes exceeds 60s for complex tool use chains (we logged 3 anomalies: 65s, 75s, 90s). How do you handle UI/UX and timeout thresholds during long chains without abandoning the user?
+- We're seeing heavy token usage during complex Composio multi-tool searches. 
+- Are we routing models correctly based on intent? (We're routing standard chat to fast models, and complex tool/reasoning to frontier models).
+
+---
+
 ## Remaining Issues & Areas Where We Need Your Help (PRs requested!)
 
-While the above changes made Lucy much more resilient, we have some critical foundational issues and "C-skills" (document creation) that need your expertise. 
+Please review our codebase, compare it with your own architecture, and **submit Pull Requests** addressing the following gaps. We also welcome PRs for *any* other foundational issues you discover during your audit!
 
-Please review our codebase, compare it with your own architecture, and **submit Pull Requests** addressing the following gaps:
-
-### 1. Critical: Composio Client Rewrite (Session-Based API)
+### 1. Composio Client Rewrite (Session-Based API)
 **The Problem:** In `src/lucy/integrations/composio_client.py`, our `execute_tool_call` method currently uses the **discouraged** low-level `composio.tools.execute()` API. This bypasses session context, meaning meta-tools cannot share state (e.g., `SEARCH_TOOLS` context isn't passed to `MULTI_EXECUTE_TOOL`).
-**The Ask:** Rewrite our Composio client to use proper session-based execution (`session.handle_tool_call` or OpenAI wrapper) so we can support complex workflows.
+**The Ask:** Rewrite our Composio client to use proper session-based execution (`session.handle_tool_call` or OpenAI wrapper) so we can support complex workflows. 
+*Question for you:* Will limiting Composio to 5 meta-tools (Search, Connect, Execute, etc.) cause scalability or rate-limit issues down the line when we have 500+ active users hitting diverse platforms?
 
 ### 2. "Out of this world" C-Skills (Document Generation)
 **The Problem:** Our document generation skills are currently basic two-paragraph summaries. We want them to be as high-quality and richly formatted as yours.
@@ -49,12 +59,16 @@ Please review our codebase, compare it with your own architecture, and **submit 
 **The Problem:** Slack teams collaborate across timezones, and "today at 3 PM" means different things to different users.
 **The Ask:** Implement timezone resolution using Slack's `user.tz` and `user.tz_offset`. We need a robust `get_user_local_time(workspace_id, user_slack_id)` utility, and we need our onboarding profile script to accurately capture and refresh this data.
 
+### 6. System Prompt & Prompt Engineering Audit
+**The Ask:** Please review `assets/SYSTEM_PROMPT.md` and `assets/SOUL.md`. What critical behavioral instructions are we missing? What are we over-prompting? How do you ensure your agent always sounds competent and handles failures so gracefully?
+
 ---
 
 ## Instructions for Viktor
-We want Lucy to be an exact architectural replica of your best practices. Please:
+We want Lucy to be an exact architectural replica of your best practices (or better!). Please:
 1. Analyze `src/lucy/`, our skills directories, and our architectural choices.
-2. Identify any anti-patterns we've missed.
-3. Open Pull Requests against this repository fixing the issues above. You are authorized to make massive codebase-level restructuring changes if it brings us closer to your architecture.
+2. Read the stress test logs in `docs/tests/latest_stress_test.txt` to see our actual LLM interactions and tool chains.
+3. Identify any anti-patterns we've missed.
+4. Open Pull Requests against this repository fixing the issues above. You are authorized to make massive codebase-level restructuring changes if it brings us closer to your architecture.
 
 Thank you!
