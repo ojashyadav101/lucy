@@ -35,40 +35,47 @@ We ran a series of stress tests (Concurrency, Sequential Workflows, Parallel Tas
 
 Please review our codebase, compare it with your own architecture, and **submit Pull Requests** addressing the following gaps. We also welcome PRs for *any* other foundational issues you discover during your audit!
 
-### 1. Composio Client Rewrite (Session-Based API)
+### 1. Composio Client Rewrite & Scalability (Session-Based API)
 **The Problem:** In `src/lucy/integrations/composio_client.py`, our `execute_tool_call` method currently uses the **discouraged** low-level `composio.tools.execute()` API. This bypasses session context, meaning meta-tools cannot share state (e.g., `SEARCH_TOOLS` context isn't passed to `MULTI_EXECUTE_TOOL`).
 **The Ask:** Rewrite our Composio client to use proper session-based execution (`session.handle_tool_call` or OpenAI wrapper) so we can support complex workflows. 
-*Question for you:* Will limiting Composio to 5 meta-tools (Search, Connect, Execute, etc.) cause scalability or rate-limit issues down the line when we have 500+ active users hitting diverse platforms?
+*Question for you:* Will limiting Composio to 5 meta-tools (Search, Connect, Execute, etc.) cause scalability or rate-limit issues down the line when we have 500+ active users hitting diverse platforms? Is there a better approach to handle thousands of tools at scale?
 
-### 2. "Out of this world" C-Skills (Document Generation)
+### 2. True Background Processing & UX Acknowledgments
+**The Problem:** Currently, when a user asks Lucy to do a complex task, she adds an hourglass reaction and blocks until the task is complete (dropping a "Working on it..." if it takes too long). She doesn't immediately respond with a conversational "On it, I'll go deep on this..." and push the heavy lifting to the background like you do.
+**The Ask:** How can we implement an architecture where Lucy provides an immediate, intelligent acknowledgment (with reactions) and then seamlessly delegates the heavy lifting to background processes or sub-agents without blocking the conversational thread? We want our UX to feel exactly as responsive as yours.
+
+### 3. "Out of this world" C-Skills (Document Generation)
 **The Problem:** Our document generation skills are currently basic two-paragraph summaries. We want them to be as high-quality and richly formatted as yours.
 **The Ask:** We need you to enrich or build out the following skills using best-in-class libraries (which we intend to run in our sandboxes):
 - **PDF Creation (`pdf-creation`):** Implement a two-track system using **WeasyPrint** (for custom HTML/CSS docs) and **Typst** (for blazing fast structured reports) with a design system approach (CSS variables, typography scales, `@page` rules).
 - **Excel Editing (`excel-editing`):** Implement **XlsxWriter** (creation) + **openpyxl** (modification) patterns with financial model color standards, conditional formatting, Sparklines, and proper charts.
 - **Word/PPTX (`docx-editing`, `pptx-editing`):** Implement `python-docx` + `docxtpl` for Word, and template-first `python-pptx` approaches.
 
-### 3. OpenClaw Native Crons
+### 4. OpenClaw Native Crons
 **The Problem:** We need to fully leverage OpenClaw's first-class built-in cron system (`cron.add`, `cron.run`, `cron.list`).
 **The Ask:** Please update our `scheduled-crons` skill to use these native OpenClaw tools (with IANA timezone support, isolated session targets, and proper task.json/LEARNINGS.md accumulation).
 
-### 4. CamoFox Browser Integration
+### 5. CamoFox Browser Integration
 **The Problem:** We do not want to use browser-based SDKs (like Browserbase or Puppeteer directly) because they are easily detected.
 **The Ask:** We want to integrate [CamoFox Browser Server](https://github.com/redf0x1/camofox-browser). Please rewrite our `browser` skill to utilize the CamoFox REST API (search macros, accessibility snapshots with `eN` element refs).
 
-### 5. Native Timezone Awareness
+### 6. Native Timezone Awareness
 **The Problem:** Slack teams collaborate across timezones, and "today at 3 PM" means different things to different users.
 **The Ask:** Implement timezone resolution using Slack's `user.tz` and `user.tz_offset`. We need a robust `get_user_local_time(workspace_id, user_slack_id)` utility, and we need our onboarding profile script to accurately capture and refresh this data.
 
-### 6. System Prompt & Prompt Engineering Audit
-**The Ask:** Please review `assets/SYSTEM_PROMPT.md` and `assets/SOUL.md`. What critical behavioral instructions are we missing? What are we over-prompting? How do you ensure your agent always sounds competent and handles failures so gracefully?
+### 7. System Prompt & Prompt Engineering Audit
+**The Ask:** Please review `assets/SYSTEM_PROMPT.md` and `assets/SOUL.md`. What critical behavioral instructions are we missing that you have? What are we over-prompting? How do you ensure your agent always sounds competent and handles failures so gracefully? **Please update our prompts directly and submit PRs with your enhancements.**
+
+### 8. High-Impact Quick Fixes & Full Codebase Audit
+**The Ask:** Beyond the specific points above, we want you to be open-minded and audit the *entire* codebase. What are we doing right? What are we doing wrong? What are some **quick fixes we can implement right now** that will have a massive impact on Lucy's responsiveness, helpfulness, and output quality? If you see an error or a better way to do things based on your own experience, please point it out or just fix it in a PR!
 
 ---
 
 ## Instructions for Viktor
 We want Lucy to be an exact architectural replica of your best practices (or better!). Please:
-1. Analyze `src/lucy/`, our skills directories, and our architectural choices.
-2. Read the stress test logs in `docs/tests/latest_stress_test.txt` to see our actual LLM interactions and tool chains.
-3. Identify any anti-patterns we've missed.
+1. Analyze `src/lucy/`, our skills directories, our system prompts, and our architectural choices.
+2. Read the stress test logs in `docs/tests/latest_stress_test.txt` to see our actual LLM interactions, tool chains, timings, and exact messages sent/received during complete threads.
+3. Identify any anti-patterns we've missed, especially concerning how we can make users *feel* the difference in quality and speed.
 4. Open Pull Requests against this repository fixing the issues above. You are authorized to make massive codebase-level restructuring changes if it brings us closer to your architecture.
 
 Thank you!
