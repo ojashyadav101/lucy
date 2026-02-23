@@ -309,6 +309,28 @@ async def _handle_message(
                 pass
         return
 
+    # ── Fast path: skip full agent loop for simple messages ─────────
+    from lucy.core.fast_path import evaluate_fast_path
+
+    thread_depth = 0
+    has_thread_context = bool(thread_ts and event_ts and thread_ts != event_ts)
+
+    fast = evaluate_fast_path(
+        text,
+        thread_depth=thread_depth,
+        has_thread_context=has_thread_context,
+    )
+
+    if fast.is_fast and fast.response:
+        logger.info(
+            "fast_path_response",
+            reason=fast.reason,
+            workspace_id=workspace_id,
+        )
+        await say(text=fast.response, thread_ts=thread_ts)
+        return
+
+    # ── Full agent loop path ──────────────────────────────────────────
     working_emoji = get_working_emoji(text)
     if client and channel_id and event_ts:
         asyncio.create_task(
