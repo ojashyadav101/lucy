@@ -521,6 +521,21 @@ class LucyAgent:
                     "error": f"Tool '{name}' is not available."
                 })
 
+            # ── External API rate limiting ────────────────────────────
+            from lucy.core.rate_limiter import get_rate_limiter
+            limiter = get_rate_limiter()
+            api_name = limiter.classify_api_from_tool(name, params)
+            if api_name:
+                acquired = await limiter.acquire_api(api_name, timeout=15.0)
+                if not acquired:
+                    return call_id, json.dumps({
+                        "error": (
+                            f"Rate limited by {api_name}. "
+                            f"Wait a moment and try again, or use a "
+                            f"different approach."
+                        ),
+                    })
+
             if name == "COMPOSIO_MULTI_EXECUTE_TOOL":
                 from lucy.slack.hitl import is_destructive_tool_call
                 actions = params.get("actions") or []

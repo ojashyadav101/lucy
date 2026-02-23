@@ -178,6 +178,16 @@ class OpenClawClient:
             reraise=True,
         )
         async def _do_request() -> OpenClawResponse:
+            # ── Rate limit check before LLM call ─────────────────────
+            from lucy.core.rate_limiter import get_rate_limiter
+            limiter = get_rate_limiter()
+            acquired = await limiter.acquire_model(model, timeout=30.0)
+            if not acquired:
+                raise OpenClawError(
+                    f"Rate limited for model {model}. Try again shortly.",
+                    status_code=429,
+                )
+
             try:
                 t0 = time.monotonic()
                 response = await self._client.post(
