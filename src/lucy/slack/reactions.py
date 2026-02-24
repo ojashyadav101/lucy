@@ -35,7 +35,8 @@ _REACTION_RULES: list[tuple[re.Pattern[str], str, bool]] = [
 
     # ── React-only patterns (no reply needed) ─────────────────────────
     (re.compile(
-        r"^(?:thanks?(?:\s+(?:a lot|so much|very much|a ton|for|viktor|lucy))?|"
+        r"^(?:(?:ok(?:ay)?|alright|sure|yep|yup|cool|great|nice)\s+)?"
+        r"(?:thanks?(?:\s+(?:a lot|so much|very much|a ton|for|viktor|lucy))?|"
         r"ty(?:\s|!|$)|thx|cheers|appreciate it|much appreciated|"
         r"thank you(?:\s+(?:so much|very much|a lot|for))?)"
         r"[!.\s]*$",
@@ -54,7 +55,8 @@ _REACTION_RULES: list[tuple[re.Pattern[str], str, bool]] = [
     (re.compile(
         r"^(?:(?:looks? )?good(?:\s+to (?:me|go))?|approved?|"
         r"lgtm|ship it|go (?:ahead|for it)|yes(?:\s+please)?|"
-        r"yep|yup|sure|absolutely|definitely)"
+        r"yep|yup|sure|absolutely|definitely|"
+        r"ok(?:ay)?(?:\s+(?:cool|great|nice|perfect|no worries))?)"
         r"[!.\s]*$",
         re.IGNORECASE,
     ), "thumbsup", True),

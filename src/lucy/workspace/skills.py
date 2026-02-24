@@ -58,12 +58,19 @@ _SKILL_TRIGGERS: dict[str, list[str]] = {
         r"\bevery\s*(?:day|week|hour|morning)\b",
     ],
     "integrations": [
-        r"\bintegrat(?:e|ion)\b", r"\bconnect\b", r"\bauthoriz\b",
-        r"\bOAuth\b",
+        r"\bintegrat(?:e|ion)s?\b", r"\bconnect(?:ed|ions?)?\b",
+        r"\bauthoriz\b", r"\bOAuth\b",
+        r"\btools?\b", r"\bservices?\b", r"\bapps?\b",
+        r"\bwhat.+(?:have|connected|available)\b",
     ],
     "slack-admin": [
         r"\bchannel\b", r"\binvite\b", r"\bworkspace\b",
         r"\bslack\s*(?:user|member)\b",
+    ],
+    "company": [
+        r"\b(?:our|the)\s+(?:company|team|product|business)\b",
+        r"\bwho\s+(?:are\s+we|is)\b",
+        r"\bwhat\s+do\s+(?:we|you)\s+(?:do|know)\b",
     ],
 }
 

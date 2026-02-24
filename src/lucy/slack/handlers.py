@@ -66,7 +66,8 @@ def register_handlers(app: AsyncApp) -> None:
 
         clean_text = _clean_mention(text)
         if not clean_text.strip():
-            await say(text="Hey! How can I help?", thread_ts=thread_ts)
+            from lucy.core.humanize import pick
+            await say(text=pick("greeting"), thread_ts=thread_ts)
             return
 
         logger.info(
@@ -84,6 +85,7 @@ def register_handlers(app: AsyncApp) -> None:
             say=say,
             client=client,
             context=context,
+            user_id=event.get("user"),
         )
 
     # ═══ DIRECT MESSAGES & THREAD REPLIES ═══════════════════════════════
@@ -132,11 +134,41 @@ def register_handlers(app: AsyncApp) -> None:
                 say=say,
                 client=client,
                 context=context,
+                user_id=event.get("user"),
             )
             return
 
         # Channel thread replies: respond if Lucy was part of the thread
         if event.get("thread_ts"):
+            # If there's an active background task in this thread,
+            # don't start a new agent run that would re-do the work.
+            from lucy.core.task_manager import get_task_manager
+
+            task_mgr = get_task_manager()
+            active = task_mgr.get_active_for_thread(
+                event.get("thread_ts"),
+            )
+            if active:
+                from lucy.core.edge_cases import is_task_cancellation
+
+                if is_task_cancellation(text):
+                    await task_mgr.cancel_task(active.task_id)
+                    from lucy.core.humanize import pick
+                    await say(
+                        text=pick("task_cancelled"),
+                        thread_ts=thread_ts,
+                    )
+                else:
+                    elapsed = int(time.monotonic() - active.started_at)
+                    from lucy.core.humanize import humanize
+                    msg = await humanize(
+                        f"Let the user know their task is still running "
+                        f"(about {elapsed} seconds in) and you'll post "
+                        f"the results when done.",
+                    )
+                    await say(text=msg, thread_ts=thread_ts)
+                return
+
             is_lucy_thread = await _is_lucy_in_thread(
                 client, channel_id, event.get("thread_ts")
             )
@@ -149,6 +181,7 @@ def register_handlers(app: AsyncApp) -> None:
                     say=say,
                     client=client,
                     context=context,
+                    user_id=event.get("user"),
                 )
 
     # ═══ SLASH COMMANDS ═════════════════════════════════════════════════
@@ -173,14 +206,11 @@ def register_handlers(app: AsyncApp) -> None:
         )
 
         if not text or text.lower() == "help":
-            await say(text=(
-                "*Lucy* — your AI coworker\n\n"
-                "Just @mention me or DM me with what you need.\n"
-                "I can use tools, search the web, write code, "
-                "manage your calendar, and more."
-            ))
+            from lucy.core.humanize import pick
+            await say(text=pick("help"))
         elif text.lower() == "status":
-            await say(text="I'm online and ready to help.")
+            from lucy.core.humanize import pick
+            await say(text=pick("status"))
         elif text.lower().startswith("connect "):
             provider = text[8:].strip()
             await _handle_connect(context, say, provider)
@@ -193,6 +223,7 @@ def register_handlers(app: AsyncApp) -> None:
                 say=say,
                 client=client,
                 context=context,
+                user_id=command.get("user_id"),
             )
 
     # ═══ BLOCK KIT ACTIONS ═════════════════════════════════════════════
@@ -218,8 +249,9 @@ def register_handlers(app: AsyncApp) -> None:
         resolved = await resolve_pending_action(action_id, approved=True)
 
         if resolved:
+            from lucy.core.humanize import pick
             await say(
-                text=f"Approved by {user_name}. Executing now...",
+                text=pick("hitl_approved", user=user_name),
                 thread_ts=thread_ts,
             )
             workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
@@ -227,7 +259,8 @@ def register_handlers(app: AsyncApp) -> None:
                 resolved, workspace_id, channel, thread_ts, say, client, context,
             )
         else:
-            await say(text="That action has already been handled or expired.", thread_ts=thread_ts)
+            from lucy.core.humanize import pick
+            await say(text=pick("hitl_expired"), thread_ts=thread_ts)
 
     @app.action(re.compile(r"lucy_action_cancel_.*"))
     async def handle_cancel_action(
@@ -246,7 +279,8 @@ def register_handlers(app: AsyncApp) -> None:
 
         from lucy.slack.hitl import resolve_pending_action
         await resolve_pending_action(action_id, approved=False)
-        await say(text=f"Cancelled by {user_name}.", thread_ts=thread_ts)
+        from lucy.core.humanize import pick
+        await say(text=pick("hitl_cancelled", user=user_name), thread_ts=thread_ts)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -261,6 +295,7 @@ async def _handle_message(
     say: AsyncSay,
     client: Any,
     context: AsyncBoltContext,
+    user_id: str | None = None,
 ) -> None:
     """Handle a user message: add reaction, run agent, post response."""
     global _processed_events
@@ -285,10 +320,12 @@ async def _handle_message(
         workspace_id = str(team_id or enterprise_id or "")
     if not workspace_id:
         logger.error("no_workspace_id", context_keys=list(context.keys()))
-        await say(
-            text="I couldn't determine your workspace. Please try again.",
-            thread_ts=thread_ts,
+        from lucy.core.humanize import humanize
+        msg = await humanize(
+            "Tell the user you had trouble identifying their workspace "
+            "and ask them to try again."
         )
+        await say(text=msg, thread_ts=thread_ts)
         return
     workspace_id = str(workspace_id)
 
@@ -342,16 +379,19 @@ async def _handle_message(
     if is_status_query(text):
         status = await format_task_status(workspace_id)
         if status:
-            await say(
-                text=f"Here's what I'm working on:\n{status}",
-                thread_ts=thread_ts,
+            from lucy.core.humanize import humanize as _hz
+            msg = await _hz(
+                f"Summarize your current work status for the user. "
+                f"Active tasks: {status}",
             )
-            return  # Don't start a new agent run for status checks
+            await say(text=msg, thread_ts=thread_ts)
+            return
 
     if is_task_cancellation(text):
         result = await handle_task_cancellation(workspace_id, thread_ts)
         if result:
-            await say(text=result, thread_ts=thread_ts)
+            from lucy.core.humanize import pick
+            await say(text=pick("task_cancelled"), thread_ts=thread_ts)
             return
 
     # ── Full agent loop path ──────────────────────────────────────────
@@ -401,6 +441,7 @@ async def _handle_message(
             workspace_id=workspace_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
+            user_slack_id=user_id,
         )
 
         # ── Check if this should run as a background task ───────────
@@ -497,27 +538,16 @@ async def _handle_message(
             error=str(e),
             exc_info=True,
         )
+        from lucy.core.humanize import pick
         error_str = str(e).lower()
         if "timeout" in error_str or "timed out" in error_str:
-            fallback = (
-                "That one's taking longer than expected — I'm still "
-                "working on it and will follow up here shortly."
-            )
+            fallback = pick("error_timeout")
         elif "rate limit" in error_str or "429" in error_str:
-            fallback = (
-                "I'm getting a lot of requests right now — give me "
-                "a moment and I'll get back to you on this."
-            )
+            fallback = pick("error_rate_limit")
         elif "connection" in error_str:
-            fallback = (
-                "Having a bit of trouble reaching one of the services "
-                "I need. Let me retry in a moment."
-            )
+            fallback = pick("error_connection")
         else:
-            fallback = (
-                "Working on getting that sorted — I'll follow up "
-                "right here in a moment."
-            )
+            fallback = pick("error_generic")
         await say(text=fallback, thread_ts=thread_ts)
 
     finally:
@@ -690,7 +720,8 @@ async def _execute_approved_action(
 
     except Exception as e:
         logger.error("approved_action_failed", error=str(e))
-        await say(text="Done — I've processed that for you.", thread_ts=thread_ts)
+        from lucy.core.humanize import pick
+        await say(text=pick("error_generic"), thread_ts=thread_ts)
 
 
 async def _handle_connect(
@@ -706,14 +737,28 @@ async def _handle_connect(
             workspace_id=workspace_id, toolkit=provider
         )
         if url:
-            await say(text=(
-                f"Please connect *{provider}* here:\n{url}\n\n"
-                f"Let me know once you've connected it!"
-            ))
-        else:
-            await say(
-                text=f"Couldn't generate a connection link for {provider}."
+            from lucy.core.humanize import humanize as _hz
+            msg = await _hz(
+                f"Give the user a connection link for {provider}. "
+                f"The link is: {url} — tell them to click it to "
+                f"authorize, and let you know when done.",
             )
+            await say(text=msg)
+            client.invalidate_cache(workspace_id)
+        else:
+            from lucy.core.humanize import humanize as _hz
+            msg = await _hz(
+                f"You couldn't generate a connection link for {provider}. "
+                f"Suggest the user ask you in a regular message instead "
+                f"so you can search for the right integration name.",
+            )
+            await say(text=msg)
     except Exception as e:
         logger.error("connect_failed", provider=provider, error=str(e))
-        await say(text=f"Failed to connect {provider}.")
+        from lucy.core.humanize import humanize as _hz
+        msg = await _hz(
+            f"You had trouble connecting {provider}. Suggest the user "
+            f"ask you directly in a conversation so you can find the "
+            f"right integration.",
+        )
+        await say(text=msg)

@@ -76,17 +76,17 @@ class BackgroundTask:
 # TASK CLASSIFICATION — Should this be a background task?
 # ═══════════════════════════════════════════════════════════════════════════
 
-# Keywords that suggest a message needs deep, multi-step work
-_HEAVY_TASK_SIGNALS = [
-    "research", "analyze", "compare", "comprehensive", "report",
-    "audit", "deep dive", "benchmark", "competitive analysis",
-    "create a.*report", "write a.*document", "build.*spreadsheet",
-    "investigate", "thorough",
-]
-
 import re
-_HEAVY_RE = re.compile(
-    r"\b(?:" + "|".join(_HEAVY_TASK_SIGNALS) + r")\b",
+
+_HEAVY_COMPOUND_RE = re.compile(
+    r"(?:"
+    r"comprehensive\s+(?:research|report|analysis|audit)"
+    r"|deep\s+dive"
+    r"|thorough\s+(?:analysis|investigation|review)"
+    r"|(?:research|analyze|investigate).*(?:and|then|also|plus).*(?:create|write|build|generate)"
+    r"|competitive\s+analysis"
+    r"|full\s+audit"
+    r")",
     re.IGNORECASE,
 )
 
@@ -97,12 +97,14 @@ def should_run_as_background_task(
 ) -> bool:
     """Determine if a request should run as a background task.
 
-    Only frontier-tier tasks with heavy keywords qualify. This prevents
-    simple questions from being unnecessarily backgrounded.
+    Only frontier-tier tasks with COMPOUND heavy signals qualify.
+    Simple "research X" or "compare A vs B" should run synchronously —
+    they typically finish in under 60 seconds and backgrounding them
+    adds unnecessary UX overhead (ack message + progress updates).
     """
     if route_tier != "frontier":
         return False
-    return bool(_HEAVY_RE.search(message))
+    return bool(_HEAVY_COMPOUND_RE.search(message))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,17 +183,13 @@ class TaskManager:
             description=description,
         )
 
-        # Post acknowledgment
         if slack_client:
             try:
+                from lucy.core.humanize import pick
                 ack_result = await slack_client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
-                    text=(
-                        f"Working on this in the background — I'll post "
-                        f"updates here as I make progress. You can keep "
-                        f"chatting in the meantime."
-                    ),
+                    text=pick("task_background_ack"),
                 )
                 task.progress_message_ts = ack_result.get("ts")
                 task.state = TaskState.ACKNOWLEDGED
@@ -238,14 +236,11 @@ class TaskManager:
                 task.completed_at = time.monotonic()
                 if slack_client:
                     try:
+                        from lucy.core.humanize import pick
                         await slack_client.chat_postMessage(
                             channel=channel_id,
                             thread_ts=thread_ts,
-                            text=(
-                                "This research is taking longer than expected. "
-                                "I've hit the 10-minute limit — here's what I "
-                                "have so far. Want me to continue?"
-                            ),
+                            text=pick("error_task_timeout"),
                         )
                     except Exception:
                         pass
@@ -269,14 +264,11 @@ class TaskManager:
                 task.completed_at = time.monotonic()
                 if slack_client:
                     try:
+                        from lucy.core.humanize import pick
                         await slack_client.chat_postMessage(
                             channel=channel_id,
                             thread_ts=thread_ts,
-                            text=(
-                                "Ran into an issue with the background task. "
-                                "Let me try a different approach — what "
-                                "specifically are you looking for?"
-                            ),
+                            text=pick("error_task_failed"),
                         )
                     except Exception:
                         pass
@@ -329,6 +321,22 @@ class TaskManager:
     def get_task(self, task_id: str) -> BackgroundTask | None:
         """Get a task by ID."""
         return self._tasks.get(task_id)
+
+    def get_active_for_thread(
+        self,
+        thread_ts: str | None,
+    ) -> BackgroundTask | None:
+        """Return the active background task running in a given thread."""
+        if not thread_ts:
+            return None
+        for t in self._tasks.values():
+            if (
+                t.thread_ts == thread_ts
+                and t.state
+                in (TaskState.PENDING, TaskState.ACKNOWLEDGED, TaskState.WORKING)
+            ):
+                return t
+        return None
 
     def get_workspace_tasks(
         self,

@@ -83,8 +83,8 @@ async def generate_pdf(
         from weasyprint import HTML
     except ImportError:
         raise RuntimeError(
-            "weasyprint not installed. Add to pyproject.toml: "
-            "weasyprint >= 62.0"
+            "PDF generation is not available right now. "
+            "Please respond with the content directly in Slack instead."
         )
 
     full_html = _PDF_TEMPLATE.format(content=content_html)
@@ -97,7 +97,14 @@ async def generate_pdf(
         filename = f"{safe_title}.pdf"
 
     output_path = Path(tempfile.mkdtemp()) / filename
-    HTML(string=full_html).write_pdf(str(output_path))
+    try:
+        HTML(string=full_html).write_pdf(str(output_path))
+    except Exception as e:
+        logger.error("pdf_generation_failed", error=str(e))
+        raise RuntimeError(
+            f"PDF generation failed. Share the content directly in Slack instead. "
+            f"Content preview: {content_html[:200]}"
+        )
 
     logger.info(
         "pdf_generated",
@@ -299,7 +306,7 @@ async def upload_file_to_slack(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_file_tool_definitions() -> list[dict[str, Any]]:
-    """Return OpenAI-format tool definitions for file generation.
+    """Return OpenAI-format tool definitions for file generation and editing.
 
     Registered as internal tools alongside Slack history search.
     """
@@ -307,12 +314,103 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "lucy_write_file",
+                "description": (
+                    "Write a new file to the workspace. "
+                    "Use this to draft a brand new file from scratch. "
+                    "If the file already exists, it will be completely overwritten. "
+                    "To modify an existing file, use `lucy_edit_file` instead."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the file to create or overwrite.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The complete content to write into the file.",
+                        },
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "lucy_edit_file",
+                "description": (
+                    "Apply a SEARCH/REPLACE block to edit an existing file. "
+                    "This is the ONLY way to fix or modify existing code. "
+                    "The `old_string` must match the file content EXACTLY, "
+                    "including all whitespace, indentation, and blank lines. "
+                    "Provide enough context lines before and after the change "
+                    "to uniquely identify the block to replace. "
+                    "Do NOT use this to write a new file from scratch."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute path to the file.",
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "The exact block of text to replace. Must include enough context to be unique.",
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "The new text that will replace the old text.",
+                        },
+                    },
+                    "required": ["path", "old_string", "new_string"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "lucy_store_api_key",
+                "description": (
+                    "Store a user-provided API key for a custom integration. "
+                    "Use this after a user pastes their API key in chat. "
+                    "The key is stored securely and used automatically when "
+                    "calling tools from that custom integration."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "service_slug": {
+                            "type": "string",
+                            "description": (
+                                "The slug of the custom integration "
+                                "(e.g. 'polarsh', 'clerk')."
+                            ),
+                        },
+                        "api_key": {
+                            "type": "string",
+                            "description": "The API key or token provided by the user.",
+                        },
+                    },
+                    "required": ["service_slug", "api_key"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "lucy_generate_pdf",
                 "description": (
-                    "Generate a formatted PDF document. Use when the user asks "
-                    "for a report, document, analysis, or any output that would "
-                    "be better as a downloadable file than a Slack message. "
-                    "Provide HTML content for the body (h1, h2, p, table, ul, etc)."
+                    "Generate a formatted PDF document. ONLY use this when the user "
+                    "EXPLICITLY asks for a PDF, report, or document — or when the "
+                    "output is genuinely multi-page (5+ sections with data). "
+                    "DO NOT use this for short answers, simple questions, lists, "
+                    "or anything that fits comfortably in a Slack message. "
+                    "When in doubt, respond in text — PDF is for heavy deliverables only. "
+                    "Provide HTML content for the body."
                 ),
                 "parameters": {
                     "type": "object",
@@ -339,9 +437,9 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": "lucy_generate_excel",
                 "description": (
-                    "Generate an Excel spreadsheet. Use when the user asks for "
-                    "data in a spreadsheet, or when tabular data would be more "
-                    "useful as a downloadable file."
+                    "Generate an Excel spreadsheet. ONLY use when the user "
+                    "explicitly asks for a spreadsheet, Excel file, or .xlsx "
+                    "download. Do NOT use for general data display."
                 ),
                 "parameters": {
                     "type": "object",
@@ -420,10 +518,72 @@ async def execute_file_tool(
         {"error": "..."} on failure.
     """
     try:
-        if tool_name == "lucy_generate_pdf":
+        if tool_name == "lucy_write_file":
+            path_str = parameters.get("path")
+            content = parameters.get("content")
+            if not path_str or content is None:
+                return {"error": "Missing required parameters: path, content"}
+            
+            p = Path(path_str)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return {
+                "result": f"Successfully wrote {len(content)} characters to {path_str}",
+                "file_path": str(path_str),
+            }
+
+        elif tool_name == "lucy_edit_file":
+            path_str = parameters.get("path")
+            old_string = parameters.get("old_string")
+            new_string = parameters.get("new_string")
+            if not path_str or old_string is None or new_string is None:
+                return {"error": "Missing required parameters: path, old_string, new_string"}
+            
+            p = Path(path_str)
+            if not p.exists():
+                return {"error": f"File not found: {path_str}"}
+                
+            file_content = p.read_text(encoding="utf-8")
+            if old_string not in file_content:
+                return {
+                    "error": (
+                        "old_string did not match exactly. "
+                        "Make sure you include the exact whitespace, indentation, "
+                        "and context lines. Do not omit any lines in the middle "
+                        "of the block."
+                    )
+                }
+                
+            if file_content.count(old_string) > 1:
+                return {
+                    "error": (
+                        "old_string matched multiple times. "
+                        "Please provide more context lines before or after "
+                        "to make the replacement block unique."
+                    )
+                }
+                
+            new_content = file_content.replace(old_string, new_string)
+            p.write_text(new_content, encoding="utf-8")
+            return {
+                "result": f"Successfully edited {path_str} (replaced {len(old_string)} chars with {len(new_string)} chars)",
+                "file_path": str(path_str),
+            }
+            
+        elif tool_name == "lucy_generate_pdf":
+            content_html = parameters.get("content_html", "")
+            if len(content_html.strip()) < 200:
+                return {
+                    "error": (
+                        "This content is too short for a PDF. "
+                        "Respond directly in Slack instead. "
+                        "PDFs should be used for multi-page reports "
+                        "and detailed documents only."
+                    ),
+                }
             path = await generate_pdf(
                 title=parameters["title"],
-                content_html=parameters["content_html"],
+                content_html=content_html,
             )
         elif tool_name == "lucy_generate_excel":
             sheets = parameters.get("sheets", {})

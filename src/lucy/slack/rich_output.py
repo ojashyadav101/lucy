@@ -78,8 +78,10 @@ _DOMAIN_NAMES: dict[str, str] = {
     "slack.com": "Slack",
     "clickup.com": "ClickUp",
     "vercel.com": "Vercel",
-    "polar.sh": "Polar",
     "stripe.com": "Stripe",
+    "composio.dev": "Connect here",
+    "connect.composio.dev": "Connect here",
+    "auth.composio.dev": "Connect here",
 }
 
 

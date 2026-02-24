@@ -98,6 +98,9 @@ class CronScheduler:
             self._schedule_memory_consolidation(ws_id)
             total_jobs += 2
 
+        self._schedule_humanize_pool_refresh()
+        total_jobs += 1
+
         self.scheduler.start()
         self._running = True
         logger.info("cron_scheduler_started", total_jobs=total_jobs)
@@ -210,6 +213,29 @@ class CronScheduler:
                 workspace_id=workspace_id,
                 error=str(e),
             )
+
+    def _schedule_humanize_pool_refresh(self) -> None:
+        """Refresh LLM-generated message pools every 6 hours."""
+        job_id = "_global:humanize_pool_refresh"
+        try:
+            self.scheduler.add_job(
+                self._run_humanize_refresh,
+                trigger=CronTrigger.from_crontab("0 */6 * * *"),
+                id=job_id,
+                name="Humanize pool refresh",
+                replace_existing=True,
+            )
+            logger.info("humanize_pool_refresh_scheduled")
+        except Exception as e:
+            logger.error("humanize_pool_refresh_schedule_failed", error=str(e))
+
+    async def _run_humanize_refresh(self) -> None:
+        """Regenerate LLM message pools."""
+        try:
+            from lucy.core.humanize import refresh_pools
+            await refresh_pools()
+        except Exception as e:
+            logger.error("humanize_pool_refresh_failed", error=str(e))
 
     def _schedule_slack_sync(self, workspace_id: str) -> None:
         """Register the lightweight Slack message sync cron for a workspace."""

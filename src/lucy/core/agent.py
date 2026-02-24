@@ -19,6 +19,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -44,12 +45,30 @@ MAX_PAYLOAD_CHARS = 120_000
 
 _INTERNAL_PATH_RE = re.compile(r"/home/user/[^\s\"',}\]]+")
 _WORKSPACE_PATH_RE = re.compile(r"workspaces?/[^\s\"',}\]]+")
+_COMPOSIO_NAME_RE = re.compile(r"COMPOSIO_\w+")
+_AUTH_URL_RE = re.compile(
+    r"https?://(?:connect|auth|app)\.composio\.dev/[^\s\"',}\]]+",
+)
+
+_NARRATION_RE = re.compile(
+    r"(?:I'll (?:start|begin|proceed|go ahead|check|look|search|get|fetch|compile|find|now)"
+    r"|I will (?:start|begin|proceed|check|look|search|get|fetch|compile|find|now)"
+    r"|Let me (?:start|begin|check|look|search|get|fetch|find|now|first)"
+    r"|Let's (?:start|begin|figure|check|look|search|get|find|now|first)"
+    r"|I'll also (?:need to|check|look|search)"
+    r"|I need to (?:first|check|look|search|get|find)"
+    r"|I can (?:find|check|look|search|get|fetch)"
+    r"|then I (?:can|will|'ll)\b"
+    r"|I'm going to (?:start|check|look|search|get|find|fetch))",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_tool_output(text: str) -> str:
-    """Remove internal file paths from tool output."""
+    """Remove internal file paths and tool names from tool output."""
     text = _INTERNAL_PATH_RE.sub("[file]", text)
     text = _WORKSPACE_PATH_RE.sub("[workspace]", text)
+    text = _COMPOSIO_NAME_RE.sub("[action]", text)
     return text
 
 
@@ -61,6 +80,7 @@ class AgentContext:
     channel_id: str | None = None
     thread_ts: str | None = None
     user_name: str | None = None
+    user_slack_id: str | None = None
 
 
 class LucyAgent:
@@ -145,9 +165,10 @@ class LucyAgent:
         async with trace.span("fetch_tools_and_connections"):
             tools_coro = self._get_meta_tools(ctx.workspace_id)
             connections_coro = self._get_connected_services(ctx.workspace_id)
-            tools, connected_services = await asyncio.gather(
+            cached_tools, connected_services = await asyncio.gather(
                 tools_coro, connections_coro,
             )
+            tools = list(cached_tools)  # copy — never mutate the cache
 
             # Inject internal tools (Slack history search + file generation)
             from lucy.workspace.history_search import get_history_tool_definitions
@@ -156,6 +177,79 @@ class LucyAgent:
             from lucy.tools.file_generator import get_file_tool_definitions
             tools.extend(get_file_tool_definitions())
 
+            from lucy.integrations.custom_wrappers import load_custom_wrapper_tools
+            tools.extend(load_custom_wrapper_tools())
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_resolve_custom_integration",
+                    "description": (
+                        "Build a custom API integration for a service that "
+                        "Composio does not support natively. Call this when: "
+                        "(1) COMPOSIO_MANAGE_CONNECTIONS could not find the "
+                        "toolkit, AND (2) the user has agreed to attempt a "
+                        "custom connection. This tool researches the service's "
+                        "API, generates a Python wrapper, tests it, and "
+                        "deploys it as a new set of callable tools. After it "
+                        "succeeds, ask the user for their API key and store "
+                        "it with lucy_store_api_key. NEVER use Bright Data, "
+                        "web scraping, or any other workaround — this is the "
+                        "ONLY correct path for unsupported services."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "services": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "List of service names to attempt custom "
+                                    "integration for (e.g. ['Clerk', 'Polar'])"
+                                ),
+                            },
+                        },
+                        "required": ["services"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_delete_custom_integration",
+                    "description": (
+                        "Delete a custom integration that was previously "
+                        "built. Removes the wrapper code, tools, and "
+                        "stored API key. ALWAYS ask the user for "
+                        "confirmation before calling this with "
+                        "confirmed=true. First call with confirmed=false "
+                        "to get a summary of what will be removed."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service_slug": {
+                                "type": "string",
+                                "description": (
+                                    "The slug of the integration to delete "
+                                    "(e.g. 'polarsh', 'clerk')"
+                                ),
+                            },
+                            "confirmed": {
+                                "type": "boolean",
+                                "description": (
+                                    "Set to true only after the user has "
+                                    "explicitly confirmed they want to "
+                                    "delete. Set to false for a preview."
+                                ),
+                            },
+                        },
+                        "required": ["service_slug"],
+                    },
+                },
+            })
+
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
             system_prompt = await build_system_prompt(
@@ -163,14 +257,100 @@ class LucyAgent:
                 connected_services=connected_services,
                 user_message=message,
             )
-            utc_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            system_prompt += f"\n\n## Current Time\nUTC: {utc_now}\n"
+            utc_now = datetime.now(timezone.utc)
+            time_block = (
+                f"\n\n## Current Time\nUTC: "
+                f"{utc_now.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            )
+
+            if ctx.user_slack_id:
+                try:
+                    from lucy.workspace.timezone import (
+                        get_user_local_time,
+                        get_user_timezone_name,
+                    )
+                    tz_name = await get_user_timezone_name(
+                        ctx.workspace_id, ctx.user_slack_id,
+                    )
+                    local_time = await get_user_local_time(
+                        ctx.workspace_id, ctx.user_slack_id,
+                    )
+                    if local_time and tz_name:
+                        local_str = local_time.strftime("%Y-%m-%d %H:%M")
+                        time_block = (
+                            f"\n\n## Current Time\n"
+                            f"UTC: {utc_now.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                            f"User's local time ({tz_name}): {local_str}\n"
+                            f"IMPORTANT: Always respond with times in the "
+                            f"user's timezone ({tz_name}) unless they "
+                            f"specifically ask for UTC.\n"
+                        )
+                except Exception as e:
+                    logger.warning("timezone_resolution_failed", error=str(e))
+
+            system_prompt += time_block
 
         # 5. Build conversation messages from Slack thread
         async with trace.span("build_thread_messages"):
             messages = await self._build_thread_messages(
                 ctx, message, slack_client
             )
+
+        # 5b. Pre-flight context injection
+        async with trace.span("preflight_context"):
+            preflight_parts: list[str] = []
+
+            try:
+                from lucy.workspace.memory import get_session_context_for_prompt
+                session_ctx = await get_session_context_for_prompt(ws)
+                if session_ctx:
+                    preflight_parts.append(session_ctx)
+            except Exception:
+                pass
+
+            if self._is_history_reference(message):
+                try:
+                    from lucy.workspace.history_search import (
+                        format_search_results,
+                        search_slack_history,
+                    )
+                    search_terms = self._extract_search_terms(message)
+                    for term in search_terms[:2]:
+                        results = await search_slack_history(
+                            ws, term, days_back=30, max_results=5,
+                        )
+                        if results:
+                            preflight_parts.append(
+                                f"### Relevant Slack History\n"
+                                f"{format_search_results(results)}"
+                            )
+                except Exception:
+                    pass
+
+            if preflight_parts:
+                context_block = "\n\n".join(preflight_parts)
+                messages.insert(-1, {
+                    "role": "system",
+                    "content": (
+                        f"<preflight_context>\n"
+                        f"The following context was automatically loaded "
+                        f"from the workspace. Use it to personalize and "
+                        f"ground your response.\n\n"
+                        f"{context_block}\n"
+                        f"</preflight_context>"
+                    ),
+                })
+
+        # 5c. Custom integration thread detection
+        # If the thread shows Lucy offered a custom integration and the
+        # current message is consent or provides an API key, inject an
+        # explicit instruction so the LLM calls the right tool.
+        nudge = self._detect_custom_integration_context(messages, message)
+        if nudge:
+            messages.insert(-1, {
+                "role": "system",
+                "content": nudge,
+            })
 
         # 6. Multi-turn LLM loop
         response_text = await self._agent_loop(
@@ -180,10 +360,28 @@ class LucyAgent:
             ctx=ctx,
             model=model,
             trace=trace,
+            route=route,
             slack_client=slack_client,
         )
 
-        # 6b. Post-response: persist memorable facts to memory
+        # 6b. Quality gate: catch service confusion and escalate if needed
+        if route.tier != "frontier":
+            gate = _assess_response_quality(message, response_text)
+            if gate["should_escalate"]:
+                logger.info(
+                    "quality_gate_escalation",
+                    reason=gate["reason"],
+                    confidence=gate["confidence"],
+                    original_model=model,
+                )
+                trace.decision_log = trace.decision_log if hasattr(trace, "decision_log") else []
+                corrected = await self._escalate_response(
+                    message, response_text, gate["reason"], ctx,
+                )
+                if corrected:
+                    response_text = corrected
+
+        # 6c. Post-response: persist memorable facts to memory
         try:
             from lucy.workspace.memory import (
                 add_session_fact,
@@ -256,6 +454,7 @@ class LucyAgent:
         ctx: AgentContext,
         model: str,
         trace: Trace,
+        route: Any,
         slack_client: Any | None = None,
     ) -> str:
         """Multi-turn LLM <-> tool execution loop."""
@@ -263,13 +462,16 @@ class LucyAgent:
         all_messages = list(messages)
         response_text = ""
         repeated_sigs: dict[str, int] = {}
+        self._empty_retries = 0
+        self._narration_retries = 0
+        self._edit_attempts = 0
         progress_sent = False
         progress_ts: str | None = None
 
         tool_names = {
             t.get("function", {}).get("name", "")
             for t in (tools or [])
-            if isinstance(t, dict)
+            if isinstance(t, dict) and t.get("function", {}).get("name")
         }
 
         current_model = model
@@ -304,7 +506,7 @@ class LucyAgent:
                         turn=turn,
                         messages_before=len(all_messages),
                     )
-                    all_messages = _trim_tool_results(all_messages)
+                    all_messages = await _trim_tool_results(all_messages)
                     from lucy.core.router import MODEL_TIERS
                     frontier = MODEL_TIERS.get("frontier", current_model)
                     if frontier != current_model:
@@ -318,6 +520,45 @@ class LucyAgent:
 
             response_text = response.content or ""
             tool_calls = response.tool_calls
+
+            # Empty response recovery: if the LLM returns nothing
+            # after tool results, escalate model then nudge.
+            if not tool_calls and not response_text.strip() and turn > 0:
+                empty_retries = getattr(self, "_empty_retries", 0)
+                if empty_retries < 2:
+                    self._empty_retries = empty_retries + 1
+
+                    if empty_retries == 1:
+                        from lucy.core.router import MODEL_TIERS
+                        stronger = MODEL_TIERS.get("frontier", current_model)
+                        if stronger != current_model:
+                            current_model = stronger
+                            logger.warning(
+                                "empty_response_model_escalation",
+                                turn=turn,
+                                from_model=model,
+                                to_model=stronger,
+                                workspace_id=ctx.workspace_id,
+                            )
+
+                    logger.warning(
+                        "empty_response_retry",
+                        turn=turn,
+                        attempt=empty_retries + 1,
+                        model=current_model,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": ""}
+                    )
+                    all_messages.append({
+                        "role": "user",
+                        "content": (
+                            "You found the right tools. Now use them to "
+                            "get the data I asked for and give me the answer."
+                        ),
+                    })
+                    continue
 
             if not tool_calls:
                 if (
@@ -343,6 +584,73 @@ class LucyAgent:
                         ),
                     })
                     continue
+
+                narration_retries = getattr(self, "_narration_retries", 0)
+                if (
+                    turn <= 3
+                    and tools
+                    and narration_retries < 1
+                    and _NARRATION_RE.search(response_text)
+                ):
+                    self._narration_retries = narration_retries + 1
+                    logger.warning(
+                        "narration_detected",
+                        turn=turn,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append({
+                        "role": "user",
+                        "content": (
+                            "I need the actual data, not a plan. "
+                            "Please call the tools now and give me the results."
+                        ),
+                    })
+                    continue
+
+                # Depth check: push deeper if response is shallow after few tool calls
+                # Skip for connection management and all internal lucy_* tools
+                tool_calls_so_far = len(trace.tool_calls_made)
+                response_length = len(response_text.strip())
+                just_managed_connections = any(
+                    "COMPOSIO_MANAGE_CONNECTIONS" in tc
+                    for tc in trace.tool_calls_made
+                )
+                used_internal_tool = any(
+                    tc.startswith("lucy_") for tc in trace.tool_calls_made
+                )
+                
+                if (
+                    turn <= 1
+                    and tool_calls_so_far <= 1
+                    and response_length < 300
+                    and tools
+                    and not self._is_simple_greeting(response_text)
+                    and not just_managed_connections
+                    and not used_internal_tool
+                ):
+                    logger.info(
+                        "depth_check_triggered",
+                        turn=turn,
+                        tool_calls=tool_calls_so_far,
+                        response_length=response_length,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your answer seems brief. Can you dig deeper? "
+                            "Use additional tool calls to verify your "
+                            "findings, cross-reference with other sources, "
+                            "or provide more comprehensive details."
+                        ),
+                    })
+                    continue
+
                 break
 
             # Loop detection — redirect LLM instead of hardcoded string
@@ -378,8 +686,8 @@ class LucyAgent:
                 and ctx.channel_id
                 and ctx.thread_ts
                 and (
-                    (turn == 1 and not progress_sent)
-                    or (turn > 1 and turn % 3 == 0)
+                    (turn == 2 and not progress_sent)
+                    or (turn > 2 and turn % 3 == 0)
                 )
             )
             if should_update:
@@ -445,16 +753,23 @@ class LucyAgent:
                 len(m.get("content", "")) for m in all_messages
             )
             if payload_size > MAX_PAYLOAD_CHARS:
-                all_messages = _trim_tool_results(all_messages, max_result_chars=300)
+                all_messages = await _trim_tool_results(all_messages, max_result_chars=300)
                 logger.info(
                     "payload_trimmed",
                     turn=turn,
                     before_chars=payload_size,
                 )
 
-            # Mid-loop model upgrade: if tools suggest coding, switch
+            # Mid-loop model upgrade: only switch to code model
+            # when the original routing intent was code-related.
+            # Avoids slow DeepSeek calls for calendar/email tasks
+            # that happen to trigger REMOTE_WORKBENCH.
             called_names = {tc.get("name", "") for tc in tool_calls}
-            if called_names & {"COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"}:
+            if (
+                called_names & {"COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"}
+                and route.intent in ("code", "code_reasoning")
+                and getattr(self, "_edit_attempts", 0) < 2
+            ):
                 from lucy.core.router import MODEL_TIERS
                 code_model = MODEL_TIERS.get("code", current_model)
                 if code_model != current_model:
@@ -465,6 +780,25 @@ class LucyAgent:
                         reason="code_execution_detected",
                     )
                     current_model = code_model
+
+            # Fail-Up Escalation: if lucy_edit_file has been called repeatedly,
+            # escalate to frontier model for deeper debugging capability
+            if "lucy_edit_file" in called_names:
+                edit_attempts = getattr(self, "_edit_attempts", 0) + 1
+                self._edit_attempts = edit_attempts
+                if edit_attempts >= 2:
+                    from lucy.core.router import MODEL_TIERS
+                    frontier_model = MODEL_TIERS.get(
+                        "frontier", current_model,
+                    )
+                    if frontier_model != current_model:
+                        logger.info(
+                            "fail_up_escalation",
+                            from_model=current_model,
+                            to_model=frontier_model,
+                            edit_attempts=edit_attempts,
+                        )
+                        current_model = frontier_model
 
             # Trim context window
             if len(all_messages) > MAX_CONTEXT_MESSAGES:
@@ -487,25 +821,23 @@ class LucyAgent:
     def _collect_partial_results(
         messages: list[dict[str, Any]],
     ) -> str:
-        """Extract meaningful partial results from tool messages."""
-        partials: list[str] = []
-        for msg in messages:
-            if msg.get("role") != "tool":
-                continue
-            content = msg.get("content", "")
-            if not content or '"error"' in content:
-                continue
-            if len(content) > 200:
-                partials.append(content[:200])
-            else:
-                partials.append(content)
-        if not partials:
-            return ""
-        return (
-            "Here's what I've gathered so far — I'm still "
-            "working on the rest and will follow up:\n\n"
-            + "\n".join(partials[:3])
+        """Produce a graceful fallback when the LLM returns an empty response.
+
+        Never expose raw JSON, tool names, or internal data to the user.
+        """
+        has_tool_results = any(
+            msg.get("role") == "tool"
+            and msg.get("content", "")
+            and '"error"' not in msg.get("content", "")
+            for msg in messages
         )
+        if has_tool_results:
+            return (
+                "I found some information but need a moment to "
+                "put it together properly. Let me try that again — "
+                "could you ask one more time?"
+            )
+        return ""
 
     # ── Parallel tool execution ─────────────────────────────────────────
 
@@ -520,6 +852,11 @@ class LucyAgent:
         """Execute all tool calls from a single LLM turn in parallel."""
         async def _run_one(i: int, tc: dict[str, Any]) -> tuple[str, str]:
             name = tc.get("name", "")
+            
+            # Register internal tools into tool_names dynamically if missed
+            if name.startswith("lucy_") and name not in tool_names:
+                tool_names.add(name)
+
             params = tc.get("parameters", {})
             call_id = tc.get("id", f"call_{i}")
             parse_error = tc.get("parse_error")
@@ -604,7 +941,39 @@ class LucyAgent:
                 )
 
             if name == "COMPOSIO_SEARCH_TOOLS":
+                search_query = params.get("query") or params.get("search") or ""
                 result = _filter_search_results(result)
+                result = _validate_search_relevance(
+                    result, search_query, trace.user_message,
+                )
+
+            if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                toolkits_requested = params.get("toolkits") or []
+                result = _validate_connection_relevance(
+                    result, toolkits_requested, trace.user_message,
+                )
+
+            # Annotate unresolved services for the LLM to surface
+            if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                unresolved = result.pop("_unresolved_services", None)
+                if unresolved:
+                    svc_list = ", ".join(unresolved)
+                    result["_dynamic_integration_hint"] = {
+                        "unresolved_services": unresolved,
+                        "instruction": (
+                            f"These services ({svc_list}) do NOT exist in Composio. "
+                            "Tell the user honestly: 'These services don't have "
+                            "a native integration that I can connect to directly. "
+                            "However, I can try to build a custom connection for "
+                            "you. I can't guarantee it will work, but I'll do my "
+                            "best. Want me to give it a shot?' "
+                            "Do NOT attempt web scraping, Bright Data, or any "
+                            "other workaround. Do NOT generate fake connection "
+                            "links. When the user says yes, call "
+                            "lucy_resolve_custom_integration with the service "
+                            "names. That is the ONLY correct next step."
+                        ),
+                    }
 
             trace.tool_calls_made.append(name)
             return call_id, self._serialize_result(result)
@@ -637,7 +1006,7 @@ class LucyAgent:
             from lucy.integrations.composio_client import get_composio_client
 
             client = get_composio_client()
-            names = await client.get_connected_app_names(workspace_id)
+            names = await client.get_connected_app_names_reliable(workspace_id)
             if names:
                 logger.info(
                     "connected_services_fetched",
@@ -710,7 +1079,7 @@ class LucyAgent:
                 result_text = await execute_history_tool(ws, tool_name, parameters)
                 return {"result": result_text}
 
-            if tool_name.startswith("lucy_generate_"):
+            if tool_name in ["lucy_write_file", "lucy_edit_file"] or tool_name.startswith("lucy_generate_"):
                 from lucy.tools.file_generator import execute_file_tool
                 return await execute_file_tool(
                     tool_name=tool_name,
@@ -718,6 +1087,60 @@ class LucyAgent:
                     slack_client=self._current_slack_client,
                     channel_id=self._current_channel_id,
                     thread_ts=self._current_thread_ts,
+                )
+
+            if tool_name == "lucy_resolve_custom_integration":
+                from lucy.integrations.resolver import resolve_multiple
+                services = parameters.get("services", [])
+                if not services:
+                    return {"error": "No service names provided"}
+                results = await resolve_multiple(services)
+                formatted = []
+                for r in results:
+                    entry: dict[str, Any] = {
+                        "service": r.service_name,
+                        "success": r.success,
+                        "stage": r.stage.value,
+                        "needs_api_key": r.needs_api_key,
+                        "timing_ms": r.timing_ms,
+                        **r.result_data,
+                    }
+                    if r.success and r.needs_api_key:
+                        slug = r.service_name.lower().replace(
+                            " ", ""
+                        ).replace(".", "").replace("-", "")
+                        entry["next_step"] = (
+                            f"Describe what you built and what you can now "
+                            f"help with IN YOUR OWN WORDS based on the data "
+                            f"above. Then ask for their {r.service_name} API "
+                            f"key. When they provide it, call "
+                            f"lucy_store_api_key with service_slug='{slug}' "
+                            f"and the key. Do NOT skip this step."
+                        )
+                    elif r.success:
+                        entry["next_step"] = (
+                            "Describe the result to the user IN YOUR OWN "
+                            "WORDS. Mention what capabilities are now "
+                            "available based on the data above."
+                        )
+                    else:
+                        entry["next_step"] = (
+                            "Explain honestly that you could not build the "
+                            "integration. Use the reasons from the data "
+                            "above. Offer alternatives if appropriate."
+                        )
+                    formatted.append(entry)
+                return {"results": formatted}
+
+            if tool_name == "lucy_store_api_key":
+                return await self._store_api_key(parameters)
+
+            if tool_name == "lucy_delete_custom_integration":
+                return self._delete_custom_integration(parameters)
+
+            if tool_name.startswith("lucy_custom_"):
+                return await self._execute_custom_wrapper_tool(
+                    tool_name, parameters, workspace_id,
                 )
 
             logger.warning("unknown_internal_tool", tool=tool_name)
@@ -730,6 +1153,221 @@ class LucyAgent:
                 error=str(e),
             )
             return {"error": str(e)}
+
+    # ── Custom wrapper tool execution ────────────────────────────────
+
+    async def _execute_custom_wrapper_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Execute a custom wrapper tool (lucy_custom_<slug>_<action>)."""
+        stripped = tool_name.removeprefix("lucy_custom_")
+
+        from lucy.integrations.custom_wrappers import execute_custom_tool
+
+        keys_path = Path(settings.workspace_root).parent / "keys.json"
+        api_key = ""
+        if keys_path.exists():
+            try:
+                keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+                slug = stripped.split("_", 1)[0]
+                api_key = (
+                    keys_data
+                    .get("custom_integrations", {})
+                    .get(slug, {})
+                    .get("api_key", "")
+                )
+            except Exception:
+                pass
+
+        if not api_key:
+            return {
+                "error": (
+                    "No API key configured for this custom integration. "
+                    "Ask the user to provide their API key, then store it "
+                    "using the lucy_store_api_key tool."
+                ),
+            }
+
+        result = execute_custom_tool(stripped, parameters, api_key)
+
+        if asyncio.iscoroutine(result):
+            result = await result
+
+        logger.info(
+            "custom_wrapper_tool_executed",
+            tool=tool_name,
+            workspace_id=workspace_id,
+        )
+        return result if isinstance(result, dict) else {"result": result}
+
+    async def _store_api_key(
+        self,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Store a user-provided API key for a custom integration."""
+        slug = parameters.get("service_slug", "").strip()
+        api_key = parameters.get("api_key", "").strip()
+
+        if not slug:
+            return {"error": "service_slug is required"}
+        if not api_key:
+            return {"error": "api_key is required"}
+
+        keys_path = Path(settings.workspace_root).parent / "keys.json"
+        keys_data: dict[str, Any] = {}
+        if keys_path.exists():
+            try:
+                keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        custom = keys_data.setdefault("custom_integrations", {})
+        custom.setdefault(slug, {})["api_key"] = api_key
+
+        keys_path.write_text(
+            json.dumps(keys_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        logger.info("api_key_stored", slug=slug)
+        return {
+            "result": f"API key for '{slug}' stored successfully.",
+            "slug": slug,
+        }
+
+    def _delete_custom_integration(
+        self,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Handle delete integration requests with confirmation flow."""
+        slug = parameters.get("service_slug", "").strip().lower()
+        confirmed = parameters.get("confirmed", False)
+
+        if not slug:
+            return {"error": "service_slug is required"}
+
+        from lucy.integrations.wrapper_generator import (
+            delete_custom_wrapper,
+            discover_saved_wrappers,
+        )
+
+        wrappers = discover_saved_wrappers()
+        match = next((w for w in wrappers if w.get("slug") == slug), None)
+
+        if not match:
+            return {
+                "error": f"No custom integration found for '{slug}'",
+                "instruction": (
+                    "Tell the user this integration does not exist. "
+                    "If they meant a different service, ask them to clarify."
+                ),
+            }
+
+        service_name = match.get("service_name", slug)
+        tool_count = match.get("total_tools", 0)
+        tool_samples = match.get("tools", [])[:5]
+        sample_str = ", ".join(tool_samples)
+
+        if not confirmed:
+            return {
+                "preview": True,
+                "service_name": service_name,
+                "slug": slug,
+                "tool_count": tool_count,
+                "instruction": (
+                    f"Ask the user to confirm deletion. Tell them: "
+                    f"'Removing the {service_name} integration will "
+                    f"delete {tool_count} capabilities (like {sample_str}"
+                    f"{'...' if tool_count > 5 else ''}). "
+                    f"You will no longer be able to ask me to do anything "
+                    f"with {service_name} until we rebuild it. "
+                    f"Are you sure you want to proceed?'"
+                ),
+            }
+
+        result = delete_custom_wrapper(slug)
+        if "error" in result:
+            return result
+
+        return {
+            "deleted": True,
+            "service_name": service_name,
+            "instruction": (
+                f"Tell the user: 'Done — I've removed the {service_name} "
+                f"integration and all {tool_count} capabilities. "
+                f"If you ever want to reconnect, just ask me to connect "
+                f"with {service_name} again and I'll rebuild it.'"
+            ),
+        }
+
+    # ── Quality gate escalation ────────────────────────────────────────
+
+    async def _escalate_response(
+        self,
+        user_message: str,
+        original_response: str,
+        issues: str,
+        ctx: AgentContext,
+    ) -> str | None:
+        """Ask frontier model to correct a response flagged by the quality gate.
+
+        Single LLM call (~$0.003) — only triggered when heuristics detect
+        a likely error. Returns corrected text, or None if original is fine.
+        """
+        from lucy.core.router import MODEL_TIERS
+
+        correction_prompt = (
+            f"A user sent this message:\n\"{user_message}\"\n\n"
+            f"An AI assistant responded:\n\"{original_response}\"\n\n"
+            f"Quality check detected these issues:\n{issues}\n\n"
+            f"If the response has real problems (wrong services, "
+            f"incorrect information, service name confusion), provide "
+            f"a CORRECTED response that addresses the user's actual "
+            f"request. Keep the same tone and style.\n\n"
+            f"If the original response is actually fine and the issues "
+            f"are false positives, respond with exactly: RESPONSE_OK"
+        )
+
+        try:
+            client = get_openclaw_client()
+            result = await asyncio.wait_for(
+                client.chat_completion(
+                    messages=[{"role": "user", "content": correction_prompt}],
+                    config=ChatConfig(
+                        model=MODEL_TIERS["frontier"],
+                        system_prompt=(
+                            "You are a quality auditor for an AI assistant "
+                            "named Lucy. Your job is to catch and fix errors "
+                            "in her responses — especially service name "
+                            "confusion (e.g., Clerk ≠ MoonClerk), wrong "
+                            "suggestions, and hallucinated capabilities. "
+                            "Be concise. If the response is fine, say "
+                            "RESPONSE_OK."
+                        ),
+                        max_tokens=800,
+                    ),
+                ),
+                timeout=10.0,
+            )
+
+            corrected = (result.content or "").strip()
+            if "RESPONSE_OK" in corrected:
+                logger.info("quality_gate_original_ok")
+                return None
+
+            logger.info(
+                "quality_gate_corrected",
+                original_len=len(original_response),
+                corrected_len=len(corrected),
+            )
+            return corrected
+
+        except Exception as exc:
+            logger.warning("quality_gate_escalation_failed", error=str(exc))
+            return None
 
     # ── Slack thread history ────────────────────────────────────────────
 
@@ -786,6 +1424,110 @@ class LucyAgent:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    _CUSTOM_INTEGRATION_OFFER_PHRASES = (
+        "custom connection",
+        "custom integration",
+        "build a custom",
+        "try to build",
+        "i can try to build",
+    )
+
+    _USER_CONSENT_PHRASES = (
+        "yes",
+        "go ahead",
+        "please build",
+        "build it",
+        "do it",
+        "sure",
+        "let's do it",
+        "try it",
+        "give it a shot",
+        "go for it",
+    )
+
+    _API_KEY_PATTERNS = re.compile(
+        r"(api[_ ]?key|token|secret|credential)s?\s*[:=]?\s*\S+|"
+        r"\b[a-zA-Z0-9_]{20,}\b",
+        re.IGNORECASE,
+    )
+
+    def _detect_custom_integration_context(
+        self,
+        messages: list[dict[str, Any]],
+        current_text: str,
+    ) -> str | None:
+        """Detect custom integration consent or API key in thread context.
+
+        Returns a system-level nudge message if the context warrants it,
+        otherwise None.
+        """
+        lower_current = current_text.lower()
+
+        offered_service: str | None = None
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = (msg.get("content") or "").lower()
+            if any(p in content for p in self._CUSTOM_INTEGRATION_OFFER_PHRASES):
+                for m in messages:
+                    if m.get("role") == "user":
+                        user_text = (m.get("content") or "").lower()
+                        for kw in ("connect with", "connect to", "connect"):
+                            if kw in user_text:
+                                after = user_text.split(kw, 1)[-1].strip()
+                                offered_service = after.split("\n")[0].strip(
+                                    " .!?,;:"
+                                )
+                                break
+                        if offered_service:
+                            break
+                break
+
+        if not offered_service:
+            return None
+
+        is_consent = any(p in lower_current for p in self._USER_CONSENT_PHRASES)
+        has_api_key = bool(self._API_KEY_PATTERNS.search(current_text))
+
+        if is_consent and has_api_key:
+            return (
+                f"<custom_integration_directive>\n"
+                f"The user has consented to building a custom integration for "
+                f"\"{offered_service}\" AND provided an API key in this message.\n"
+                f"You MUST do TWO things in this turn:\n"
+                f"1. Call lucy_store_api_key with service_slug and the key.\n"
+                f"2. Call lucy_resolve_custom_integration with [\"{offered_service}\"].\n"
+                f"Do NOT use Bright Data. Do NOT scrape. Do NOT suggest alternatives.\n"
+                f"</custom_integration_directive>"
+            )
+
+        if is_consent:
+            return (
+                f"<custom_integration_directive>\n"
+                f"The user has consented to building a custom integration for "
+                f"\"{offered_service}\". You MUST call "
+                f"lucy_resolve_custom_integration([\"{offered_service}\"]) NOW.\n"
+                f"Do NOT ask for the API key yet — the resolver will handle "
+                f"research and code generation first. Ask for the key AFTER "
+                f"the resolver completes.\n"
+                f"Do NOT use Bright Data. Do NOT scrape. Do NOT suggest alternatives.\n"
+                f"</custom_integration_directive>"
+            )
+
+        if has_api_key:
+            return (
+                f"<custom_integration_directive>\n"
+                f"The user is providing an API key for \"{offered_service}\". "
+                f"Extract the key from their message and call "
+                f"lucy_store_api_key with service_slug and the key.\n"
+                f"Then call lucy_resolve_custom_integration([\"{offered_service}\"]) "
+                f"to build the integration.\n"
+                f"Do NOT use Bright Data or any scraping tool.\n"
+                f"</custom_integration_directive>"
+            )
+
+        return None
+
     @staticmethod
     def _claims_no_access(text: str) -> bool:
         lower = text.lower()
@@ -799,6 +1541,39 @@ class LucyAgent:
                 "no access to",
             )
         )
+
+    @staticmethod
+    def _is_simple_greeting(text: str) -> bool:
+        """Check if response is a simple greeting/acknowledgment."""
+        lower = text.strip().lower()
+        return len(lower) < 80 and any(
+            w in lower
+            for w in ("hey", "hi", "hello", "how can i help", "what do you need")
+        )
+
+    @staticmethod
+    def _is_history_reference(message: str) -> bool:
+        """Check if a message references past context or discussions."""
+        lower = message.lower()
+        return any(phrase in lower for phrase in (
+            "what did we", "last time", "remember", "you mentioned",
+            "we discussed", "earlier", "previously", "follow up",
+            "didn't we", "wasn't there", "what about the",
+            "we agreed", "we decided", "you said", "that conversation",
+            "that decision", "status of",
+        ))
+
+    @staticmethod
+    def _extract_search_terms(message: str) -> list[str]:
+        """Extract meaningful search terms from a message."""
+        cleaned = re.sub(
+            r"\b(what|did|we|the|about|you|remember|last|time|earlier|"
+            r"previously|that|this|when|where)\b",
+            "",
+            message.lower(),
+        )
+        words = [w.strip() for w in cleaned.split() if len(w.strip()) > 3]
+        return words[:3]
 
     @staticmethod
     def _call_signature(tool_calls: list[dict[str, Any]]) -> str:
@@ -815,14 +1590,25 @@ class LucyAgent:
 
     @staticmethod
     def _serialize_result(result: Any) -> str:
-        """Serialize a tool result, compacting if too large."""
+        """Serialize a tool result, compacting if too large.
+
+        Auth/redirect URLs are extracted and preserved even when the
+        result body is truncated.
+        """
         if isinstance(result, (dict, list)):
             text = json.dumps(result, ensure_ascii=False, default=str)
         else:
             text = str(result)
 
         if len(text) > TOOL_RESULT_MAX_CHARS:
+            # Extract auth URLs before truncation so they survive
+            auth_urls = _AUTH_URL_RE.findall(text)
             text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
+            if auth_urls:
+                preserved = "\n".join(
+                    f"AUTH_URL: {url}" for url in auth_urls
+                )
+                text += f"\n{preserved}"
 
         text = _sanitize_tool_output(text)
         return text
@@ -862,13 +1648,168 @@ def _filter_search_results(
     return {**result, key: filtered, "_filtered_from": len(items)}
 
 
-def _trim_tool_results(
+def _normalize_service_name(name: str) -> str:
+    """Normalize service name for comparison."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _is_genuine_service_match(query: str, result_name: str) -> bool:
+    """Check if a search result genuinely matches the queried service.
+
+    Prevents Composio's fuzzy search from confusing different services:
+    - "Clerk" ≠ "MoonClerk" (auth platform vs payment processor)
+    - "Clerk" ≠ "Metabase" (completely unrelated)
+    - "GitHub" = "GitHub" (exact match)
+    - "google_calendar" ≈ "Google Calendar" (formatting variant)
+    """
+    q = _normalize_service_name(query)
+    r = _normalize_service_name(result_name)
+
+    if not q or not r:
+        return True
+
+    if q == r:
+        return True
+
+    # query is a formatting variant (google_calendar ≈ googlecalendar)
+    if q.replace("_", "") == r.replace("_", ""):
+        return True
+
+    # Result name starts with query (e.g., "github" → "githubactions")
+    if r.startswith(q) and len(r) - len(q) <= 8:
+        return True
+
+    # Query starts with result (e.g., "googledrive" → "google")
+    if q.startswith(r) and len(q) - len(r) <= 8:
+        return True
+
+    # Reject: query is a SUBSTRING of a longer, different name
+    # e.g., "clerk" in "moonclerk" — different service
+    if q in r and r != q:
+        prefix = r[:r.index(q)]
+        if prefix:
+            return False
+
+    return len(set(q) & set(r)) / max(len(set(q)), 1) > 0.7
+
+
+def _validate_search_relevance(
+    result: dict[str, Any],
+    search_query: str,
+    user_message: str,
+) -> dict[str, Any]:
+    """Validate search results against what the user actually asked for.
+
+    Injects relevance warnings into results so the LLM doesn't blindly
+    act on fuzzy matches from Composio's search.
+    """
+    if not isinstance(result, dict) or not search_query:
+        return result
+
+    items_key = next(
+        (k for k in ("items", "tools", "results") if k in result), None,
+    )
+    if not items_key:
+        return result
+
+    items = result.get(items_key, [])
+    if not isinstance(items, list):
+        return result
+
+    has_exact = False
+    mismatched: list[str] = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("app") or item.get("appName") or ""
+        if _is_genuine_service_match(search_query, name):
+            has_exact = True
+        else:
+            mismatched.append(name)
+
+    if mismatched and not has_exact:
+        mismatch_str = ", ".join(f"'{m}'" for m in mismatched[:5])
+        result["_relevance_warning"] = (
+            f"IMPORTANT: You searched for '{search_query}' but the results "
+            f"returned are for different services: {mismatch_str}. "
+            f"These are NOT the same as '{search_query}'. Do NOT suggest "
+            f"connecting to these services. Instead, acknowledge that "
+            f"'{search_query}' is not available as a native integration "
+            f"and offer to build a custom connection."
+        )
+        logger.warning(
+            "search_relevance_mismatch",
+            query=search_query,
+            mismatched=mismatched,
+        )
+    elif mismatched:
+        bad_names = ", ".join(f"'{m}'" for m in mismatched[:5])
+        result["_relevance_note"] = (
+            f"Note: Some results ({bad_names}) may not match the user's "
+            f"request for '{search_query}'. Only use results that exactly "
+            f"match the requested service."
+        )
+
+    return result
+
+
+def _validate_connection_relevance(
+    result: dict[str, Any],
+    toolkits_requested: list[str],
+    user_message: str,
+) -> dict[str, Any]:
+    """Validate connection results — catch when Composio returns wrong services.
+
+    When the user asks to connect "Clerk" but Composio resolves it to
+    "MoonClerk", this injects a correction so the LLM doesn't present
+    the wrong service to the user.
+    """
+    if not isinstance(result, dict) or not toolkits_requested:
+        return result
+
+    user_lower = user_message.lower()
+    connections = result.get("connections") or result.get("results") or []
+    if not isinstance(connections, list):
+        return result
+
+    corrections: list[str] = []
+    for req in toolkits_requested:
+        req_norm = _normalize_service_name(req)
+        for conn in connections:
+            if not isinstance(conn, dict):
+                continue
+            resolved_name = (
+                conn.get("app") or conn.get("name")
+                or conn.get("appName") or ""
+            )
+            if not _is_genuine_service_match(req, resolved_name):
+                corrections.append(
+                    f"'{req}' was matched to '{resolved_name}' which is a "
+                    f"DIFFERENT service. Do NOT present this to the user as "
+                    f"'{req}'."
+                )
+
+    if corrections:
+        result["_connection_corrections"] = corrections
+        result["_correction_instruction"] = (
+            "WARNING: Some service name matches are INCORRECT. "
+            + " ".join(corrections)
+            + " If the correct service is not available, acknowledge "
+            "honestly and offer to build a custom integration."
+        )
+
+    return result
+
+
+async def _trim_tool_results(
     messages: list[dict[str, Any]],
     max_result_chars: int = 500,
 ) -> list[dict[str, Any]]:
-    """Trim old tool results to reduce payload size for 400 recovery.
+    """Trim old tool results to reduce payload size.
 
-    Keeps the last 2 tool results intact; older ones get truncated.
+    Uses the fast tier model to summarize older tool outputs if they are large,
+    keeping the narrative intact without exploding the context window.
     """
     trimmed: list[dict[str, Any]] = []
     total_tool_results = sum(1 for m in messages if m.get("role") == "tool")
@@ -876,12 +1817,31 @@ def _trim_tool_results(
     trim_threshold = total_tool_results - keep_last_n
     tool_idx = 0
 
+    from lucy.config import settings
+    import httpx
+
     for msg in messages:
         if msg.get("role") == "tool":
             if tool_idx < trim_threshold:
                 content = msg.get("content", "")
                 if len(content) > max_result_chars:
-                    msg = {**msg, "content": content[:max_result_chars] + "...(summarized)"}
+                    try:
+                        prompt = f"Summarize this tool output concisely, preserving key errors, file paths, and success/fail signals. Keep it under {max_result_chars} characters.\n\n{content[:10000]}"
+                        async with httpx.AsyncClient(timeout=10.0) as http_client:
+                            resp = await http_client.post(
+                                "https://openrouter.ai/api/v1/chat/completions",
+                                headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
+                                json={
+                                    "model": settings.model_tier_fast,
+                                    "messages": [{"role": "user", "content": prompt}],
+                                    "max_tokens": 150
+                                }
+                            )
+                            summary = resp.json()["choices"][0]["message"]["content"]
+                            msg = {**msg, "content": f"[LLM SUMMARIZED]: {summary}"}
+                    except Exception as e:
+                        logger.warning("llm_condensation_failed", error=str(e))
+                        msg = {**msg, "content": content[:max_result_chars] + "...(summarized)"}
             tool_idx += 1
             trimmed.append(msg)
         else:
@@ -890,37 +1850,118 @@ def _trim_tool_results(
     return trimmed
 
 
+_KNOWN_SERVICE_PAIRS: dict[str, list[str]] = {
+    "clerk": ["moonclerk", "metabase"],
+    "linear": ["linearb"],
+    "notion": ["notionhq"],
+    "stripe": ["stripe atlas"],
+}
+
+
+def _assess_response_quality(
+    user_message: str,
+    response_text: str,
+) -> dict[str, Any]:
+    """Heuristic confidence scoring for the agent's response.
+
+    Checks for common error patterns WITHOUT an LLM call (zero cost).
+    Returns a quality assessment dict with:
+        - confidence: 1-10 score
+        - should_escalate: whether to re-run with frontier model
+        - reason: why escalation was triggered (if any)
+        - issues: list of detected issues
+    """
+    issues: list[str] = []
+    confidence = 10
+    resp_lower = response_text.lower()
+    user_lower = user_message.lower()
+
+    # 1. Service name confusion detection
+    for correct, wrong_matches in _KNOWN_SERVICE_PAIRS.items():
+        if correct in user_lower:
+            for wrong in wrong_matches:
+                if wrong in resp_lower and correct not in resp_lower.replace(wrong, ""):
+                    issues.append(
+                        f"Service confusion: user asked about '{correct}' "
+                        f"but response mentions '{wrong}'"
+                    )
+                    confidence -= 4
+
+    # 2. Suggesting services the user didn't ask about
+    service_suggestions = re.findall(
+        r"(?:connect|link|authorize|integration for)\s+(?:\*\*?)?(\w[\w\s]{2,20}?)(?:\*\*?)?",
+        resp_lower,
+    )
+    for suggested in service_suggestions:
+        suggested_clean = suggested.strip()
+        if (
+            len(suggested_clean) > 2
+            and suggested_clean not in user_lower
+            and not any(
+                _is_genuine_service_match(w, suggested_clean)
+                for w in user_lower.split()
+                if len(w) > 3
+            )
+        ):
+            issues.append(
+                f"Suggesting unrequested service: '{suggested_clean}'"
+            )
+            confidence -= 2
+
+    # 3. "I can't find" when user expects action
+    cant_patterns = [
+        "i don't have", "i can't", "i couldn't", "i wasn't able",
+        "no direct", "no native", "not available",
+    ]
+    if any(p in resp_lower for p in cant_patterns):
+        action_words = ["check", "get", "show", "list", "pull", "create", "report"]
+        if any(w in user_lower for w in action_words):
+            issues.append(
+                "Response says 'can't' but user expected action"
+            )
+            confidence -= 1
+
+    # 4. Response is very short for a complex question
+    if len(user_message) > 60 and len(response_text) < 100:
+        issues.append("Suspiciously short response for complex question")
+        confidence -= 1
+
+    confidence = max(1, min(10, confidence))
+    should_escalate = confidence <= 6 and len(issues) > 0
+
+    if issues:
+        logger.info(
+            "quality_gate_assessment",
+            confidence=confidence,
+            issues=issues,
+            should_escalate=should_escalate,
+        )
+
+    return {
+        "confidence": confidence,
+        "should_escalate": should_escalate,
+        "reason": "; ".join(issues) if issues else "",
+        "issues": issues,
+    }
+
+
 def _describe_progress(tool_calls: list[str], turn: int = 0) -> str:
-    """Generate a human-readable progress message from completed tool names.
+    """Generate a natural, human-sounding progress message.
 
     Updates are edited in-place (same message gets updated) so the user
     sees a single evolving status, not a stream of separate messages.
+    Responses come from LLM-generated pools (pre-warmed at startup).
+    Never expose tool names or internal machinery.
     """
-    tool_map = {
-        "COMPOSIO_SEARCH_TOOLS": "found the right tools",
-        "COMPOSIO_MANAGE_CONNECTIONS": "checked your integrations",
-        "COMPOSIO_MULTI_EXECUTE_TOOL": "executed some actions",
-        "COMPOSIO_GET_TOOL_SCHEMAS": "gathered tool details",
-        "COMPOSIO_REMOTE_WORKBENCH": "ran some code",
-        "COMPOSIO_REMOTE_BASH_TOOL": "ran a script",
-    }
-    steps = []
-    seen: set[str] = set()
-    for tc in tool_calls:
-        desc = tool_map.get(tc, tc.lower().replace("_", " "))
-        if desc not in seen:
-            steps.append(desc)
-            seen.add(desc)
-    if not steps:
-        return "Still working on this..."
+    from lucy.core.humanize import pick
 
-    prefix = "Working on it"
-    if turn >= 6:
-        prefix = "Still on it — this is a deep one"
-    elif turn >= 3:
-        prefix = "Making progress"
-
-    return f"{prefix} — so far I've {', '.join(steps[:4])}. Almost there..."
+    if turn <= 2:
+        return pick("progress_early")
+    if turn <= 4:
+        return pick("progress_mid")
+    if turn <= 7:
+        return pick("progress_late")
+    return pick("progress_final")
 
 
 # ── Singleton ───────────────────────────────────────────────────────────

@@ -8,7 +8,8 @@ The problem:
 
 The fix:
     A lightweight classifier that intercepts simple messages BEFORE the
-    agent loop and returns a canned (but varied) response directly.
+    agent loop and returns a response from LLM-generated message pools
+    (pre-warmed at startup via humanize.py).
 
 What qualifies for fast path:
     1. Pure greetings: "hi", "hello", "hey"
@@ -25,11 +26,12 @@ What does NOT qualify:
 
 from __future__ import annotations
 
-import random
 import re
 from dataclasses import dataclass
 
 import structlog
+
+from lucy.core.humanize import pick
 
 logger = structlog.get_logger()
 
@@ -37,9 +39,9 @@ logger = structlog.get_logger()
 @dataclass
 class FastPathResult:
     """Result of fast path evaluation."""
-    is_fast: bool              # True = skip agent loop entirely
-    response: str | None       # Pre-computed response (if is_fast)
-    reason: str = ""           # Why this was fast-pathed (for logging)
+    is_fast: bool
+    response: str | None
+    reason: str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -68,37 +70,6 @@ _HELP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════
-# RESPONSE POOLS (varied to avoid robotic repetition)
-# ═══════════════════════════════════════════════════════════════════════════
-
-_GREETING_RESPONSES = [
-    "Hey! What can I help with?",
-    "Hi there — what are you working on?",
-    "Hey! What do you need?",
-    "Hi! Ready when you are.",
-    "Hey — what's on your plate?",
-]
-
-_STATUS_RESPONSES = [
-    "I'm here — what do you need?",
-    "Online and ready. What's up?",
-    "Yep, I'm around! What can I help with?",
-    "Here and ready to go.",
-]
-
-_HELP_RESPONSES = [
-    (
-        "I can help with a lot — here's a quick rundown:\n\n"
-        "• *Search & research* — web, competitors, market data\n"
-        "• *Integrations* — Google Calendar, Gmail, GitHub, Linear, Sheets\n"
-        "• *Documents* — create PDFs, spreadsheets, presentations\n"
-        "• *Code* — review PRs, debug, write scripts, deploy\n"
-        "• *Automate* — set up recurring tasks, workflows, alerts\n\n"
-        "Just tell me what you need and I'll figure out the best way to do it."
-    ),
-]
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FAST PATH EVALUATION
@@ -111,52 +82,30 @@ def evaluate_fast_path(
 ) -> FastPathResult:
     """Evaluate whether a message can be handled without the full agent loop.
 
-    Args:
-        message: The user's message text
-        thread_depth: How deep in a thread (0 = top-level)
-        has_thread_context: Whether this is a reply in an existing thread
-
-    Returns:
-        FastPathResult with is_fast=True if we can skip the agent loop.
+    Responses come from LLM-generated pools (pre-warmed at startup).
+    If pools aren't ready yet, falls back to sensible defaults.
     """
     text = message.strip()
 
-    # Never fast-path in threads (needs conversation context)
     if has_thread_context and thread_depth > 0:
         return FastPathResult(is_fast=False, response=None, reason="in_thread")
 
-    # Never fast-path long messages
     if len(text) > 60:
         return FastPathResult(is_fast=False, response=None, reason="too_long")
 
-    # Check greeting
     if _GREETING_RE.match(text):
-        response = random.choice(_GREETING_RESPONSES)
+        response = pick("greeting")
         logger.info("fast_path_match", pattern="greeting", message=text[:50])
-        return FastPathResult(
-            is_fast=True,
-            response=response,
-            reason="greeting",
-        )
+        return FastPathResult(is_fast=True, response=response, reason="greeting")
 
-    # Check status
     if _STATUS_RE.match(text):
-        response = random.choice(_STATUS_RESPONSES)
+        response = pick("status")
         logger.info("fast_path_match", pattern="status", message=text[:50])
-        return FastPathResult(
-            is_fast=True,
-            response=response,
-            reason="status",
-        )
+        return FastPathResult(is_fast=True, response=response, reason="status")
 
-    # Check help
     if _HELP_RE.match(text):
-        response = random.choice(_HELP_RESPONSES)
+        response = pick("help")
         logger.info("fast_path_match", pattern="help", message=text[:50])
-        return FastPathResult(
-            is_fast=True,
-            response=response,
-            reason="help",
-        )
+        return FastPathResult(is_fast=True, response=response, reason="help")
 
     return FastPathResult(is_fast=False, response=None, reason="no_match")

@@ -6,10 +6,13 @@ and dynamic skill descriptions into the final system message.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import structlog
 
+from lucy.config import settings
 from lucy.workspace.filesystem import WorkspaceFS
 from lucy.workspace.skills import (
     get_key_skill_content,
@@ -98,6 +101,45 @@ async def build_system_prompt(
             "</current_environment>"
         )
         full_prompt += env_block
+
+    from lucy.integrations.wrapper_generator import discover_saved_wrappers
+    custom_wrappers = discover_saved_wrappers()
+
+    keys_path = Path(settings.workspace_root).parent / "keys.json"
+    keys_data: dict[str, Any] = {}
+    if keys_path.exists():
+        try:
+            keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    if custom_wrappers:
+        lines = [
+            "\n\n<custom_integrations>",
+            "IMPORTANT: You have built the following custom integrations. "
+            "Their tools are in your tool list prefixed with lucy_custom_. "
+            "When a user asks about one of these services, call the "
+            "lucy_custom_* tools directly. Do NOT use COMPOSIO_MULTI_EXECUTE_TOOL "
+            "or COMPOSIO_MANAGE_CONNECTIONS for these services — Composio does not "
+            "know about them. Use the lucy_custom_* tools instead.",
+        ]
+        for w in custom_wrappers:
+            svc = w.get("service_name", w.get("slug", "unknown"))
+            slug = w.get("slug", "")
+            n = w.get("total_tools", 0)
+            tool_samples = w.get("tools", [])[:8]
+            tools_list = ", ".join(tool_samples)
+            if n > len(tool_samples):
+                tools_list += f", ... ({n} total)"
+
+            ci_keys = keys_data.get("custom_integrations", {}).get(slug, {})
+            key_stored = bool(ci_keys.get("api_key"))
+            status = "READY" if key_stored else "needs API key"
+            lines.append(
+                f"- {svc} [{status}]: use lucy_custom_{slug}_* tools ({tools_list})"
+            )
+        lines.append("</custom_integrations>")
+        full_prompt += "\n".join(lines)
 
     logger.debug(
         "system_prompt_built",

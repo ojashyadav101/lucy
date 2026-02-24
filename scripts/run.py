@@ -114,7 +114,11 @@ def run_socket_mode() -> None:
         register_handlers(bolt)
         
         logger.info("bolt_app_created", middlewares=3)
-        
+
+        # Pre-warm LLM message pools (non-blocking background task)
+        from lucy.core.humanize import initialize_pools
+        asyncio.create_task(initialize_pools())
+
         handler = AsyncSocketModeHandler(bolt, settings.slack_app_token)
         await handler.start_async()
     

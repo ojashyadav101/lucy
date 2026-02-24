@@ -19,9 +19,9 @@ from dataclasses import dataclass
 from lucy.config import settings
 
 MODEL_TIERS: dict[str, str] = {
-    "fast": getattr(settings, "model_tier_fast", "google/gemini-2.5-flash"),
+    "fast": getattr(settings, "model_tier_fast", "google/gemini-2.5-flash-lite"),
     "default": getattr(settings, "model_tier_default", settings.openclaw_model),
-    "code": getattr(settings, "model_tier_code", "deepseek/deepseek-v3-0324"),
+    "code": getattr(settings, "model_tier_code", "deepseek/deepseek-chat-v3-0324"),
     "frontier": getattr(settings, "model_tier_frontier", "anthropic/claude-sonnet-4"),
 }
 
@@ -32,10 +32,18 @@ _CODE_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-_RESEARCH_KEYWORDS = re.compile(
-    r"\b(research|analyze|compare|strategy|report|deep dive|"
-    r"competitor|market|pricing model|comprehensive|thorough|"
-    r"investigate|audit|benchmark|evaluation)\b",
+_RESEARCH_LIGHT = re.compile(
+    r"\b(research|analyze|compare|strategy|report|competitor|"
+    r"market|pricing model|evaluation|"
+    r"investigate|audit|benchmark|"
+    r"tell me about|summarize|overview|what do you know|"
+    r"what integrations|what.+connected|list.+all|how many)\b",
+    re.IGNORECASE,
+)
+
+_RESEARCH_HEAVY = re.compile(
+    r"\b(deep dive|comprehensive|thorough|investigate|audit|"
+    r"benchmark|detailed analysis|competitive analysis|full report)\b",
     re.IGNORECASE,
 )
 
@@ -57,6 +65,13 @@ _ACTION_VERBS = re.compile(
 
 _CHECK_PATTERNS = re.compile(
     r"\b(check|verify|look|find|search|pull|get|fetch|show|list)\b",
+    re.IGNORECASE,
+)
+
+_DATA_SOURCE_KEYWORDS = re.compile(
+    r"\b(calendar|email|emails|gmail|inbox|unread|schedule|meeting|meetings|"
+    r"slack|github|issues?|pull requests?|commits?|notion|sheets?|"
+    r"spreadsheet|jira|linear|trello|drive|news|latest)\b",
     re.IGNORECASE,
 )
 
@@ -119,7 +134,25 @@ def classify_and_route(
             tier="fast",
         )
 
-    # 3. Coding tasks (removed "build" — "build me a report" is not code)
+    # 3. Deep research / analysis — check before code to avoid
+    #    "research code tools" being classified as coding.
+    #    Only escalate to frontier for genuinely complex tasks.
+    has_heavy = bool(_RESEARCH_HEAVY.search(text))
+    light_matches = _RESEARCH_LIGHT.findall(text)
+    if has_heavy or len(light_matches) >= 3:
+        return ModelChoice(
+            intent="reasoning",
+            model=MODEL_TIERS["frontier"],
+            tier="frontier",
+        )
+    if light_matches and len(text) > 40:
+        return ModelChoice(
+            intent="tool_use",
+            model=MODEL_TIERS["default"],
+            tier="default",
+        )
+
+    # 4. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
     if has_code:
         if _CHECK_PATTERNS.search(text) and len(text) < 80:
@@ -128,28 +161,21 @@ def classify_and_route(
                 model=MODEL_TIERS["default"],
                 tier="default",
             )
-        if _RESEARCH_KEYWORDS.search(text) and len(text) > 80:
-            return ModelChoice(
-                intent="code_reasoning",
-                model=MODEL_TIERS["frontier"],
-                tier="frontier",
-            )
         return ModelChoice(
             intent="code",
             model=MODEL_TIERS["code"],
             tier="code",
         )
 
-    # 4. Deep research / analysis (multiple signals = lower threshold)
-    research_matches = _RESEARCH_KEYWORDS.findall(text)
-    if research_matches and (len(text) > 60 or len(research_matches) >= 2):
+    # 5. Messages referencing external data sources always need tools
+    if _DATA_SOURCE_KEYWORDS.search(text):
         return ModelChoice(
-            intent="reasoning",
-            model=MODEL_TIERS["frontier"],
-            tier="frontier",
+            intent="tool_use",
+            model=MODEL_TIERS["default"],
+            tier="default",
         )
 
-    # 5. Short check/verify requests — need tool calls, not fast tier
+    # 6. Short check/verify requests — need tool calls, not fast tier
     if len(text) < 60 and _CHECK_PATTERNS.search(text):
         return ModelChoice(
             intent="tool_use",
@@ -157,7 +183,7 @@ def classify_and_route(
             tier="default",
         )
 
-    # 6. Simple lookups — truly simple questions only
+    # 7. Simple lookups — truly simple questions only
     if len(text) < 40 and _SIMPLE_QUESTION.match(text):
         if not _CHECK_PATTERNS.search(text):
             return ModelChoice(
@@ -166,7 +192,7 @@ def classify_and_route(
                 tier="fast",
             )
 
-    # 7. Default — tool-calling, general tasks
+    # 8. Default — tool-calling, general tasks
     return ModelChoice(
         intent="tool_use",
         model=MODEL_TIERS["default"],

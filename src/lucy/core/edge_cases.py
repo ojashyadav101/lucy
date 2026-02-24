@@ -254,35 +254,24 @@ def should_deduplicate_tool_call(
 # GRACEFUL DEGRADATION
 # ═══════════════════════════════════════════════════════════════════════════
 
-_DEGRADATION_MESSAGES = {
-    "rate_limited": (
-        "I'm handling a lot of requests right now. "
-        "Give me a moment and I'll get to this."
-    ),
-    "tool_timeout": (
-        "That's taking longer than expected. "
-        "Let me try a different approach."
-    ),
-    "service_unavailable": (
-        "That service seems to be having issues right now. "
-        "I'll try again in a bit, or we can work around it."
-    ),
-    "context_overflow": (
-        "This conversation has a lot of context. "
-        "Let me focus on the most recent part of your request."
-    ),
+_ERROR_TYPE_TO_POOL: dict[str, str] = {
+    "rate_limited": "error_rate_limit",
+    "tool_timeout": "error_timeout",
+    "service_unavailable": "error_connection",
+    "context_overflow": "error_generic",
 }
 
 
 def get_degradation_message(error_type: str) -> str:
     """Get a user-friendly degradation message for an error type.
 
+    Draws from LLM-generated message pools (pre-warmed at startup).
     Never exposes internal details — just warm, actionable framing.
     """
-    return _DEGRADATION_MESSAGES.get(
-        error_type,
-        "Working on that — give me just a moment.",
-    )
+    from lucy.core.humanize import pick
+
+    category = _ERROR_TYPE_TO_POOL.get(error_type, "error_generic")
+    return pick(category)
 
 
 def classify_error_for_degradation(error: Exception) -> str:

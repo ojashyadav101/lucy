@@ -194,6 +194,35 @@ class ComposioClient:
         if not self._composio:
             return {"error": "Composio not initialized"}
 
+        # Auto-correct common toolkit name mistakes made by LLM or users
+        reverse_toolkit_map = {}
+        if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and "toolkits" in arguments:
+            _TOOLKIT_NAME_MAP = {
+                "google_drive": "googledrive",
+                "google drive": "googledrive",
+                "google_calendar": "googlecalendar",
+                "google calendar": "googlecalendar",
+                "google_sheets": "googlesheets",
+                "google sheets": "googlesheets",
+                "bright_data": "brightdata",
+                "bright data": "brightdata",
+                "gmail": "gmail",
+                "github": "github",
+                "linear": "linear",
+                "vercel": "vercel",
+                "google_search_console": "google_search_console",
+                "google search console": "google_search_console"
+            }
+            original_toolkits = arguments.get("toolkits", [])
+            if isinstance(original_toolkits, list):
+                corrected_toolkits = []
+                for tk in original_toolkits:
+                    normalized_tk = str(tk).lower().strip()
+                    corrected = _TOOLKIT_NAME_MAP.get(normalized_tk, normalized_tk)
+                    corrected_toolkits.append(corrected)
+                    reverse_toolkit_map[corrected] = str(tk)
+                arguments["toolkits"] = corrected_toolkits
+
         @retry(
             retry=retry_if_exception_type(_RetryableComposioError),
             stop=stop_after_attempt(3),
@@ -250,6 +279,116 @@ class ComposioClient:
                 tool=tool_name,
                 workspace_id=workspace_id,
             )
+            
+            # --- Architectural Auto-Repair for MANAGE_CONNECTIONS ---
+            if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                data = result.get("data", {})
+                if isinstance(data, dict) and "results" in data:
+                    results_map = data.get("results", {})
+                    failed_toolkits = [
+                        k for k, v in results_map.items() 
+                        if v.get("status") == "failed" and "not found" in str(v.get("error_message", "")).lower()
+                    ]
+                    
+                    if failed_toolkits:
+                        recovered_slugs = []
+                        for ft in failed_toolkits:
+                            try:
+                                # Search for the proper toolkit name
+                                search_res = await asyncio.to_thread(
+                                    self._composio.tools.execute,
+                                    slug="COMPOSIO_SEARCH_TOOLS",
+                                    arguments={"query": ft.replace("_", " ")},
+                                    user_id=workspace_id,
+                                    dangerously_skip_version_check=True
+                                )
+                                search_data = getattr(search_res, "model_dump", lambda: search_res)() if hasattr(search_res, "model_dump") else search_res
+                                if isinstance(search_data, dict):
+                                    search_data = search_data.get("data", search_data)
+                                results_list = search_data.get("results", []) if isinstance(search_data, dict) else search_data
+                                
+                                if isinstance(results_list, list) and len(results_list) > 0:
+                                    first_result = results_list[0]
+                                    possible_toolkits = first_result.get("toolkits", [])
+                                    if possible_toolkits:
+                                        # Only accept it if it's not a generic fallback like composio_search
+                                        suggested_slug = possible_toolkits[0]
+                                        if suggested_slug != "composio_search":
+                                            original_request = reverse_toolkit_map.get(ft, ft)
+                                            clean_original = original_request.lower().replace("_", "").replace(" ", "")
+                                            clean_suggested = suggested_slug.lower().replace("_", "").replace(" ", "")
+                                            
+                                            # STRICT MATCHING: Only auto-repair if they are practically identical.
+                                            # Prevents fuzzy search from mapping "Clerk" to "Moonclerk"
+                                            if clean_original == clean_suggested:
+                                                recovered_slugs.append(suggested_slug)
+                                                # We need to map the recovered slug back to whatever the LLM originally asked for
+                                                reverse_toolkit_map[suggested_slug] = original_request
+                            except Exception as e:
+                                logger.warning("composio_auto_repair_search_failed", toolkit=ft, error=str(e))
+                        
+                        if recovered_slugs:
+                            try:
+                                retry_res = await asyncio.to_thread(
+                                    self._composio.tools.execute,
+                                    slug="COMPOSIO_MANAGE_CONNECTIONS",
+                                    arguments={"toolkits": recovered_slugs},
+                                    user_id=workspace_id,
+                                    dangerously_skip_version_check=True
+                                )
+                                retry_data = getattr(retry_res, "model_dump", lambda: retry_res)() if hasattr(retry_res, "model_dump") else retry_res
+                                if isinstance(retry_data, dict):
+                                    # Merge successful recoveries back into the original result
+                                    retry_results_map = retry_data.get("data", {}).get("results", {}) if isinstance(retry_data.get("data"), dict) else retry_data.get("results", {})
+                                    if retry_results_map:
+                                        for k, v in retry_results_map.items():
+                                            if v.get("status") != "failed":
+                                                result["data"]["results"][k] = v
+                                        # Remove the originally failed ones that we successfully replaced
+                                        for ft in failed_toolkits:
+                                            if isinstance(result.get("data"), dict) and isinstance(result["data"].get("results"), dict):
+                                                if ft in result["data"]["results"]:
+                                                    del result["data"]["results"][ft]
+                            except Exception as e:
+                                logger.warning("composio_auto_repair_retry_failed", error=str(e))
+            
+            # Map keys back to what the LLM originally requested
+            if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                data = result.get("data", {})
+                if isinstance(data, dict) and "results" in data:
+                    results_map = data.get("results", {})
+                    mapped_results = {}
+                    for k, v in results_map.items():
+                        original_k = reverse_toolkit_map.get(k, k)
+                        # Also fix the inner toolkit name so LLM sees exact match
+                        if isinstance(v, dict):
+                            if "toolkit" in v:
+                                v["toolkit"] = original_k
+                            # Strip out verbose current_user_info to avoid truncating LLM context
+                            if "current_user_info" in v:
+                                del v["current_user_info"]
+                        mapped_results[original_k] = v
+                    result["data"]["results"] = mapped_results
+            
+            # Collect permanently failed toolkits (after all auto-repair)
+            if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                data = result.get("data", {})
+                if isinstance(data, dict) and "results" in data:
+                    permanently_failed = [
+                        k for k, v in data["results"].items()
+                        if isinstance(v, dict)
+                        and v.get("status") == "failed"
+                        and "not found" in str(v.get("error_message", "")).lower()
+                    ]
+                    if permanently_failed:
+                        result["_unresolved_services"] = permanently_failed
+                        logger.info(
+                            "composio_unresolved_services",
+                            services=permanently_failed,
+                            workspace_id=workspace_id,
+                        )
+            # --------------------------------------------------------
+
             return result
 
         except _RetryableComposioError as e:
@@ -339,6 +478,38 @@ class ComposioClient:
         """Return just the names of actively connected apps."""
         apps = await self.get_connected_apps(workspace_id)
         return [a["name"] for a in apps if a.get("connected")]
+
+    async def get_connected_app_names_reliable(self, workspace_id: str) -> list[str]:
+        """Get connected app names using multiple detection methods.
+
+        Falls back to session.toolkits(is_connected=True) when the
+        basic check returns suspiciously few results.
+        """
+        names = await self.get_connected_app_names(workspace_id)
+
+        if len(names) < 3:
+            try:
+                def _fetch_connected() -> list[str]:
+                    session = self._get_session_with_recovery(workspace_id)
+                    toolkits = session.toolkits(is_connected=True)
+                    items = getattr(toolkits, "items", [])
+                    found: list[str] = []
+                    for tk in items:
+                        name = getattr(tk, "name", None) or getattr(tk, "slug", None)
+                        if name and name not in found:
+                            found.append(name)
+                    return found
+
+                fallback_names = await asyncio.to_thread(_fetch_connected)
+                for n in fallback_names:
+                    if n not in names:
+                        names.append(n)
+            except Exception as e:
+                logger.warning(
+                    "connected_toolkits_fallback_failed", error=str(e),
+                )
+
+        return names
 
     def invalidate_cache(self, workspace_id: str | None = None) -> None:
         """Clear cached sessions and tools for a workspace (or all)."""

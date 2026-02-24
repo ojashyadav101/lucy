@@ -23,9 +23,21 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/home/user/[^\s)\"']+"), ""),
     (re.compile(r"/workspace[s]?/[^\s)\"']+"), ""),
     (re.compile(r"@?workspace_seeds[^\s]*"), ""),
-    (re.compile(r"COMPOSIO_\w+"), ""),
-    (re.compile(r"composio\.dev[^\s)\"']*"), ""),
-    (re.compile(r"(?i)\bcomposio\b"), ""),
+    # Contextual Composio meta-tool replacements (match with optional verb prefix)
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_SEARCH_TOOLS"), "searching available tools"),
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_MANAGE_CONNECTIONS"), "checking integrations"),
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_MULTI_EXECUTE_TOOL"), "running actions"),
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_WORKBENCH"), "running some code"),
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_BASH_TOOL"), "running a script"),
+    (re.compile(r"(?:using |called |via |through )?COMPOSIO_GET_TOOL_SCHEMAS"), "looking up tool details"),
+    (re.compile(r"COMPOSIO_\w+"), ""),  # catch-all for any remaining
+    # Custom integration tool names (lucy_custom_<slug>_<action>)
+    (re.compile(r"`?lucy_custom_\w+`?"), ""),
+    (re.compile(r"\blucy_\w+\b"), ""),
+    # NOTE: Do NOT strip composio.dev URLs — they are user-facing auth links.
+    # Only strip the brand name "composio" when it appears as plain text
+    # (not inside a URL).
+    (re.compile(r"(?<![\w/.])composio(?!\.dev)(?!\.\w)", re.IGNORECASE), ""),
     (re.compile(r"(?i)\bopenrouter\b"), ""),
     (re.compile(r"(?i)\bopenclaw\b"), ""),
     (re.compile(r"(?i)\bminimax\b"), ""),
@@ -38,12 +50,30 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _ALLCAPS_TOOL_RE = re.compile(r"\b[A-Z]{2,}_[A-Z_]{3,}\b")
 
 _HUMANIZE_MAP = {
+    # Composio meta-tools
+    "COMPOSIO_SEARCH_TOOLS": "search for tools",
+    "COMPOSIO_MANAGE_CONNECTIONS": "manage integrations",
+    "COMPOSIO_MULTI_EXECUTE_TOOL": "execute actions",
+    "COMPOSIO_REMOTE_WORKBENCH": "run code",
+    "COMPOSIO_REMOTE_BASH_TOOL": "run a script",
+    "COMPOSIO_GET_TOOL_SCHEMAS": "look up tool details",
+    # Google
     "GOOGLECALENDAR_CREATE_EVENT": "schedule a meeting",
     "GOOGLECALENDAR_EVENTS_LIST": "check your calendar",
     "GOOGLECALENDAR_FIND_FREE_SLOTS": "find open time slots",
     "GMAIL_SEND_EMAIL": "send an email",
     "GMAIL_GET_EMAILS": "check your email",
+    "GMAIL_CREATE_DRAFT": "draft an email",
     "GOOGLEDRIVE_LIST_FILES": "check your Drive",
+    "GOOGLEDRIVE_CREATE_FILE": "create a file in Drive",
+    "GOOGLESHEETS_GET_SPREADSHEET": "check a spreadsheet",
+    # GitHub
+    "GITHUB_LIST_PULL_REQUESTS": "check pull requests",
+    "GITHUB_CREATE_ISSUE": "create an issue",
+    "GITHUB_GET_REPOSITORY": "check the repository",
+    # Linear
+    "LINEAR_CREATE_ISSUE": "create a Linear ticket",
+    "LINEAR_LIST_ISSUES": "check Linear issues",
 }
 
 
@@ -183,6 +213,33 @@ _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+_BROKEN_URLS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"<https?://[a-z]{2,15}\.\|[^>]*>", re.IGNORECASE),
+        "_(link unavailable — use `/lucy connect <service>`)_",
+    ),
+    (
+        re.compile(r"<https?://[a-z]{2,15}\.>", re.IGNORECASE),
+        "_(link unavailable — use `/lucy connect <service>`)_",
+    ),
+    (
+        re.compile(r"\[([^\]]*)\]\(https?://[a-z]{2,15}\.[)\s]", re.IGNORECASE),
+        "_(link unavailable — use `/lucy connect <service>`)_ ",
+    ),
+    (
+        re.compile(r"https?://[a-z]{2,15}\.\s", re.IGNORECASE),
+        "_(link unavailable — use `/lucy connect <service>`)_ ",
+    ),
+]
+
+
+def _fix_broken_urls(text: str) -> str:
+    """Remove broken/truncated URLs in both plain and Slack mrkdwn format."""
+    for pattern, replacement in _BROKEN_URLS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _validate_tone(text: str) -> str:
     for pattern, replacement in _TONE_REPLACEMENTS:
         text = pattern.sub(replacement, text)
@@ -199,6 +256,7 @@ def process_output(text: str) -> str:
         return text
 
     text = _sanitize(text)
+    text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     text = _validate_tone(text)
     return text.strip()

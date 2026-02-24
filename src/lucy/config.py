@@ -35,14 +35,14 @@ class Settings(BaseSettings):
     # LLM via OpenRouter (all requests go through OpenRouter)
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openclaw_model: str = "minimax/minimax-m2.5"
+    openclaw_model: str = "google/gemini-2.5-flash"
     openclaw_read_timeout: float = 120.0
 
     # Model tiers for dynamic routing
-    model_tier_fast: str = "google/gemini-2.5-flash"
-    model_tier_default: str = "minimax/minimax-m2.5"
-    model_tier_code: str = "deepseek/deepseek-v3-0324"
-    model_tier_frontier: str = "anthropic/claude-sonnet-4"
+    model_tier_fast: str = "google/gemini-2.5-flash-lite"
+    model_tier_default: str = "google/gemini-2.5-flash"
+    model_tier_code: str = "deepseek/deepseek-chat"
+    model_tier_frontier: str = "google/gemini-3.1-pro-preview"
 
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)
     openclaw_base_url: str = "http://167.86.82.46:18791"
