@@ -360,6 +360,10 @@ class Agent(Base):
         comment="main|personal|custom"
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email_address: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Agent's own email address (e.g. lucy@zeeyamail.com)"
+    )
     
     # For personal agents (V2)
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(

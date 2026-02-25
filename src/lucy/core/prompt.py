@@ -130,6 +130,39 @@ async def build_system_prompt(
         )
         static_parts.append(env_block)
 
+    if settings.agentmail_enabled and settings.agentmail_api_key:
+        email_addr = f"lucy@{settings.agentmail_domain}"
+        static_parts.append(
+            "<email_identity>\n"
+            f"You have your own email address: {email_addr}\n"
+            "This is YOUR email, not the user's. You can send emails, "
+            "read your inbox, reply to threads, and search messages using "
+            "the lucy_send_email, lucy_read_emails, lucy_reply_to_email, "
+            "lucy_search_emails, and lucy_get_email_thread tools.\n"
+            "Use it for outbound communication, notifications, agent-to-agent "
+            "messaging, or any task where you need your own email identity.\n"
+            "When you receive an inbound email, you will be notified.\n"
+            "</email_identity>"
+        )
+
+    if settings.spaces_enabled:
+        static_parts.append(
+            "<spaces_capability>\n"
+            "You can build and deploy full-stack web apps on zeeya.app.\n"
+            "WORKFLOW (exactly 3 steps):\n"
+            "1. lucy_spaces_init → scaffolds React+Convex project, returns sandbox_path\n"
+            "2. lucy_write_file → write your app code to {sandbox_path}/src/App.tsx\n"
+            "3. lucy_spaces_deploy → auto-builds and deploys, returns live URL\n"
+            "\n"
+            "IMPORTANT RULES:\n"
+            "- NEVER use COMPOSIO_REMOTE_BASH_TOOL or COMPOSIO_REMOTE_WORKBENCH for spaces.\n"
+            "- The deploy tool handles building automatically. No manual build step.\n"
+            "- After deploy, tell the user the live URL (https://{subdomain}).\n"
+            "- Do NOT dump raw JSON to the user. Summarize results in natural language.\n"
+            "- Available UI: 53 shadcn/ui components, Tailwind CSS, React 19.\n"
+            "</spaces_capability>"
+        )
+
     static_prefix = _SECTION_SEP.join(static_parts)
 
     # ── DYNAMIC SUFFIX ───────────────────────────────────────────

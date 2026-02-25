@@ -262,6 +262,14 @@ class LucyAgent:
             from lucy.tools.file_generator import get_file_tool_definitions
             tools.extend(get_file_tool_definitions())
 
+            from lucy.tools.email_tools import get_email_tool_definitions
+            if settings.agentmail_enabled and settings.agentmail_api_key:
+                tools.extend(get_email_tool_definitions())
+
+            from lucy.tools.spaces import get_spaces_tool_definitions
+            if settings.spaces_enabled:
+                tools.extend(get_spaces_tool_definitions())
+
             tools.append({
                 "type": "function",
                 "function": {
@@ -1628,6 +1636,18 @@ class LucyAgent:
 
             if tool_name == "lucy_delete_custom_integration":
                 return self._delete_custom_integration(parameters)
+
+            from lucy.tools.spaces import is_spaces_tool
+            if is_spaces_tool(tool_name):
+                from lucy.tools.spaces import execute_spaces_tool
+                return await execute_spaces_tool(
+                    tool_name, parameters, workspace_id,
+                )
+
+            from lucy.tools.email_tools import is_email_tool
+            if is_email_tool(tool_name):
+                from lucy.tools.email_tools import execute_email_tool
+                return await execute_email_tool(tool_name, parameters)
 
             if tool_name.startswith("lucy_custom_"):
                 return await self._execute_custom_wrapper_tool(

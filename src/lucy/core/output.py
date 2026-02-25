@@ -50,6 +50,14 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
     (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),
     (re.compile(r"task\.json\b"), ""),
+    (re.compile(
+        r'\{\s*"(?:success|error|result|project_name|slug|sandbox_path|convex_url|'
+        r'deployment_id|file_path|url|subdomain|preview_url|workspace_id|'
+        r'created_at|last_deployed|description|name|count|apps)"\s*:'
+        r'[^}]*\}',
+        re.DOTALL,
+    ), ""),
+    (re.compile(r"/Users/[^\s)\"']+"), ""),
 ]
 
 _ALLCAPS_TOOL_RE = re.compile(r"\b[A-Z]{2,}_[A-Z_]{3,}\b")
@@ -508,7 +516,7 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
     try:
         from lucy.core.openclaw import ChatConfig, get_openclaw_client
 
-        client = get_openclaw_client()
+        client = await get_openclaw_client()
 
         categories_found = sorted({cat for _, _, cat in tells})
         user_msg = (

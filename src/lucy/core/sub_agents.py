@@ -122,7 +122,18 @@ def _build_sub_system_prompt(spec: SubAgentSpec) -> str:
     task_prompt = ""
     if task_path.exists():
         task_prompt = task_path.read_text(encoding="utf-8")
-    return f"{soul_lite}\n\n---\n\n{task_prompt}"
+
+    extra = ""
+    if settings.agentmail_enabled and settings.agentmail_api_key:
+        email_addr = f"lucy@{settings.agentmail_domain}"
+        extra = (
+            f"\n\n## Email Identity\n"
+            f"You have your own email: {email_addr}. "
+            "If an email action is relevant to the task, include it in "
+            "your response so the supervisor can execute it."
+        )
+
+    return f"{soul_lite}\n\n---\n\n{task_prompt}{extra}"
 
 
 def _to_assistant_msg(resp: OpenClawResponse) -> dict[str, Any]:

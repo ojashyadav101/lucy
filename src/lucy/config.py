@@ -59,8 +59,21 @@ class Settings(BaseSettings):
     # Composio
     composio_api_key: str = ""
 
+    # AgentMail (native email identity)
+    agentmail_api_key: str = ""
+    agentmail_domain: str = "zeeyamail.com"
+    agentmail_enabled: bool = True
+
     # Workspace filesystem
     workspace_root: Path = Path("./workspaces")
+
+    # Lucy Spaces
+    convex_team_token: str = ""
+    convex_team_id: str = ""
+    vercel_token: str = ""
+    vercel_team_id: str = ""
+    spaces_domain: str = "zeeya.app"
+    spaces_enabled: bool = True
 
     # Application
     log_level: str = "INFO"
@@ -84,6 +97,25 @@ class Settings(BaseSettings):
             comp_key = keys.get("composio", {}).get("api_key")
             if comp_key:
                 self.composio_api_key = comp_key
+
+        if not self.agentmail_api_key:
+            am_key = keys.get("agentmail", {}).get("api_key")
+            if am_key:
+                self.agentmail_api_key = am_key
+
+        if not self.convex_team_token:
+            cx = keys.get("convex", {})
+            if cx.get("team_token"):
+                self.convex_team_token = cx["team_token"]
+            if cx.get("team_id"):
+                self.convex_team_id = cx["team_id"]
+
+        if not self.vercel_token:
+            vl = keys.get("vercel", {})
+            if vl.get("token"):
+                self.vercel_token = vl["token"]
+            if vl.get("team_id"):
+                self.vercel_team_id = vl["team_id"]
 
         if not self.workspace_root.is_absolute():
             self.workspace_root = Path(__file__).parent.parent.parent / self.workspace_root

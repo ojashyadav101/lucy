@@ -33,6 +33,9 @@ dependencies = [
     # Integrations (Composio meta-tools)
     "composio>=0.11,<1",
 
+    # Email (native agent identity)
+    "agentmail>=0.2,<1",
+
     # Workspace filesystem
     "aiofiles>=24.1,<25",
     "pyyaml>=6.0,<7",
