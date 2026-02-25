@@ -19,31 +19,32 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Create custom enums
-    op.execute("""
-        CREATE TYPE taskstatus AS ENUM (
-            'created', 'pending_approval', 'running', 'completed', 
-            'failed', 'cancelled', 'timeout'
-        )
-    """)
-    op.execute("""
-        CREATE TYPE taskpriority AS ENUM ('critical', 'high', 'normal', 'low', 'batch')
-    """)
-    op.execute("""
-        CREATE TYPE approvalstatus AS ENUM (
-            'pending', 'approved', 'rejected', 'expired'
-        )
-    """)
-    op.execute("""
-        CREATE TYPE integrationstatus AS ENUM (
-            'pending', 'active', 'refreshing', 'error', 'revoked'
-        )
-    """)
-    op.execute("""
-        CREATE TYPE heartbeatstatus AS ENUM (
-            'healthy', 'triggered', 'silenced', 'disabled'
-        )
-    """)
+    taskstatus_enum = postgresql.ENUM(
+        'created', 'pending_approval', 'running', 'completed',
+        'failed', 'cancelled', 'timeout',
+        name='taskstatus', create_type=True,
+    )
+    taskpriority_enum = postgresql.ENUM(
+        'critical', 'high', 'normal', 'low', 'batch',
+        name='taskpriority', create_type=True,
+    )
+    approvalstatus_enum = postgresql.ENUM(
+        'pending', 'approved', 'rejected', 'expired',
+        name='approvalstatus', create_type=True,
+    )
+    integrationstatus_enum = postgresql.ENUM(
+        'pending', 'active', 'refreshing', 'error', 'revoked',
+        name='integrationstatus', create_type=True,
+    )
+    heartbeatstatus_enum = postgresql.ENUM(
+        'healthy', 'triggered', 'silenced', 'disabled',
+        name='heartbeatstatus', create_type=True,
+    )
+    taskstatus_enum.create(op.get_bind(), checkfirst=True)
+    taskpriority_enum.create(op.get_bind(), checkfirst=True)
+    approvalstatus_enum.create(op.get_bind(), checkfirst=True)
+    integrationstatus_enum.create(op.get_bind(), checkfirst=True)
+    heartbeatstatus_enum.create(op.get_bind(), checkfirst=True)
 
     # Workspaces
     op.create_table(
@@ -136,7 +137,7 @@ def upgrade() -> None:
         sa.Column("slack_thread_ts", sa.String(50), nullable=True),
         sa.Column("intent", sa.String(100), nullable=True),
         sa.Column("priority", sa.SmallInteger(), nullable=False, server_default="2"),
-        sa.Column("status", sa.Enum("taskstatus", name="taskstatus_enum"), nullable=False),
+        sa.Column("status", postgresql.ENUM('created', 'pending_approval', 'running', 'completed', 'failed', 'cancelled', 'timeout', name='taskstatus', create_type=False), nullable=False),
         sa.Column("status_reason", sa.Text(), nullable=True),
         sa.Column("queued_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
@@ -187,7 +188,7 @@ def upgrade() -> None:
         sa.Column("action_type", sa.String(50), nullable=False),
         sa.Column("action_description", sa.Text(), nullable=False),
         sa.Column("risk_level", sa.String(20), nullable=False, server_default="medium"),
-        sa.Column("status", sa.Enum("approvalstatus", name="approvalstatus_enum"), nullable=False),
+        sa.Column("status", postgresql.ENUM('pending', 'approved', 'rejected', 'expired', name='approvalstatus', create_type=False), nullable=False),
         sa.Column("slack_message_ts", sa.String(50), nullable=True),
         sa.Column("response", sa.Text(), nullable=True),
         sa.Column("responded_at", sa.DateTime(timezone=True), nullable=True),
@@ -244,7 +245,7 @@ def upgrade() -> None:
         sa.Column("alert_cooldown_seconds", sa.Integer(), nullable=False, server_default="3600"),
         sa.Column("last_alert_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False, server_default="true"),
-        sa.Column("current_status", sa.Enum("heartbeatstatus", name="heartbeatstatus_enum"), nullable=False),
+        sa.Column("current_status", postgresql.ENUM('healthy', 'triggered', 'silenced', 'disabled', name='heartbeatstatus', create_type=False), nullable=False),
         sa.Column("check_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("trigger_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("last_check_at", sa.DateTime(timezone=True), nullable=True),
@@ -263,7 +264,7 @@ def upgrade() -> None:
         sa.Column("external_account_id", sa.String(255), nullable=True),
         sa.Column("external_account_name", sa.String(255), nullable=True),
         sa.Column("scopes", postgresql.JSONB(), server_default="[]"),
-        sa.Column("status", sa.Enum("integrationstatus", name="integrationstatus_enum"), nullable=False),
+        sa.Column("status", postgresql.ENUM('pending', 'active', 'refreshing', 'error', 'revoked', name='integrationstatus', create_type=False), nullable=False),
         sa.Column("status_reason", sa.Text(), nullable=True),
         sa.Column("token_expires_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_refresh_at", sa.DateTime(timezone=True), nullable=True),

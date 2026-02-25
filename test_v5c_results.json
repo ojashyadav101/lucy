@@ -1,0 +1,92 @@
+[
+  {
+    "label": "force_stop_deploy",
+    "elapsed_s": 39.7,
+    "response": "I found 10 projects in your Vercel account. Which one should I deploy to production?\n\n\u2022 *temp-beehivv*\n\u2022 *photobooth-share-web-app*\n\u2022 *cosmic-garden*\n\u2022 *ai-auditor-web*\n\u2022 *sov-analysis*\n\u2022 *vector-search*\n\u2022 *harmony-landing*\n\u2022 *seo-wrapped-app*\n\u2022 *fan*\n\u2022 *sov-dashboard*\n\nAlso, are you deploying from a specific Git branch, or should I use the latest code from the default branch?",
+    "thread_ts": "1771965269.921579",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "force_stop_cron",
+    "elapsed_s": 61.9,
+    "response": "I need access to Slack to create reminders. Connect it here: <https://connect.composio.dev/link/lk_PUzHqF-GuY8m>\n\nOnce connected, I'll set up your daily 9am reminder to check email.",
+    "thread_ts": "1771965309.513289",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "clerk_weekly",
+    "elapsed_s": 89.5,
+    "response": "*0 users* registered on Clerk since last Monday (February 17th).\n\nYour most recent registration was on February 14th. You have 3,021 total users in your Clerk instance.\n\nWant me to check a different time period or pull more details about recent signups?",
+    "thread_ts": "1771965371.420919",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "clerk_newest",
+    "elapsed_s": 50.5,
+    "response": "Here are the 3 most recent Clerk signups:\n\n1. *Pinnacle Automotive* (<mailto:winnipegmercedesbenz@gmail.com|winnipegmercedesbenz@gmail.com>)\n \u2022 Signed up: Tuesday, February 24, 2026 at 8:38 PM IST\n \u2022 Via: Google OAuth\n\n2. *Asimina Antoniou* (<mailto:antoniou.asimina@gmail.com|antoniou.asimina@gmail.com>)\n \u2022 Signed up: Tuesday, February 24, 2026 at 8:31 PM IST\n \u2022 Via: Email/password\n\n3. *(Email was truncated in the response - would you like me to pull the complete details?)*\n\nYour Clerk instance has *3,021 total users*. These three joined in the last few minutes! \n\nWant me to pull more details on any of them, or check for any patterns in recent signups?",
+    "thread_ts": "1771965460.887959",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "github_org_auto",
+    "elapsed_s": 106.0,
+    "response": "This is a thorough one, hang tight. Wrapping up now.",
+    "thread_ts": "1771965511.411279",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "cross_gmail_drive",
+    "initial_s": 45.0,
+    "followup_s": 45.1,
+    "initial_response": "*Razorpay*, unread email\n\nThis appears to be a service notification from Razorpay (a payment gateway). It's currently unread in your inbox and marked as important. The email uses their standard branded template with their navy blue header styling.\n\nUnfortunately, the full content got truncated in the fetch. Want me to pull the complete message text so you can see what the notification is about?",
+    "followup_response": "I'd be happy to save a note to Google Drive for you. I can see your Drive is already connected (<mailto:hello@ojash.com|hello@ojash.com>).\n\nHowever, I don't see the summary content in this message. Could you share the summary you'd like me to save? Or if you're referring to something we discussed earlier, let me know which summary and I can grab it from our conversation.",
+    "thread_ts": "1771965617.422699",
+    "status": "ok"
+  },
+  {
+    "label": "cross_multi_report",
+    "elapsed_s": 133.8,
+    "response": "Here's your daily snapshot:  *:bust_in_silhouette: Clerk Users* \u2022 *Total users*: 3,021  *:e-mail: Important Unread Emails (6)* \u2022 Cursor Team, \"New Cloud Agents with Computer Use\" (2x, both today) \u2022 TemplatesBooth, \"New Photo Booth Templates\" (today) \u2022 Razorpay, 3 payment confirmations for \u20b9200 each (all today)  *:file_folder: Latest Dri",
+    "thread_ts": "1771965710.568029",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "cross_clerk_github",
+    "elapsed_s": 83.8,
+    "response": "Here's the comparison:  *Past Week Growth (Feb 18-24, 2026)*  \u2022 Clerk Signups, New This Week: 179, Total Count: 3,021 \u2022 GitHub Repos, New This Week: 3, Total Count: 99  *Your Clerk signups are growing dramatically faster.*   You're getting about *60x more new user signups than new repos* on a weekly",
+    "thread_ts": "1771965844.410229",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "quality_email_confirm",
+    "elapsed_s": 50.7,
+    "response": "Good news, your Gmail is connected. \n\nYour newest user is *Pinnacle Automotive* (<mailto:winnipegmercedesbenz@gmail.com|winnipegmercedesbenz@gmail.com>), who signed up via Google OAuth.\n\nWhat would you like the follow-up email to say? I can draft something friendly and professional, or if you have specific messaging in mind, just let me know and I'll send it.",
+    "thread_ts": "1771965928.222359",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "quality_error_recovery",
+    "elapsed_s": 28.4,
+    "response": "I need access to your Trello account first. Connect it here: <https://connect.composio.dev/link/lk_WNxYXrmHhKjQ|Connect Trello>\n\nOnce connected, I'll be able to check your boards for overdue tasks.",
+    "thread_ts": "1771965978.868369",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  }
+]

@@ -27,8 +27,37 @@ EVENT_DEDUP_TTL = 30.0
 _agent_semaphore: asyncio.Semaphore | None = None
 MAX_CONCURRENT_AGENTS = 10
 
-# Request queue (initialized lazily on first message)
 _request_queue_started = False
+
+_thread_locks: dict[str, asyncio.Lock] = {}
+_thread_lock_registry: asyncio.Lock | None = None
+
+
+def _get_thread_lock_registry() -> asyncio.Lock:
+    global _thread_lock_registry
+    if _thread_lock_registry is None:
+        _thread_lock_registry = asyncio.Lock()
+    return _thread_lock_registry
+
+
+async def _get_thread_lock(thread_ts: str) -> asyncio.Lock:
+    """Get or create a per-thread lock to prevent concurrent agent runs."""
+    registry = _get_thread_lock_registry()
+    async with registry:
+        now = time.monotonic()
+        stale = [
+            k for k, v in _thread_locks.items()
+            if not v.locked() and hasattr(v, "_created_at")
+            and now - v._created_at > 300  # type: ignore[attr-defined]
+        ]
+        for k in stale:
+            del _thread_locks[k]
+
+        if thread_ts not in _thread_locks:
+            lock = asyncio.Lock()
+            lock._created_at = now  # type: ignore[attr-defined]
+            _thread_locks[thread_ts] = lock
+        return _thread_locks[thread_ts]
 
 
 def _get_dedup_lock() -> asyncio.Lock:
@@ -394,6 +423,25 @@ async def _handle_message(
             await say(text=pick("task_cancelled"), thread_ts=thread_ts)
             return
 
+    # ── Thread lock: prevent concurrent agent runs in same thread ─────
+    effective_thread = thread_ts or event_ts
+    if effective_thread:
+        tlock = await _get_thread_lock(effective_thread)
+        if tlock.locked():
+            logger.info(
+                "thread_busy_skipped",
+                thread_ts=effective_thread,
+                workspace_id=workspace_id,
+            )
+            from lucy.core.humanize import humanize
+            msg = await humanize(
+                "Let the user know you're still working on their "
+                "previous request in this thread and will get back "
+                "to them shortly. Be warm and brief.",
+            )
+            await say(text=msg, thread_ts=thread_ts)
+            return
+
     # ── Full agent loop path ──────────────────────────────────────────
     working_emoji = get_working_emoji(text)
     if client and channel_id and event_ts:
@@ -437,12 +485,22 @@ async def _handle_message(
         from lucy.core.agent import AgentContext, get_agent
 
         agent = get_agent()
+        team_id = str(context.get("team_id") or "")
         ctx = AgentContext(
             workspace_id=workspace_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
             user_slack_id=user_id,
+            team_id=team_id,
         )
+
+        if team_id and workspace_id:
+            try:
+                from lucy.integrations.composio_client import get_composio_client
+                composio = get_composio_client()
+                composio.set_entity_id(workspace_id, f"slack_{team_id}")
+            except Exception:
+                pass
 
         # ── Check if this should run as a background task ───────────
         from lucy.core.router import classify_and_route
@@ -479,12 +537,20 @@ async def _handle_message(
                 # Too many background tasks — fall through to sync
                 logger.warning("background_task_limit", error=str(e))
 
-        # ── Normal synchronous path ───────────────────────────────────
-        sem = _get_agent_semaphore()
-        async with sem:
-            response_text = await _run_with_recovery(
-                agent, text, ctx, client, workspace_id,
-            )
+        # ── Normal synchronous path (thread-locked) ─────────────────
+        async def _sync_run() -> str:
+            sem = _get_agent_semaphore()
+            async with sem:
+                return await _run_with_recovery(
+                    agent, text, ctx, client, workspace_id,
+                )
+
+        if effective_thread:
+            tlock = await _get_thread_lock(effective_thread)
+            async with tlock:
+                response_text = await _sync_run()
+        else:
+            response_text = await _sync_run()
 
         from lucy.core.output import process_output
         from lucy.slack.blockkit import text_to_blocks
@@ -495,7 +561,7 @@ async def _handle_message(
             split_response,
         )
 
-        slack_text = process_output(response_text)
+        slack_text = await process_output(response_text)
         slack_text = format_links(slack_text)
 
         if should_split_response(slack_text):
@@ -716,7 +782,7 @@ async def _execute_approved_action(
         response = await agent.run(message=instruction, ctx=ctx, slack_client=client)
 
         from lucy.core.output import process_output
-        await say(text=process_output(response), thread_ts=thread_ts)
+        await say(text=await process_output(response), thread_ts=thread_ts)
 
     except Exception as e:
         logger.error("approved_action_failed", error=str(e))

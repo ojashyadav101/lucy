@@ -1,0 +1,37 @@
+[
+  {
+    "label": "greeting_hi",
+    "elapsed_s": 4.2,
+    "response": "Hey \u2014 did you want to say something? I'm here when you're ready.",
+    "thread_ts": "1771952709.345509",
+    "status": "ok"
+  },
+  {
+    "label": "greeting_hello",
+    "elapsed_s": 4.2,
+    "response": "Hey! What do you need?",
+    "thread_ts": "1771952713.502249",
+    "status": "ok"
+  },
+  {
+    "label": "simple_qa",
+    "elapsed_s": 14.8,
+    "response": "Today is 2026-02-24.",
+    "thread_ts": "1771952717.683599",
+    "status": "ok"
+  },
+  {
+    "label": "simple_math",
+    "elapsed_s": 7.8,
+    "response": "1081",
+    "thread_ts": "1771952732.505029",
+    "status": "ok"
+  },
+  {
+    "label": "about_self",
+    "elapsed_s": 4.2,
+    "response": "I can help with a lot \u2014 here's a quick rundown:\n\n\u2022 *Search &amp; research* \u2014 web, competitors, market data\n\u2022 *Integrations* \u2014 Google Calendar, Gmail, GitHub, Linear, Sheets\n\u2022 *Documents* \u2014 create PDFs, spreadsheets, presentations\n\u2022 *Code* \u2014 review PRs, debug, write scripts, deploy\n\u2022 *Automate* \u2014 set",
+    "thread_ts": "1771952740.254419",
+    "status": "ok"
+  }
+]

@@ -109,47 +109,47 @@ class TestNoHardcodedErrors:
 
 class TestOutputSanitizer:
     def test_strips_internal_paths(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "I created /home/user/company/SKILL.md for you."
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "/home/user/" not in result
 
     def test_strips_workspace_paths(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "Updated /workspace/test/skills/SKILL.md"
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "/workspace/" not in result
 
     def test_strips_composio_tool_names(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "I used COMPOSIO_SEARCH_TOOLS to find that."
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "COMPOSIO_SEARCH_TOOLS" not in result
         assert "COMPOSIO" not in result
 
     def test_strips_composio_brand(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "Connect via Composio to authorize."
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "Composio" not in result
         assert "composio" not in result.lower()
 
     def test_strips_openrouter(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "Using OpenRouter for model access."
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "OpenRouter" not in result
 
     def test_strips_allcaps_tool_names(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "GOOGLECALENDAR_CREATE_EVENT was called."
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "GOOGLECALENDAR_CREATE_EVENT" not in result
 
     def test_humanizes_known_tools(self) -> None:
@@ -160,10 +160,10 @@ class TestOutputSanitizer:
         assert "schedule a meeting" in result
 
     def test_strips_skill_filenames(self) -> None:
-        from lucy.core.output import process_output
+        from lucy.core.output import process_output_sync
 
         text = "I saved it to SKILL.md and LEARNINGS.md"
-        result = process_output(text)
+        result = process_output_sync(text)
         assert "SKILL.md" not in result
         assert "LEARNINGS.md" not in result
 

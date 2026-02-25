@@ -1,14 +1,20 @@
 """Three-layer output pipeline for Lucy's Slack messages.
 
-Layer 1: Sanitizer — strips paths, tool names, internal references
-Layer 2: Format converter — transforms Markdown to Slack mrkdwn
-Layer 3: Tone validator — catches robotic/error-dump patterns
+Layer 1: Sanitizer - strips paths, tool names, internal references
+Layer 2: Format converter - transforms Markdown to Slack mrkdwn
+Layer 3: Tone validator - catches robotic/error-dump patterns
+Layer 4: De-AI engine - detects and rewrites AI-generated tells
+
+The de-AI engine uses a two-tier approach:
+  Tier 1 (instant): Regex detection + mechanical fixes for obvious patterns
+  Tier 2 (async):   LLM-based contextual rewrite when regex isn't enough
 
 Applied to every message before posting to Slack.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 
 import structlog
@@ -23,20 +29,16 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/home/user/[^\s)\"']+"), ""),
     (re.compile(r"/workspace[s]?/[^\s)\"']+"), ""),
     (re.compile(r"@?workspace_seeds[^\s]*"), ""),
-    # Contextual Composio meta-tool replacements (match with optional verb prefix)
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_SEARCH_TOOLS"), "searching available tools"),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_MANAGE_CONNECTIONS"), "checking integrations"),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_MULTI_EXECUTE_TOOL"), "running actions"),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_WORKBENCH"), "running some code"),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_BASH_TOOL"), "running a script"),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_GET_TOOL_SCHEMAS"), "looking up tool details"),
-    (re.compile(r"COMPOSIO_\w+"), ""),  # catch-all for any remaining
-    # Custom integration tool names (lucy_custom_<slug>_<action>)
+    (re.compile(r"COMPOSIO_\w+"), ""),
     (re.compile(r"`?lucy_custom_\w+`?"), ""),
     (re.compile(r"\blucy_\w+\b"), ""),
-    # NOTE: Do NOT strip composio.dev URLs — they are user-facing auth links.
-    # Only strip the brand name "composio" when it appears as plain text
-    # (not inside a URL).
+    (re.compile(r"(?:through |via |using |on )composio(?!\.dev)(?!\.\w)", re.IGNORECASE), ""),
     (re.compile(r"(?<![\w/.])composio(?!\.dev)(?!\.\w)", re.IGNORECASE), ""),
     (re.compile(r"(?i)\bopenrouter\b"), ""),
     (re.compile(r"(?i)\bopenclaw\b"), ""),
@@ -45,19 +47,20 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\btool[_ ]?call[s]?\b", re.IGNORECASE), "request"),
     (re.compile(r"\bmeta[- ]?tool[s]?\b", re.IGNORECASE), ""),
     (re.compile(r"\bfunction calling\b", re.IGNORECASE), ""),
+    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
+    (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),
+    (re.compile(r"task\.json\b"), ""),
 ]
 
 _ALLCAPS_TOOL_RE = re.compile(r"\b[A-Z]{2,}_[A-Z_]{3,}\b")
 
 _HUMANIZE_MAP = {
-    # Composio meta-tools
     "COMPOSIO_SEARCH_TOOLS": "search for tools",
     "COMPOSIO_MANAGE_CONNECTIONS": "manage integrations",
     "COMPOSIO_MULTI_EXECUTE_TOOL": "execute actions",
     "COMPOSIO_REMOTE_WORKBENCH": "run code",
     "COMPOSIO_REMOTE_BASH_TOOL": "run a script",
     "COMPOSIO_GET_TOOL_SCHEMAS": "look up tool details",
-    # Google
     "GOOGLECALENDAR_CREATE_EVENT": "schedule a meeting",
     "GOOGLECALENDAR_EVENTS_LIST": "check your calendar",
     "GOOGLECALENDAR_FIND_FREE_SLOTS": "find open time slots",
@@ -67,11 +70,9 @@ _HUMANIZE_MAP = {
     "GOOGLEDRIVE_LIST_FILES": "check your Drive",
     "GOOGLEDRIVE_CREATE_FILE": "create a file in Drive",
     "GOOGLESHEETS_GET_SPREADSHEET": "check a spreadsheet",
-    # GitHub
     "GITHUB_LIST_PULL_REQUESTS": "check pull requests",
     "GITHUB_CREATE_ISSUE": "create an issue",
     "GITHUB_GET_REPOSITORY": "check the repository",
-    # Linear
     "LINEAR_CREATE_ISSUE": "create a Linear ticket",
     "LINEAR_LIST_ISSUES": "check Linear issues",
 }
@@ -91,7 +92,7 @@ def _sanitize(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# LAYER 2: MARKDOWN → SLACK MRKDWN CONVERTER
+# LAYER 2: MARKDOWN -> SLACK MRKDWN CONVERTER
 # ═══════════════════════════════════════════════════════════════════════
 
 def _convert_markdown_to_slack(text: str) -> str:
@@ -101,6 +102,8 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text,
     )
+    text = re.sub(r"\*\*\*\*", "", text)
+    text = re.sub(r"\*\*", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
@@ -145,12 +148,12 @@ def _table_to_bullets(table_lines: list[str]) -> list[str]:
     for row in rows[1:]:
         if len(headers) >= 2 and len(row) >= 2:
             label = row[0]
-            details = " — ".join(
+            details = " | ".join(
                 f"{headers[j]}: {row[j]}"
                 for j in range(1, min(len(headers), len(row)))
                 if row[j].strip()
             )
-            bullets.append(f"• *{label}* — {details}" if details else f"• *{label}*")
+            bullets.append(f"• *{label}*: {details}" if details else f"• *{label}*")
         else:
             bullets.append(f"• {' | '.join(row)}")
     return [""] + bullets + [""]
@@ -210,25 +213,37 @@ _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"[Ll]et me delve into\s*", re.IGNORECASE),
         "Here's ",
     ),
+    (
+        re.compile(r"(?:Could you |Can you )?refresh my memory[^.]*\.?\s*", re.IGNORECASE),
+        "I don't have context on that, could you fill me in? ",
+    ),
+    (
+        re.compile(r"I(?:'ve| have) (?:that |it )?saved[^.]*\.?\s*", re.IGNORECASE),
+        "I'll keep that in mind. ",
+    ),
+    (
+        re.compile(r"\*?Summary Table\*?:?\s*\n", re.IGNORECASE),
+        "*Quick Summary*\n",
+    ),
 ]
 
 
 _BROKEN_URLS: list[tuple[re.Pattern[str], str]] = [
     (
         re.compile(r"<https?://[a-z]{2,15}\.\|[^>]*>", re.IGNORECASE),
-        "_(link unavailable — use `/lucy connect <service>`)_",
+        "_(link unavailable, use `/lucy connect <service>`)_",
     ),
     (
         re.compile(r"<https?://[a-z]{2,15}\.>", re.IGNORECASE),
-        "_(link unavailable — use `/lucy connect <service>`)_",
+        "_(link unavailable, use `/lucy connect <service>`)_",
     ),
     (
         re.compile(r"\[([^\]]*)\]\(https?://[a-z]{2,15}\.[)\s]", re.IGNORECASE),
-        "_(link unavailable — use `/lucy connect <service>`)_ ",
+        "_(link unavailable, use `/lucy connect <service>`)_ ",
     ),
     (
         re.compile(r"https?://[a-z]{2,15}\.\s", re.IGNORECASE),
-        "_(link unavailable — use `/lucy connect <service>`)_ ",
+        "_(link unavailable, use `/lucy connect <service>`)_ ",
     ),
 ]
 
@@ -247,11 +262,342 @@ def _validate_tone(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# LAYER 4: DE-AI ENGINE
+# Two-tier system: fast regex detection + LLM contextual rewrite
+# ═══════════════════════════════════════════════════════════════════════
+
+# --- Detection patterns: each (regex, weight, category) ---
+
+_AI_TELL_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
+    # PUNCTUATION
+    (re.compile(r" — "), 3, "em_dash"),
+    (re.compile(r"—"), 2, "em_dash"),
+    (re.compile(r" – "), 1, "en_dash"),
+
+    # POWER WORDS (the classic LLM vocabulary)
+    (re.compile(
+        r"\b(?:delve|tapestry|landscape|beacon|pivotal|testament|"
+        r"multifaceted|underpinning|underscores|palpable|enigmatic|"
+        r"plethora|myriad|paramount|groundbreaking|game-?changing|"
+        r"cutting-?edge|holistic|synergy|synergize|leverage|leveraging|"
+        r"spearhead|spearheading|bolster|bolstering|unleash|unlock|"
+        r"foster|empower|embark|illuminate|elucidate|resonate|"
+        r"revolutionize|revolutionizing|elevate|grapple|showcase|"
+        r"streamline|harness|harnessing|catapult|supercharge|"
+        r"cornerstone|linchpin|bedrock|hallmark|touchstone|"
+        r"realm|sphere|arena|facet|nuance|intricacies|"
+        r"robust|seamless|seamlessly|comprehensive|meticulous|"
+        r"intricate|versatile|dynamic|innovative|transformative|"
+        r"endeavor|strive|forge|cultivate|spearhead)\b",
+        re.IGNORECASE,
+    ), 2, "power_word"),
+
+    # FORMAL TRANSITIONS
+    (re.compile(
+        r"\b(?:Moreover|Furthermore|Additionally|Consequently|"
+        r"Nevertheless|Nonetheless|Henceforth|Accordingly|"
+        r"In conclusion|To summarize|In summary|"
+        r"It is (?:worth|important to) not(?:e|ing)|"
+        r"It bears mentioning|It should be noted|"
+        r"As previously mentioned|As noted above|"
+        r"In light of|With regard to|In terms of|"
+        r"From a broader perspective|On the other hand|"
+        r"By the same token|In this context)\b",
+        re.IGNORECASE,
+    ), 2, "formal_transition"),
+
+    # HEDGING / WEASEL PHRASES
+    (re.compile(
+        r"\b(?:generally speaking|more often than not|"
+        r"it's (?:also )?important to (?:note|remember|consider|mention|highlight)|"
+        r"it's crucial to|it's essential to|"
+        r"it's worth (?:noting|mentioning|highlighting|pointing out)|"
+        r"to some extent|in many ways|for the most part|"
+        r"at the end of the day|when all is said and done|"
+        r"all things considered|that being said|"
+        r"having said that|with that in mind|"
+        r"needless to say|goes without saying|"
+        r"it goes without saying)\b",
+        re.IGNORECASE,
+    ), 2, "hedging"),
+
+    # CHATBOT FILLERS / SYCOPHANCY
+    (re.compile(
+        r"(?:^|\. )(?:Absolutely|Certainly|Of course|Sure thing)[!.,]",
+        re.IGNORECASE | re.MULTILINE,
+    ), 2, "sycophancy"),
+    (re.compile(
+        r"(?:Hope (?:this|that) helps|"
+        r"(?:I )?hope (?:this|that) (?:was|is) helpful|"
+        r"Let me know if you (?:need|have|want) (?:anything|any|more)|"
+        r"(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)|"
+        r"Happy to (?:help|assist|answer|elaborate))[!.]?",
+        re.IGNORECASE,
+    ), 3, "chatbot_closer"),
+    (re.compile(
+        r"(?:(?:That's|What) an? (?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "
+        r"(?:question|point|observation|thought|idea))[!.,]?\s*",
+        re.IGNORECASE,
+    ), 3, "sycophancy"),
+
+    # STRUCTURAL PATTERNS
+    (re.compile(r"It's not (?:just )?(?:about )?X[,;] it's (?:about )?Y", re.IGNORECASE), 2, "structure"),
+    (re.compile(
+        r"(?:Let's (?:dive|jump) (?:in|into|right in)|"
+        r"Without further ado|"
+        r"Let me break (?:this|it) down|"
+        r"Here's (?:a |the )?(?:breakdown|overview|rundown|lowdown)|"
+        r"(?:So,? )?(?:let's|allow me to) (?:explore|unpack|dissect))",
+        re.IGNORECASE,
+    ), 2, "structure"),
+
+    # EXCESSIVE EXCLAMATION (3+ in a message)
+    (re.compile(r"(?:.*!.*){3,}"), 1, "exclamation"),
+
+    # "IN ESSENCE" / "IN A NUTSHELL" summaries
+    (re.compile(
+        r"\b(?:In essence|In a nutshell|To put it simply|"
+        r"Simply put|Long story short|Bottom line|"
+        r"The (?:key|main|bottom) (?:takeaway|point|thing) (?:is|here))\b",
+        re.IGNORECASE,
+    ), 1, "summary_phrase"),
+
+    # OVER-STRUCTURED OPENINGS
+    (re.compile(
+        r"(?:Here are|Here's) (?:\d+|a few|some|several) "
+        r"(?:key |main |important |critical )?(?:things|points|considerations|factors|aspects|ways|steps|tips)",
+        re.IGNORECASE,
+    ), 1, "listicle_opener"),
+
+    # "PROACTIVE INSIGHT" labels (Lucy-specific)
+    (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), 2, "label"),
+]
+
+# Minimum score to trigger LLM rewrite (below this, regex fixes are enough)
+_LLM_REWRITE_THRESHOLD = 3
+# Minimum text length to even consider LLM rewrite
+_LLM_REWRITE_MIN_CHARS = 120
+
+
+def _detect_ai_tells(text: str) -> list[tuple[str, int, str]]:
+    """Scan text for AI-tell patterns. Returns list of (match, weight, category)."""
+    tells: list[tuple[str, int, str]] = []
+    for pattern, weight, category in _AI_TELL_PATTERNS:
+        for match in pattern.finditer(text):
+            tells.append((match.group(0), weight, category))
+    return tells
+
+
+def _ai_tell_score(text: str) -> int:
+    """Total weighted score of AI tells detected in text."""
+    return sum(weight for _, weight, _ in _detect_ai_tells(text))
+
+
+# --- Tier 1: Regex safety net (always runs, instant) ---
+
+_REGEX_DEAI_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # Dashes
+    (re.compile(r" — "), ", "),
+    (re.compile(r"—"), ", "),
+    (re.compile(r" – "), "-"),
+    (re.compile(r"–"), "-"),
+
+    # Power words (strip them, surrounding context usually reads fine)
+    (re.compile(
+        r"\b(?:delve|tapestry|landscape(?:s)?|beacon|pivotal|"
+        r"testament|multifaceted|underpinning|underscores|"
+        r"palpable|enigmatic|plethora|myriad|paramount|"
+        r"groundbreaking|holistic|synergy|synergize|"
+        r"revolutionize|revolutionizing|elucidate|"
+        r"harnessing|spearheading|bolstering)\b",
+        re.IGNORECASE,
+    ), ""),
+
+    # Formal transitions (strip, usually beginning-of-sentence filler)
+    (re.compile(r"\b(?:Moreover|Furthermore|Additionally|Notably),?\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:It's worth noting that|It is worth noting that|It bears mentioning that)\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:It's important to note that|It is important to note that)\s*", re.IGNORECASE), ""),
+
+    # Chatbot closers (match anywhere, not just end-of-string)
+    (re.compile(r"\s*Hope (?:this|that) helps[!.]?\s*", re.IGNORECASE), " "),
+    (re.compile(r"\s*Let me know if you (?:need|have|want) (?:anything|any|more)(?:\s+else)?[!.]?\s*", re.IGNORECASE), " "),
+    (re.compile(r"\s*(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)[!.]?\s*", re.IGNORECASE), " "),
+    (re.compile(r"\s*Happy to (?:help|assist|answer|elaborate)(?:\s+(?:with that|with this|further))?[!.]?\s*", re.IGNORECASE), " "),
+
+    # Sycophantic openers
+    (re.compile(
+        r"^(?:Absolutely|Certainly|Of course|Sure thing)[!.,]?\s*",
+        re.IGNORECASE | re.MULTILINE,
+    ), ""),
+    (re.compile(
+        r"(?:(?:That's|This is|What) an? )?(?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "
+        r"(?:question|point|observation|thought|idea)[!.,]?\s*",
+        re.IGNORECASE,
+    ), ""),
+
+    # Lucy-specific labels
+    (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), ""),
+
+    # Cleanup double spaces created by stripping
+    (re.compile(r"  +"), " "),
+    # Cleanup orphaned commas from stripped words
+    (re.compile(r" , "), ", "),
+    (re.compile(r"^,\s*", re.MULTILINE), ""),
+]
+
+
+def _regex_deai(text: str) -> str:
+    """Fast regex-based de-AI pass. Always runs as safety net."""
+    for pattern, replacement in _REGEX_DEAI_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# --- Tier 2: LLM-based contextual rewrite ---
+
+_DEAI_SYSTEM_PROMPT = """\
+You are a copy editor. Your ONE job: rewrite the text so it reads like a real \
+person wrote it on Slack, not like an AI generated it.
+
+FIX these problems (if present):
+- Em dashes: replace with commas, periods, or rewrite the clause
+- Power words: delve, pivotal, tapestry, beacon, leverage, unleash, unlock, \
+foster, empower, synergy, game-changing, holistic, robust, seamless, \
+comprehensive, transformative, innovative, dynamic, groundbreaking, \
+multifaceted, paramount, plethora, harness, spearhead, illuminate, resonate, \
+cultivate, cornerstone, bedrock
+- Formal transitions: Moreover, Furthermore, Additionally, Consequently, \
+Notably, Nevertheless, In light of, With regard to, In terms of
+- Hedging: generally speaking, it's worth noting, it's important to note, \
+more often than not, at the end of the day, all things considered, that being \
+said, having said that, needless to say
+- Sycophancy: "Great question!", "Absolutely!", "Certainly!", "Happy to help!", \
+"Hope this helps!", "Feel free to ask!"
+- Chatbot closers: "Let me know if you need anything else", "Don't hesitate \
+to reach out"
+- Listicle openers: "Here are 5 key things...", "Let's dive in", "Without \
+further ado", "Let me break this down"
+- Uniform sentence length: mix short and long, punch up the rhythm
+- Bullet monotony: if bullets all start the same way, vary them
+- Over-explanation: don't repeat the same point, move forward
+
+DO NOT change:
+- Facts, numbers, percentages, dates
+- URLs, links, email addresses
+- Code blocks or inline code (anything in backticks)
+- Technical terms, product names, proper nouns
+- The core meaning or intent
+- Slack formatting: *bold*, _italic_, ~strike~, bullet characters
+
+RULES:
+- Output ONLY the rewritten text, nothing else
+- Keep roughly the same length (within 15%)
+- Sound like a smart colleague chatting on Slack
+- Use contractions naturally (don't force them)
+- Be direct and assertive, not wishy-washy
+- If the text is already fine, return it unchanged"""
+
+_DEAI_TIMEOUT = 4.0
+
+
+async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str | None:
+    """Use a fast LLM to contextually rewrite AI tells.
+
+    Returns the rewritten text, or None if the LLM call fails.
+    """
+    try:
+        from lucy.core.openclaw import ChatConfig, get_openclaw_client
+
+        client = get_openclaw_client()
+
+        categories_found = sorted({cat for _, _, cat in tells})
+        user_msg = (
+            f"Rewrite this text. Issues detected: {', '.join(categories_found)}\n\n"
+            f"---\n{text}\n---"
+        )
+
+        response = await asyncio.wait_for(
+            client.chat_completion(
+                messages=[{"role": "user", "content": user_msg}],
+                config=ChatConfig(
+                    model="minimax/minimax-m2.5",
+                    system_prompt=_DEAI_SYSTEM_PROMPT,
+                    max_tokens=min(len(text) * 2, 4096),
+                    temperature=0.4,
+                ),
+            ),
+            timeout=_DEAI_TIMEOUT,
+        )
+
+        result = (response.content or "").strip()
+
+        if result.startswith("---"):
+            result = result.lstrip("-").strip()
+        if result.endswith("---"):
+            result = result.rstrip("-").strip()
+
+        if not result or len(result) < len(text) * 0.3:
+            logger.debug("deai_rewrite_too_short", original_len=len(text), result_len=len(result))
+            return None
+
+        if len(result) > len(text) * 2.0:
+            logger.debug("deai_rewrite_too_long", original_len=len(text), result_len=len(result))
+            return None
+
+        new_score = _ai_tell_score(result)
+        old_score = sum(w for _, w, _ in tells)
+        if new_score >= old_score:
+            logger.debug(
+                "deai_rewrite_no_improvement",
+                old_score=old_score,
+                new_score=new_score,
+            )
+            return _regex_deai(text)
+
+        logger.info(
+            "deai_rewrite_applied",
+            old_score=old_score,
+            new_score=new_score,
+            categories=categories_found,
+        )
+        return result
+
+    except asyncio.TimeoutError:
+        logger.debug("deai_rewrite_timeout")
+        return None
+    except Exception as exc:
+        logger.debug("deai_rewrite_failed", error=str(exc))
+        return None
+
+
+async def _deai(text: str) -> str:
+    """Two-tier de-AI: detect tells, LLM rewrite if needed, regex fallback."""
+    tells = _detect_ai_tells(text)
+
+    if not tells:
+        return text
+
+    score = sum(w for _, w, _ in tells)
+
+    if score >= _LLM_REWRITE_THRESHOLD and len(text) >= _LLM_REWRITE_MIN_CHARS:
+        rewritten = await _llm_deai_rewrite(text, tells)
+        if rewritten is not None:
+            return rewritten
+
+    return _regex_deai(text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
-def process_output(text: str) -> str:
-    """Run all three output layers on a message before posting to Slack."""
+async def process_output(text: str) -> str:
+    """Run all output layers on a message before posting to Slack.
+
+    Now async: the de-AI engine may invoke a fast LLM call for contextual
+    rewrites when significant AI tells are detected. Falls back to instant
+    regex if the LLM is unavailable or the text is clean.
+    """
     if not text or not text.strip():
         return text
 
@@ -259,4 +605,22 @@ def process_output(text: str) -> str:
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     text = _validate_tone(text)
+    text = await _deai(text)
+    return text.strip()
+
+
+def process_output_sync(text: str) -> str:
+    """Synchronous fallback for contexts where async isn't available.
+
+    Runs the full pipeline except the LLM rewrite tier. Uses regex-only
+    de-AI instead. Prefer the async version when possible.
+    """
+    if not text or not text.strip():
+        return text
+
+    text = _sanitize(text)
+    text = _fix_broken_urls(text)
+    text = _convert_markdown_to_slack(text)
+    text = _validate_tone(text)
+    text = _regex_deai(text)
     return text.strip()

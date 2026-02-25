@@ -145,6 +145,7 @@ async def add_session_fact(
     fact: str,
     source: str = "conversation",
     category: str = "general",
+    thread_ts: str | None = None,
 ) -> None:
     """Add a fact to session memory. Deduplicates by content.
 
@@ -165,19 +166,39 @@ async def add_session_fact(
             "source": source,
             "category": category,
             "ts": datetime.now(timezone.utc).isoformat(),
+            **({"thread_ts": thread_ts} if thread_ts else {}),
         })
 
         await write_session_memory(ws, items)
         logger.info("session_fact_added", fact=fact[:100], category=category)
 
 
-async def get_session_context_for_prompt(ws: WorkspaceFS) -> str:
-    """Format session memory for injection into the system prompt."""
+async def get_session_context_for_prompt(
+    ws: WorkspaceFS,
+    thread_ts: str | None = None,
+) -> str:
+    """Format session memory for injection into the system prompt.
+
+    If thread_ts is provided, only include facts from that thread
+    plus global facts (no thread_ts). This prevents cross-thread
+    contamination.
+    """
     items = await read_session_memory(ws)
     if not items:
         return ""
 
-    recent = items[-20:]
+    filtered: list[dict] = []
+    for item in items:
+        item_thread = item.get("thread_ts")
+        if item_thread is None:
+            filtered.append(item)
+        elif thread_ts and item_thread == thread_ts:
+            filtered.append(item)
+
+    if not filtered:
+        return ""
+
+    recent = filtered[-20:]
     lines = [f"• {item['fact']}" for item in recent]
 
     return (

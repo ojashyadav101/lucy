@@ -55,6 +55,18 @@ _GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CONVERSATIONAL_GREETING_RE = re.compile(
+    r"^(?:hi|hey|hello|yo|hiya|sup|howdy|good (?:morning|afternoon|evening))"
+    r"(?:\s+\w+)?[!,.]?\s+"
+    r"(?:how(?:'s| is| are) (?:it going|things|you|everything|you doing|life).*|"
+    r"what'?s (?:up|new|good|happening|going on).*|"
+    r"how(?:'s| is) (?:your|the) (?:day|morning|afternoon|evening|night|weekend).*|"
+    r"hope (?:you'?re|all is|everything'?s?).*|"
+    r"nice to (?:see|meet|hear|chat).*)"
+    r"[!?.\s]*$",
+    re.IGNORECASE,
+)
+
 _STATUS_RE = re.compile(
     r"^(?:are you (?:there|online|up|available|awake)\??|"
     r"you (?:there|up|online|around)\??|"
@@ -65,7 +77,9 @@ _STATUS_RE = re.compile(
 
 _HELP_RE = re.compile(
     r"^(?:help|what can you do\??|what do you do\??|"
-    r"how do you work\??|what are you\??|who are you\??)"
+    r"how do you work\??|what are you\??|who are you\??|"
+    r"tell me about yourself.*|introduce yourself.*|"
+    r"who is lucy\??|what is lucy\??)"
     r"[!.\s]*$",
     re.IGNORECASE,
 )
@@ -90,13 +104,22 @@ def evaluate_fast_path(
     if has_thread_context and thread_depth > 0:
         return FastPathResult(is_fast=False, response=None, reason="in_thread")
 
-    if len(text) > 60:
-        return FastPathResult(is_fast=False, response=None, reason="too_long")
-
-    if _GREETING_RE.match(text):
+    if _GREETING_RE.match(text) or _CONVERSATIONAL_GREETING_RE.match(text):
         response = pick("greeting")
         logger.info("fast_path_match", pattern="greeting", message=text[:50])
         return FastPathResult(is_fast=True, response=response, reason="greeting")
+
+    stripped_dots = text.replace(".", "").replace("…", "").strip()
+    if len(stripped_dots) < 3 and not text.isdigit():
+        logger.info("fast_path_match", pattern="near_empty", message=text[:50])
+        return FastPathResult(
+            is_fast=True,
+            response="Hey, did you want to say something? I'm here when you're ready.",
+            reason="near_empty",
+        )
+
+    if len(text) > 80:
+        return FastPathResult(is_fast=False, response=None, reason="too_long")
 
     if _STATUS_RE.match(text):
         response = pick("status")

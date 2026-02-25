@@ -5,6 +5,7 @@
   "env_var": "CLERK_API_KEY",
   "tools": [
     "clerk_list_users",
+    "clerk_get_user_stats",
     "clerk_get_user",
     "clerk_create_user",
     "clerk_update_user",
@@ -35,7 +36,7 @@
     "clerk_create_webhook",
     "clerk_delete_webhook"
   ],
-  "total_tools": 30,
+  "total_tools": 31,
   "api_docs": "https://clerk.com/docs/reference/backend-api/overview",
   "api_base_url": "https://api.clerk.com/v1",
   "sdk_package": "@clerk/clerk-sdk-node",

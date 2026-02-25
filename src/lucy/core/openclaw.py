@@ -33,6 +33,52 @@ logger = structlog.get_logger()
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
+# Exact-match response cache for short, deterministic internal LLM calls
+# (e.g. classify_service, humanize). Key = "model:content", TTL = 5 min.
+_response_cache: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = 300.0
+_CACHE_MAX_INPUT_LEN = 200
+
+
+def _cache_key(
+    messages: list[dict[str, Any]],
+    model: str,
+    system_prompt: str | None = None,
+) -> str | None:
+    """Build a cache key for deterministic single-turn calls only.
+
+    Includes the system_prompt hash to prevent cross-contamination between
+    callers that share a model but use different system prompts.
+    """
+    if len(messages) == 1 and messages[0].get("role") == "user":
+        content = messages[0].get("content", "")
+        if isinstance(content, str) and len(content) < _CACHE_MAX_INPUT_LEN:
+            sp_hash = hash(system_prompt) if system_prompt else 0
+            return f"{model}:{sp_hash}:{content}"
+    return None
+
+
+def _cache_get(key: str) -> str | None:
+    """Retrieve a cached response if still valid."""
+    entry = _response_cache.get(key)
+    if entry is None:
+        return None
+    text, ts = entry
+    if time.monotonic() - ts > _CACHE_TTL:
+        _response_cache.pop(key, None)
+        return None
+    return text
+
+
+def _cache_put(key: str, text: str) -> None:
+    """Store a response in the cache."""
+    _response_cache[key] = (text, time.monotonic())
+    # Evict oldest entries if cache grows too large
+    if len(_response_cache) > 500:
+        oldest = sorted(_response_cache, key=lambda k: _response_cache[k][1])
+        for k in oldest[:100]:
+            _response_cache.pop(k, None)
+
 
 def _is_retryable_llm_error(exc: BaseException) -> bool:
     if isinstance(exc, OpenClawError) and exc.status_code in _RETRYABLE_STATUS_CODES:
@@ -140,6 +186,18 @@ class OpenClawClient:
         config = config or ChatConfig()
         model = config.model or settings.openclaw_model
 
+        # Exact-match cache for short deterministic calls (no tools)
+        cache_key = (
+            _cache_key(messages, model, config.system_prompt)
+            if not config.tools
+            else None
+        )
+        if cache_key:
+            cached = _cache_get(cache_key)
+            if cached is not None:
+                logger.debug("internal_cache_hit", model=model)
+                return OpenClawResponse(content=cached)
+
         final_messages: list[dict[str, Any]] = []
         if config.system_prompt:
             final_messages.append(
@@ -214,6 +272,11 @@ class OpenClawClient:
                     usage=data.get("usage"),
                 )
 
+                cached_tokens = 0
+                if result.usage:
+                    details = result.usage.get("prompt_tokens_details") or {}
+                    cached_tokens = details.get("cached_tokens", 0)
+
                 logger.info(
                     "chat_completion_success",
                     model=model,
@@ -225,6 +288,7 @@ class OpenClawClient:
                     ),
                     prompt_tokens=result.usage.get("prompt_tokens") if result.usage else None,
                     completion_tokens=result.usage.get("completion_tokens") if result.usage else None,
+                    cached_tokens=cached_tokens,
                 )
                 return result
 
@@ -248,7 +312,12 @@ class OpenClawClient:
                 logger.error("chat_completion_error", error=str(e))
                 raise OpenClawError(f"Chat completion error: {e}")
 
-        return await _do_request()
+        result = await _do_request()
+
+        if cache_key and result.content and not result.tool_calls:
+            _cache_put(cache_key, result.content)
+
+        return result
 
     @staticmethod
     def _parse_tool_calls(

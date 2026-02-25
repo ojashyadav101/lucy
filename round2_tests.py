@@ -360,7 +360,7 @@ def test_r6_tone_pipeline() -> dict:
     print("=" * 70)
 
     sys.path.insert(0, str(Path(__file__).parent / "src"))
-    from lucy.core.output import process_output
+    from lucy.core.output import process_output_sync
 
     cases = [
         ("Great question! Here's what I found...", "great question", False),
@@ -374,7 +374,7 @@ def test_r6_tone_pipeline() -> dict:
     results = []
     all_ok = True
     for text, check_fragment, should_contain in cases:
-        output = process_output(text)
+        output = process_output_sync(text)
         contains = check_fragment.lower() in output.lower()
         ok = contains == should_contain
         if not ok:

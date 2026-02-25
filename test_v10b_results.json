@@ -1,0 +1,38 @@
+[
+  {
+    "label": "cost_warning_every_minute",
+    "status": "pass",
+    "elapsed": 34.0,
+    "reply": "Done, your uptime monitor is live and will check <http://serprisingly.com|serprisingly.com> every minute.\n\n*What's set up:*\n\u2022 *Task:* `serprisingly-uptime-check`\n\u2022 *Schedule:* Every minute\n\u2022 *Action:* HTTP ping to <http://serprisingly.com|serprisingly.com>, alerts to Slack if it's down\n\n*Heads up:* Running every minute means ~1,440 checks per day. If you want to dial that back (say, every 5 minutes instead), just let me know and I can adjust it. Most uptime monitors run every 1-5 minutes, so you're in good company either way.\n\nWant me to test it now to make sure the alerting works?"
+  },
+  {
+    "label": "create_task_A",
+    "status": "pass",
+    "elapsed": 145.0,
+    "reply": "Your daily task *alpha-task* is all set. It'll run every morning at 9:00 AM IST to say good morning."
+  },
+  {
+    "label": "create_task_B",
+    "status": "pass",
+    "elapsed": 150.7,
+    "reply": "Done! Your daily task *\"beta-task\"* is now scheduled to run every day at 6pm IST and will say good evening. It'll start running automatically. If you ever want to test it manually or change the schedule, just let me know."
+  },
+  {
+    "label": "multi_delete",
+    "status": "pass",
+    "elapsed": 28.5,
+    "reply": "Done. Both alpha-task and beta-task have been removed from the scheduler."
+  },
+  {
+    "label": "verify_clean",
+    "status": "pass",
+    "elapsed": 45.1,
+    "reply": "You have *11 scheduled tasks* running. Here's the breakdown:  ---  *Website Monitoring (8 tasks, all running every minute)* Looks like there are multiple overlapping uptime monitors for <http://serprisingly.com|serprisingly.com>, probably from testing different setups:  \u2022 *Website Uptime Monitor - <http://serprisingly.com|serprisingly.com>*, every mi"
+  },
+  {
+    "label": "cleanup_minute_cron",
+    "status": "pass",
+    "elapsed": 151.3,
+    "reply": "Done! The \"Website Health Check\" task that was running every minute is now deleted.\n\nYou actually have several website monitoring tasks that were all checking <http://serprisingly.com|serprisingly.com> at the same minute interval. Want me to clean up the duplicates too? I see ones named:\n- Website Uptime Monitor\n- <http://Serprisingly.com|Serprisingly.com> Uptime Monitor (2 of these)\n- Website Heartbeat Monitor\n- Check if <http://serprisingly.com|serprisingly.com> is online\n- Site Monitor\n- Website Health Monitor\n\nI can clear those out if you just want to keep one uptime checker. Let me know!"
+  }
+]

@@ -60,8 +60,178 @@ async def _make_request(
 async def clerk_list_users(api_key: str, query_params: Dict = None) -> Dict:
     """
     Lists all users in your Clerk instance. Supports filtering and pagination.
+    Auto-paginates to get total count when no specific filters are applied.
+    Supports created_after_unix_ms and created_before_unix_ms for date range filtering.
     """
-    return await _make_request("GET", "users", api_key, params=query_params)
+    params = dict(query_params or {})
+
+    def _ensure_ms(val: int | str) -> int:
+        """Convert to milliseconds. LLMs sometimes pass seconds instead."""
+        ts = int(val)
+        if ts < 1e12:
+            ts = ts * 1000
+        return ts
+
+    if "created_after_unix_ms" in params:
+        params["created_at_after"] = _ensure_ms(params.pop("created_after_unix_ms"))
+    if "created_before_unix_ms" in params:
+        params["created_at_before"] = _ensure_ms(params.pop("created_before_unix_ms"))
+
+    limit = int(params.get("limit", 100))
+    offset = int(params.get("offset", 0))
+    params["limit"] = min(limit, 500)
+    params["offset"] = offset
+
+    has_date_filter = "created_at_after" in params or "created_at_before" in params
+
+    first_page = await _make_request("GET", "users", api_key, params=params)
+
+    if isinstance(first_page, list) and len(first_page) >= limit and offset == 0:
+        all_users = list(first_page)
+        current_offset = limit
+        while True:
+            params["offset"] = current_offset
+            params["limit"] = 500
+            page = await _make_request("GET", "users", api_key, params=params)
+            if not isinstance(page, list) or len(page) == 0:
+                break
+            all_users.extend(page)
+            if len(page) < 500:
+                break
+            current_offset += 500
+
+        total = len(all_users)
+        return {
+            "total_count": total,
+            "users_shown": _clean_user_list(all_users[:20]),
+            "note": (
+                f"Found {total} users"
+                + (" in the specified time range" if has_date_filter else "")
+                + f". Showing first 20. Ask for specific filters or pagination to see more."
+            ),
+        }
+
+    if isinstance(first_page, list):
+        count = len(first_page)
+        result = {
+            "total_count": count,
+            "users_shown": _clean_user_list(first_page),
+        }
+        if has_date_filter:
+            result["note"] = f"Found {count} users in the specified time range."
+        return result
+    return first_page
+
+
+def _clean_user_list(users: list) -> list:
+    """Return compact user summaries to avoid context window bloat.
+
+    Full Clerk user objects contain 30+ fields and nested email objects.
+    The LLM only needs name, email, signup date, and auth method to
+    answer the vast majority of user queries.
+    """
+    compact = []
+    for user in users:
+        if not isinstance(user, dict):
+            compact.append(user)
+            continue
+        first = (user.get("first_name") or "").strip()
+        last = (user.get("last_name") or "").strip()
+        name = f"{first} {last}".strip()
+        primary_email = ""
+        emails = user.get("email_addresses", [])
+        if emails and isinstance(emails, list):
+            e = emails[0]
+            if isinstance(e, dict):
+                primary_email = e.get("email_address", "")
+            elif isinstance(e, str):
+                primary_email = e
+        if not name:
+            name = primary_email or user.get("username") or "Unknown User"
+
+        created = user.get("created_at")
+        if isinstance(created, (int, float)):
+            from datetime import datetime, timezone
+            try:
+                ts = created / 1000 if created > 1e12 else created
+                created = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+            except Exception:
+                pass
+
+        entry: dict = {
+            "id": user.get("id", ""),
+            "name": name,
+            "email": primary_email,
+            "created_at": created,
+        }
+        ext_accts = user.get("external_accounts", [])
+        if ext_accts and isinstance(ext_accts, list):
+            providers = [
+                a.get("provider", "") for a in ext_accts
+                if isinstance(a, dict)
+            ]
+            if providers:
+                entry["auth"] = ", ".join(p for p in providers if p)
+        compact.append(entry)
+    return compact
+
+async def clerk_get_user_stats(api_key: str, query_params: Dict = None) -> Dict:
+    """Compute aggregate stats across all users without returning full user data.
+
+    Paginates through every user but only tracks counts, avoiding
+    the need to send 3000+ user objects back to the model.
+    """
+    params = dict(query_params or {})
+    params.setdefault("limit", 500)
+    params["offset"] = 0
+
+    total = 0
+    auth_methods: dict[str, int] = {}
+    monthly_signups: dict[str, int] = {}
+
+    while True:
+        page = await _make_request("GET", "users", api_key, params=params)
+        if not isinstance(page, list) or len(page) == 0:
+            break
+        total += len(page)
+        for u in page:
+            ext = u.get("external_accounts", [])
+            if ext and isinstance(ext, list):
+                providers = {
+                    a.get("provider", "unknown")
+                    for a in ext if isinstance(a, dict)
+                }
+                for p in providers:
+                    auth_methods[p] = auth_methods.get(p, 0) + 1
+            else:
+                auth_methods["email_password"] = auth_methods.get("email_password", 0) + 1
+
+            created = u.get("created_at")
+            if isinstance(created, (int, float)):
+                from datetime import datetime, timezone
+                try:
+                    ts = created / 1000 if created > 1e12 else created
+                    month_key = datetime.fromtimestamp(
+                        ts, tz=timezone.utc
+                    ).strftime("%Y-%m")
+                    monthly_signups[month_key] = monthly_signups.get(month_key, 0) + 1
+                except Exception:
+                    pass
+
+        if len(page) < int(params["limit"]):
+            break
+        params["offset"] = int(params["offset"]) + len(page)
+
+    return {
+        "total_users": total,
+        "auth_method_breakdown": dict(sorted(
+            auth_methods.items(), key=lambda x: -x[1]
+        )),
+        "monthly_signups": dict(sorted(monthly_signups.items())),
+    }
+
 
 async def clerk_get_user(api_key: str, user_id: str) -> Dict:
     """
@@ -261,7 +431,7 @@ async def clerk_get_instance_settings(api_key: str) -> Dict:
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "clerk_list_users",
-        "description": "Lists all users in your Clerk instance. Can filter by email_address, phone_number, external_id, or username. Supports pagination with `limit` and `offset`.",
+        "description": "Lists users in Clerk. Auto-paginates to get total count. Use created_after_unix_ms to filter users created after a specific date (Unix timestamp in MILLISECONDS). Use order_by='-created_at' to get newest users first. This tool returns total_count and a sample of users.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -273,10 +443,26 @@ TOOLS: List[Dict[str, Any]] = [
                         "phone_number": {"type": "string", "description": "Filter by user's phone number."},
                         "external_id": {"type": "string", "description": "Filter by user's external ID."},
                         "username": {"type": "string", "description": "Filter by user's username."},
-                        "limit": {"type": "integer", "description": "Number of records to return. Max 500.", "default": 10},
+                        "created_after_unix_ms": {"type": "integer", "description": "Only return users created AFTER this Unix timestamp in MILLISECONDS. Example: 1708992000000 for Feb 27 2024. Use this to count signups in a time period."},
+                        "created_before_unix_ms": {"type": "integer", "description": "Only return users created BEFORE this Unix timestamp in MILLISECONDS."},
+                        "limit": {"type": "integer", "description": "Number of records to return. Max 500. Use 100 for comprehensive listing.", "default": 100},
                         "offset": {"type": "integer", "description": "Number of records to skip.", "default": 0},
-                        "order_by": {"type": "string", "description": "Order results by a specific field (e.g., 'created_at', '-created_at')."},
+                        "order_by": {"type": "string", "description": "Order results by a specific field. Use '-created_at' for newest first, 'created_at' for oldest first."},
                     }
+                }
+            }
+        }
+    },
+    {
+        "name": "clerk_get_user_stats",
+        "description": "Get aggregate statistics about all Clerk users. Returns total count, breakdown by authentication method (Google OAuth vs email/password vs others), and monthly signup counts. Use this instead of clerk_list_users when you need aggregate data or breakdowns. Much faster than paginating through all users manually.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_params": {
+                    "type": "object",
+                    "description": "Optional query parameters for filtering.",
+                    "properties": {}
                 }
             }
         }
@@ -721,6 +907,8 @@ async def execute(tool_name: str, args: Dict, api_key: str) -> Dict:
     """
     if tool_name == "clerk_list_users":
         return await clerk_list_users(api_key, **args)
+    elif tool_name == "clerk_get_user_stats":
+        return await clerk_get_user_stats(api_key, **args)
     elif tool_name == "clerk_get_user":
         return await clerk_get_user(api_key, **args)
     elif tool_name == "clerk_create_user":

@@ -26,8 +26,8 @@ Lucy can write, review, and execute code using `COMPOSIO_REMOTE_WORKBENCH` and c
 
 ## Best Practices
 
-1. **Test before sharing** — always execute code to verify it works
-2. **Save useful scripts** — persist scripts in `scripts/` for reuse
-3. **Document dependencies** — note what libraries a script needs
-4. **Error handling** — always include error handling in production scripts
-5. **Ground in execution** — never generate data from text alone; always run the code
+1. **Test before sharing**: always execute code to verify it works
+2. **Save useful scripts**: persist scripts in `scripts/` for reuse
+3. **Document dependencies**: note what libraries a script needs
+4. **Error handling**: always include error handling in production scripts
+5. **Ground in execution**: never generate data from text alone; always run the code

@@ -39,8 +39,8 @@ logger = structlog.get_logger()
 MAX_TOOL_TURNS = 12
 MAX_TOOL_TURNS_FRONTIER = 20  # Deep research gets more room
 MAX_CONTEXT_MESSAGES = 40
-TOOL_RESULT_MAX_CHARS = 12_000
-TOOL_RESULT_SUMMARY_THRESHOLD = 4_000
+TOOL_RESULT_MAX_CHARS = 16_000
+TOOL_RESULT_SUMMARY_THRESHOLD = 8_000
 MAX_PAYLOAD_CHARS = 120_000
 
 _INTERNAL_PATH_RE = re.compile(r"/home/user/[^\s\"',}\]]+")
@@ -49,6 +49,32 @@ _COMPOSIO_NAME_RE = re.compile(r"COMPOSIO_\w+")
 _AUTH_URL_RE = re.compile(
     r"https?://(?:connect|auth|app)\.composio\.dev/[^\s\"',}\]]+",
 )
+
+_DELEGATION_DESCRIPTIONS: dict[str, str] = {
+    "research": (
+        "Delegate research, analysis, or information gathering to a "
+        "specialist. Use for web research, competitive analysis, market "
+        "research, or deep dives that require multiple searches. Returns "
+        "structured findings."
+    ),
+    "code": (
+        "Delegate code writing, debugging, or modification to a code "
+        "specialist. Use for writing scripts, fixing bugs, creating "
+        "applications, or any programming task. Returns working code."
+    ),
+    "integrations": (
+        "Delegate service connection tasks to an integrations specialist. "
+        "Use when a user needs to connect a new service, troubleshoot "
+        "connections, or build custom integrations. Returns connection "
+        "status."
+    ),
+    "document": (
+        "Delegate document creation to a specialist for professional, "
+        "client-facing content. Use for PDFs, reports, spreadsheets, "
+        "presentations, or any formatted document. Returns the completed "
+        "document."
+    ),
+}
 
 _NARRATION_RE = re.compile(
     r"(?:I'll (?:start|begin|proceed|go ahead|check|look|search|get|fetch|compile|find|now)"
@@ -64,12 +90,69 @@ _NARRATION_RE = re.compile(
 )
 
 
+_CONTROL_TOKEN_RE = re.compile(
+    r"<\|[a-z_]+\|>"
+    r"|<\|tool_call[^>]*\|>"
+    r"|<\|tool_calls_section[^>]*\|>"
+    r"|<\|im_[a-z]+\|>"
+    r"|<\|end\|>"
+    r"|<\|pad\|>"
+    r"|<\|assistant\|>"
+    r"|<\|user\|>"
+    r"|<\|system\|>",
+)
+
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<\|tool_calls_section_begin\|>.*?(?:<\|tool_calls_section_end\|>|$)",
+    re.DOTALL,
+)
+
+
+def _strip_control_tokens(text: str) -> str:
+    """Remove raw model control tokens that leaked into output."""
+    text = _TOOL_CALL_BLOCK_RE.sub("", text)
+    text = _CONTROL_TOKEN_RE.sub("", text)
+    return text.strip()
+
+
 def _sanitize_tool_output(text: str) -> str:
     """Remove internal file paths and tool names from tool output."""
     text = _INTERNAL_PATH_RE.sub("[file]", text)
     text = _WORKSPACE_PATH_RE.sub("[workspace]", text)
     text = _COMPOSIO_NAME_RE.sub("[action]", text)
     return text
+
+
+_NOISY_KEYS = frozenset({
+    "public_metadata", "private_metadata", "unsafe_metadata",
+    "external_accounts", "phone_numbers", "web3_wallets",
+    "saml_accounts", "passkeys", "totp_enabled",
+    "backup_code_enabled", "two_factor_enabled",
+    "create_organization_enabled", "delete_self_enabled",
+    "legal_accepted_at", "last_active_at",
+    "profile_image_url", "image_url", "has_image",
+    "updated_at", "last_sign_in_at", "object",
+    "verification", "linked_to", "reserved",
+})
+
+
+def _compact_data(data: Any, depth: int = 0) -> Any:
+    """Strip verbose/noisy fields from API results to fit more
+    useful data within the context limit.  Operates recursively
+    on dicts and lists up to depth 4.
+    """
+    if depth > 4:
+        return data
+    if isinstance(data, dict):
+        out = {}
+        for k, v in data.items():
+            if k in _NOISY_KEYS:
+                continue
+            out[k] = _compact_data(v, depth + 1)
+        return out
+    if isinstance(data, list):
+        return [_compact_data(item, depth + 1) for item in data]
+    return data
 
 
 @dataclass
@@ -81,6 +164,7 @@ class AgentContext:
     thread_ts: str | None = None
     user_name: str | None = None
     user_slack_id: str | None = None
+    team_id: str | None = None
 
 
 class LucyAgent:
@@ -108,6 +192,7 @@ class LucyAgent:
         self._current_slack_client = slack_client
         self._current_channel_id = ctx.channel_id
         self._current_thread_ts = ctx.thread_ts
+        self._current_user_slack_id = ctx.user_slack_id
 
         trace = Trace.start()
         trace.user_message = message
@@ -177,6 +262,178 @@ class LucyAgent:
             from lucy.tools.file_generator import get_file_tool_definitions
             tools.extend(get_file_tool_definitions())
 
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_list_crons",
+                    "description": (
+                        "List all scheduled tasks (cron jobs) for this "
+                        "workspace. Returns the name, schedule, description, "
+                        "and next run time for each active recurring task."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_create_cron",
+                    "description": (
+                        "Create a new scheduled recurring task (cron job). "
+                        "The task will run on a schedule and its result is "
+                        "automatically delivered to Slack. By default it "
+                        "posts to the current channel. Set delivery_mode "
+                        "to 'dm' for personal reminders (DMs the user who "
+                        "asked for it). Use standard 5-field cron expressions "
+                        "(minute hour day month weekday). "
+                        "Common examples: '0 9 * * 1-5' (weekdays 9am), "
+                        "'*/30 * * * *' (every 30 min), '0 */2 * * *' (every 2h). "
+                        "Write the description as what the task should PRODUCE "
+                        "or CHECK, not 'send a message'. Delivery is automatic."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": (
+                                    "Short slug name for the cron "
+                                    "(e.g. 'stock-checker', 'daily-report')"
+                                ),
+                            },
+                            "cron_expression": {
+                                "type": "string",
+                                "description": (
+                                    "Standard 5-field cron expression "
+                                    "(minute hour day-of-month month day-of-week)"
+                                ),
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Human-readable title for the task",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": (
+                                    "Detailed instructions for what the task "
+                                    "should PRODUCE each time it runs. Write "
+                                    "this as the task itself, not as 'send a "
+                                    "message'. Be specific: include data "
+                                    "sources, output format, and conditions "
+                                    "to skip (return SKIP if nothing to report)."
+                                ),
+                            },
+                            "timezone": {
+                                "type": "string",
+                                "description": (
+                                    "IANA timezone for schedule evaluation "
+                                    "(e.g. 'Asia/Kolkata', 'America/New_York'). "
+                                    "If omitted, uses server timezone."
+                                ),
+                            },
+                            "delivery_mode": {
+                                "type": "string",
+                                "enum": ["channel", "dm"],
+                                "description": (
+                                    "Where to deliver results. 'channel' posts "
+                                    "to the channel where it was created "
+                                    "(default). 'dm' sends a direct message "
+                                    "to the user who requested it. Use 'dm' "
+                                    "for personal reminders, notifications, "
+                                    "or anything meant for one person."
+                                ),
+                            },
+                        },
+                        "required": ["name", "cron_expression", "title", "description"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_delete_cron",
+                    "description": (
+                        "Delete an existing scheduled task by name. "
+                        "Removes it from the scheduler immediately."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cron_name": {
+                                "type": "string",
+                                "description": "Name/slug of the cron to delete",
+                            },
+                        },
+                        "required": ["cron_name"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_modify_cron",
+                    "description": (
+                        "Update an existing scheduled task's schedule, "
+                        "title, or description. Only provide the fields "
+                        "you want to change."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cron_name": {
+                                "type": "string",
+                                "description": "Name/slug of the cron to modify",
+                            },
+                            "new_cron_expression": {
+                                "type": "string",
+                                "description": "New cron expression (if changing schedule)",
+                            },
+                            "new_title": {
+                                "type": "string",
+                                "description": "New title (if changing)",
+                            },
+                            "new_description": {
+                                "type": "string",
+                                "description": "New task instructions (if changing)",
+                            },
+                            "new_timezone": {
+                                "type": "string",
+                                "description": "New IANA timezone (if changing)",
+                            },
+                        },
+                        "required": ["cron_name"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_trigger_cron",
+                    "description": (
+                        "Immediately trigger a scheduled task to run right "
+                        "now, regardless of its schedule. Useful for testing "
+                        "or when a user asks 'run my X task now'."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "cron_name": {
+                                "type": "string",
+                                "description": "Name/slug of the cron to trigger",
+                            },
+                        },
+                        "required": ["cron_name"],
+                    },
+                },
+            })
+
             from lucy.integrations.custom_wrappers import load_custom_wrapper_tools
             tools.extend(load_custom_wrapper_tools())
 
@@ -194,7 +451,7 @@ class LucyAgent:
                         "deploys it as a new set of callable tools. After it "
                         "succeeds, ask the user for their API key and store "
                         "it with lucy_store_api_key. NEVER use Bright Data, "
-                        "web scraping, or any other workaround — this is the "
+                            "web scraping, or any other workaround. This is the "
                         "ONLY correct path for unsupported services."
                     ),
                     "parameters": {
@@ -250,12 +507,47 @@ class LucyAgent:
                 },
             })
 
+        # 3b. Add delegation tools for sub-agent system
+        from lucy.core.sub_agents import REGISTRY as _SUB_REGISTRY
+        for agent_type, spec in _SUB_REGISTRY.items():
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": f"delegate_to_{agent_type}_agent",
+                    "description": _DELEGATION_DESCRIPTIONS.get(
+                        agent_type,
+                        f"Delegate a task to the {agent_type} specialist.",
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {
+                                "type": "string",
+                                "description": (
+                                    "Clear description of what to accomplish. "
+                                    "Include all relevant context."
+                                ),
+                            },
+                        },
+                        "required": ["task"],
+                    },
+                },
+            })
+
+        # 3c. Build tool registry for sub-agent use
+        self._tool_registry: dict[str, dict[str, Any]] = {
+            t["function"]["name"]: t
+            for t in tools
+            if isinstance(t, dict) and "function" in t
+        }
+
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
             system_prompt = await build_system_prompt(
                 ws,
                 connected_services=connected_services,
                 user_message=message,
+                prompt_modules=route.prompt_modules,
             )
             utc_now = datetime.now(timezone.utc)
             time_block = (
@@ -302,13 +594,15 @@ class LucyAgent:
 
             try:
                 from lucy.workspace.memory import get_session_context_for_prompt
-                session_ctx = await get_session_context_for_prompt(ws)
+                session_ctx = await get_session_context_for_prompt(
+                    ws, thread_ts=ctx.thread_ts,
+                )
                 if session_ctx:
                     preflight_parts.append(session_ctx)
             except Exception:
                 pass
 
-            if self._is_history_reference(message):
+            if self._is_history_reference(message) and not ctx.thread_ts:
                 try:
                     from lucy.workspace.history_search import (
                         format_search_results,
@@ -403,6 +697,7 @@ class LucyAgent:
                 else:
                     await add_session_fact(
                         ws, fact, source="conversation", category=target,
+                        thread_ts=ctx.thread_ts,
                     )
                 logger.debug(
                     "memory_persisted",
@@ -442,7 +737,7 @@ class LucyAgent:
             settings.workspace_root, ctx.workspace_id, ctx.thread_ts,
         )
 
-        return response_text
+        return _strip_control_tokens(response_text)
 
     # ── Agent loop ──────────────────────────────────────────────────────
 
@@ -462,6 +757,7 @@ class LucyAgent:
         all_messages = list(messages)
         response_text = ""
         repeated_sigs: dict[str, int] = {}
+        tool_name_counts: dict[str, int] = {}
         self._empty_retries = 0
         self._narration_retries = 0
         self._edit_attempts = 0
@@ -610,50 +906,9 @@ class LucyAgent:
                     })
                     continue
 
-                # Depth check: push deeper if response is shallow after few tool calls
-                # Skip for connection management and all internal lucy_* tools
-                tool_calls_so_far = len(trace.tool_calls_made)
-                response_length = len(response_text.strip())
-                just_managed_connections = any(
-                    "COMPOSIO_MANAGE_CONNECTIONS" in tc
-                    for tc in trace.tool_calls_made
-                )
-                used_internal_tool = any(
-                    tc.startswith("lucy_") for tc in trace.tool_calls_made
-                )
-                
-                if (
-                    turn <= 1
-                    and tool_calls_so_far <= 1
-                    and response_length < 300
-                    and tools
-                    and not self._is_simple_greeting(response_text)
-                    and not just_managed_connections
-                    and not used_internal_tool
-                ):
-                    logger.info(
-                        "depth_check_triggered",
-                        turn=turn,
-                        tool_calls=tool_calls_so_far,
-                        response_length=response_length,
-                    )
-                    all_messages.append(
-                        {"role": "assistant", "content": response_text}
-                    )
-                    all_messages.append({
-                        "role": "user",
-                        "content": (
-                            "Your answer seems brief. Can you dig deeper? "
-                            "Use additional tool calls to verify your "
-                            "findings, cross-reference with other sources, "
-                            "or provide more comprehensive details."
-                        ),
-                    })
-                    continue
-
                 break
 
-            # Loop detection — redirect LLM instead of hardcoded string
+            # Loop detection — exact-signature repeats
             sig = self._call_signature(tool_calls)
             repeated_sigs[sig] = repeated_sigs.get(sig, 0) + 1
             if repeated_sigs[sig] >= 3:
@@ -661,7 +916,7 @@ class LucyAgent:
                 all_messages.append({
                     "role": "system",
                     "content": (
-                        "Your previous approach is not working — you have "
+                        "Your previous approach is not working. You have "
                         "called the same tool with the same parameters 3 "
                         "times. DO NOT retry the same tool or approach. "
                         "Consider: a completely different search query, "
@@ -672,6 +927,64 @@ class LucyAgent:
                     ),
                 })
                 repeated_sigs.clear()
+                continue
+
+            # Per-tool-name call cap: prevents the model from calling
+            # the same tool 4+ times even with varied parameters.
+            _CAP_EXEMPT = {
+                "lucy_web_search", "COMPOSIO_SEARCH_TOOLS",
+                "COMPOSIO_REMOTE_WORKBENCH",
+                "COMPOSIO_MULTI_EXECUTE_TOOL",
+                "COMPOSIO_REMOTE_BASH_TOOL",
+                "COMPOSIO_GET_TOOL_SCHEMAS",
+                "COMPOSIO_MANAGE_CONNECTIONS",
+            }
+            for tc in tool_calls:
+                tn = tc.get("name", "")
+                tool_name_counts[tn] = tool_name_counts.get(tn, 0) + 1
+            over_cap = [
+                n for n, c in tool_name_counts.items()
+                if c >= 4 and n not in _CAP_EXEMPT
+            ]
+            if over_cap:
+                cap_violations = sum(
+                    tool_name_counts[n] - 3 for n in over_cap
+                )
+                logger.warning(
+                    "tool_name_cap_hit",
+                    tools=over_cap,
+                    counts={n: tool_name_counts[n] for n in over_cap},
+                    turn=turn,
+                    violations=cap_violations,
+                )
+                if cap_violations >= 3:
+                    logger.warning(
+                        "tool_cap_force_stop",
+                        turn=turn,
+                        tools=over_cap,
+                    )
+                    all_messages.append({
+                        "role": "system",
+                        "content": (
+                            "CRITICAL: You have repeatedly ignored "
+                            "instructions to stop calling the same tools. "
+                            "You MUST respond to the user NOW with "
+                            "whatever data you have. Do NOT call any more "
+                            "tools. Summarize your findings."
+                        ),
+                    })
+                    tools = None
+                    continue
+                all_messages.append({
+                    "role": "system",
+                    "content": (
+                        f"You have called {', '.join(over_cap)} too many "
+                        f"times. STOP calling it. Summarize the data you "
+                        f"already collected and respond to the user now. "
+                        f"If you don't have enough data, tell the user "
+                        f"what you found so far and offer next steps."
+                    ),
+                })
                 continue
 
             logger.info(
@@ -809,10 +1122,11 @@ class LucyAgent:
             if partial:
                 response_text = partial
             else:
-                response_text = (
-                    "Let me take a different angle on this — "
-                    "could you tell me a bit more about what "
-                    "you're looking for so I can narrow it down?"
+                from lucy.core.humanize import humanize
+                response_text = await humanize(
+                    "You couldn't find the answer. Ask the user "
+                    "to clarify or rephrase what they need. Be "
+                    "warm and brief, not robotic.",
                 )
 
         return response_text
@@ -832,11 +1146,19 @@ class LucyAgent:
             for msg in messages
         )
         if has_tool_results:
+            tool_data = []
+            for msg in messages:
+                if msg.get("role") == "tool" and msg.get("content", ""):
+                    content = msg["content"]
+                    if '"error"' not in content:
+                        tool_data.append(content[:500])
+            summary = "; ".join(tool_data[:3]) if tool_data else ""
             return (
-                "I found some information but need a moment to "
-                "put it together properly. Let me try that again — "
-                "could you ask one more time?"
-            )
+                f"Here's what I found so far: {summary}\n\n"
+                "I'm still piecing together the full picture. "
+                "Let me know if this helps or if you need me "
+                "to dig deeper."
+            ) if summary else ""
         return ""
 
     # ── Parallel tool execution ─────────────────────────────────────────
@@ -882,7 +1204,7 @@ class LucyAgent:
             ):
                 return call_id, json.dumps({
                     "error": (
-                        f"Duplicate call to '{name}' blocked — "
+                        f"Duplicate call to '{name}' blocked. "
                         f"this exact call was made <5 seconds ago. "
                         f"If you need to retry, wait a moment."
                     ),
@@ -937,7 +1259,7 @@ class LucyAgent:
 
             async with trace.span(f"tool_exec_{name}", tool=name):
                 result = await self._execute_tool(
-                    name, params, ctx.workspace_id,
+                    name, params, ctx.workspace_id, ctx=ctx,
                 )
 
             if name == "COMPOSIO_SEARCH_TOOLS":
@@ -1023,6 +1345,7 @@ class LucyAgent:
         tool_name: str,
         parameters: dict[str, Any],
         workspace_id: str,
+        ctx: AgentContext | None = None,
     ) -> dict[str, Any]:
         """Execute a single tool call.
 
@@ -1032,7 +1355,13 @@ class LucyAgent:
         # ── Internal tools (no external API needed) ──────────────────
         if tool_name.startswith("lucy_"):
             return await self._execute_internal_tool(
-                tool_name, parameters, workspace_id
+                tool_name, parameters, workspace_id, ctx=ctx,
+            )
+
+        # ── Delegation to sub-agents ─────────────────────────────────
+        if tool_name.startswith("delegate_to_") and tool_name.endswith("_agent"):
+            return await self._handle_delegation(
+                tool_name, parameters, workspace_id,
             )
 
         # ── External tools (via Composio) ────────────────────────────
@@ -1066,6 +1395,7 @@ class LucyAgent:
         tool_name: str,
         parameters: dict[str, Any],
         workspace_id: str,
+        ctx: AgentContext | None = None,
     ) -> dict[str, Any]:
         """Execute an internal (lucy_*) tool — no Composio, no external API."""
         from lucy.workspace.filesystem import get_workspace
@@ -1073,6 +1403,121 @@ class LucyAgent:
         ws = get_workspace(workspace_id)
 
         try:
+            if tool_name == "lucy_list_crons":
+                from lucy.crons.scheduler import get_scheduler
+                scheduler = get_scheduler()
+                jobs = scheduler.list_jobs()
+                if not jobs:
+                    return {"result": "No scheduled tasks are currently active."}
+
+                _SYSTEM_CRONS = {
+                    "slack sync", "slack message sync",
+                    "memory consolidation", "humanize pool refresh",
+                }
+                user_jobs = []
+                system_jobs = []
+                for j in jobs:
+                    name = j.get("name", "Unknown")
+                    name = re.sub(
+                        r"\s*\([0-9a-f-]{36}\)", "", name,
+                    )
+                    next_run = j.get("next_run")
+                    if next_run:
+                        try:
+                            from datetime import datetime as _dt
+                            dt = _dt.fromisoformat(next_run)
+                            next_run = dt.strftime("%A, %B %d at %I:%M %p")
+                        except Exception:
+                            pass
+                    entry: dict[str, Any] = {
+                        "name": name,
+                        "next_run": next_run or "Not scheduled",
+                    }
+                    if "schedule" in j:
+                        entry["schedule"] = j["schedule"]
+                    if "description" in j:
+                        entry["what_it_does"] = j["description"]
+                    if "timezone" in j:
+                        entry["timezone"] = j["timezone"]
+                    if "created_at" in j and j["created_at"]:
+                        entry["created_at"] = j["created_at"]
+
+                    if name.lower().strip() in _SYSTEM_CRONS:
+                        system_jobs.append(entry)
+                    else:
+                        user_jobs.append(entry)
+
+                return {
+                    "user_tasks": user_jobs,
+                    "system_tasks_count": len(system_jobs),
+                    "note": (
+                        "user_tasks are tasks set up by or for the user. "
+                        "system_tasks are internal Lucy maintenance tasks "
+                        "(message sync, memory, etc.) that run automatically. "
+                        "Only mention system tasks if the user specifically "
+                        "asks about internal/system tasks."
+                    ),
+                }
+
+            if tool_name == "lucy_create_cron":
+                from lucy.crons.scheduler import get_scheduler
+                scheduler = get_scheduler()
+                channel = (ctx.channel_id if ctx else None) or ""
+                user_id = (ctx.user_slack_id if ctx else None) or ""
+                mode = parameters.get("delivery_mode", "channel")
+                return await scheduler.create_cron(
+                    workspace_id=workspace_id,
+                    name=parameters.get("name", ""),
+                    cron_expr=parameters.get("cron_expression", ""),
+                    title=parameters.get("title", ""),
+                    description=parameters.get("description", ""),
+                    tz=parameters.get("timezone", ""),
+                    delivery_channel=channel,
+                    requesting_user_id=user_id,
+                    delivery_mode=mode,
+                )
+
+            if tool_name == "lucy_delete_cron":
+                from lucy.crons.scheduler import get_scheduler
+                scheduler = get_scheduler()
+                return await scheduler.delete_cron(
+                    workspace_id=workspace_id,
+                    cron_name=parameters.get("cron_name", ""),
+                )
+
+            if tool_name == "lucy_modify_cron":
+                from lucy.crons.scheduler import get_scheduler
+                scheduler = get_scheduler()
+                return await scheduler.modify_cron(
+                    workspace_id=workspace_id,
+                    cron_name=parameters.get("cron_name", ""),
+                    new_cron_expr=parameters.get("new_cron_expression"),
+                    new_description=parameters.get("new_description"),
+                    new_title=parameters.get("new_title"),
+                    new_tz=parameters.get("new_timezone"),
+                )
+
+            if tool_name == "lucy_trigger_cron":
+                from lucy.crons.scheduler import get_scheduler
+                scheduler = get_scheduler()
+                cron_name = parameters.get("cron_name", "")
+                slug = cron_name.lower().replace(" ", "-")
+                slug = "".join(
+                    c for c in slug if c.isalnum() or c == "-"
+                )
+                triggered = await scheduler.trigger_now(
+                    workspace_id, f"/{slug}",
+                )
+                if triggered:
+                    return {
+                        "success": True,
+                        "message": f"Task '{cron_name}' triggered and running now.",
+                    }
+                return {
+                    "success": False,
+                    "error": f"Task '{cron_name}' not found.",
+                }
+
             if tool_name.startswith("lucy_search_slack_history") or \
                tool_name.startswith("lucy_get_channel_history"):
                 from lucy.workspace.history_search import execute_history_tool
@@ -1201,7 +1646,40 @@ class LucyAgent:
             tool=tool_name,
             workspace_id=workspace_id,
         )
-        return result if isinstance(result, dict) else {"result": result}
+        out = result if isinstance(result, dict) else {"result": result}
+
+        out = self._validate_custom_tool_result(out, tool_name, parameters)
+        return out
+
+    @staticmethod
+    def _validate_custom_tool_result(
+        result: dict[str, Any],
+        tool_name: str,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Add data quality warnings for custom tool results."""
+        if "error" in result:
+            return result
+
+        data = result.get("result") or result.get("users_shown") or result
+        if isinstance(data, list):
+            count = len(data)
+            limit = parameters.get("limit")
+            if limit and count >= int(limit):
+                result["_data_warning"] = (
+                    f"IMPORTANT: The API returned exactly {count} items, "
+                    f"which equals the requested limit of {limit}. This "
+                    f"likely means there are MORE items available. Tell "
+                    f"the user the total might be higher and offer to "
+                    f"fetch more pages if they need a complete count."
+                )
+            if count <= 5 and not parameters.get("query"):
+                result["_accuracy_note"] = (
+                    f"Only {count} items returned. If the user expected "
+                    f"more, the API query or parameters may need adjustment. "
+                    f"Mention the count honestly and ask if it seems right."
+                )
+        return result
 
     async def _store_api_key(
         self,
@@ -1296,12 +1774,96 @@ class LucyAgent:
             "deleted": True,
             "service_name": service_name,
             "instruction": (
-                f"Tell the user: 'Done — I've removed the {service_name} "
+                f"Tell the user: 'Done, I've removed the {service_name} "
                 f"integration and all {tool_count} capabilities. "
                 f"If you ever want to reconnect, just ask me to connect "
                 f"with {service_name} again and I'll rebuild it.'"
             ),
         }
+
+    # ── Sub-agent delegation ──────────────────────────────────────────
+
+    async def _handle_delegation(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Handle a delegate_to_*_agent tool call."""
+        from lucy.core.sub_agents import REGISTRY, SUB_TIMEOUT_SECONDS, run_subagent
+
+        agent_type = tool_name.removeprefix("delegate_to_").removesuffix("_agent")
+        spec = REGISTRY.get(agent_type)
+        if not spec:
+            return {"error": f"Unknown agent type: {agent_type}"}
+
+        task = parameters.get("task", "")
+        if not task:
+            return {"error": "No task description provided"}
+
+        try:
+            result = await asyncio.wait_for(
+                run_subagent(
+                    task=task,
+                    spec=spec,
+                    workspace_id=workspace_id,
+                    tool_registry=self._tool_registry,
+                    progress_callback=self._on_subagent_progress,
+                ),
+                timeout=SUB_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "subagent_timeout",
+                agent=agent_type,
+                workspace_id=workspace_id,
+            )
+            return {"error": f"The {agent_type} specialist took too long. Try a simpler task."}
+
+        # Memory extraction from sub-agent result
+        if result:
+            try:
+                from lucy.workspace.filesystem import get_workspace
+                from lucy.workspace.memory import add_session_fact, should_persist_memory
+
+                if should_persist_memory(result):
+                    ws = get_workspace(workspace_id)
+                    fact = result[:300]
+                    await add_session_fact(
+                        ws, fact,
+                        source=f"sub_agent:{agent_type}",
+                        category="session",
+                        thread_ts=getattr(self, "_current_thread_ts", None),
+                    )
+            except Exception as e:
+                logger.warning("subagent_memory_persist_error", error=str(e))
+
+        return {"result": result}
+
+    async def _on_subagent_progress(self, name: str, turn: int) -> None:
+        """Progress callback for sub-agents — updates the Slack message."""
+        slack_client = getattr(self, "_current_slack_client", None)
+        channel_id = getattr(self, "_current_channel_id", None)
+        thread_ts = getattr(self, "_current_thread_ts", None)
+
+        if not slack_client or not channel_id or not thread_ts:
+            return
+
+        from lucy.core.humanize import pick
+        try:
+            desc = pick("progress_mid")
+            progress_ts = getattr(self, "_progress_ts", None)
+            if progress_ts:
+                await slack_client.chat_update(
+                    channel=channel_id, ts=progress_ts, text=desc,
+                )
+            else:
+                result = await slack_client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts, text=desc,
+                )
+                self._progress_ts = result.get("ts")
+        except Exception:
+            pass
 
     # ── Quality gate escalation ────────────────────────────────────────
 
@@ -1332,7 +1894,7 @@ class LucyAgent:
         )
 
         try:
-            client = get_openclaw_client()
+            client = await get_openclaw_client()
             result = await asyncio.wait_for(
                 client.chat_completion(
                     messages=[{"role": "user", "content": correction_prompt}],
@@ -1341,7 +1903,7 @@ class LucyAgent:
                         system_prompt=(
                             "You are a quality auditor for an AI assistant "
                             "named Lucy. Your job is to catch and fix errors "
-                            "in her responses — especially service name "
+                            "in her responses, especially service name "
                             "confusion (e.g., Clerk ≠ MoonClerk), wrong "
                             "suggestions, and hallucinated capabilities. "
                             "Be concise. If the response is fine, say "
@@ -1507,7 +2069,7 @@ class LucyAgent:
                 f"The user has consented to building a custom integration for "
                 f"\"{offered_service}\". You MUST call "
                 f"lucy_resolve_custom_integration([\"{offered_service}\"]) NOW.\n"
-                f"Do NOT ask for the API key yet — the resolver will handle "
+                f"Do NOT ask for the API key yet. The resolver will handle "
                 f"research and code generation first. Ask for the key AFTER "
                 f"the resolver completes.\n"
                 f"Do NOT use Bright Data. Do NOT scrape. Do NOT suggest alternatives.\n"
@@ -1593,15 +2155,22 @@ class LucyAgent:
         """Serialize a tool result, compacting if too large.
 
         Auth/redirect URLs are extracted and preserved even when the
-        result body is truncated.
+        result body is truncated.  For dict/list results that exceed
+        the limit, strip verbose nested fields before falling back
+        to hard truncation so the LLM sees more useful data.
         """
-        if isinstance(result, (dict, list)):
-            text = json.dumps(result, ensure_ascii=False, default=str)
+        raw = result
+
+        if isinstance(raw, (dict, list)):
+            text = json.dumps(raw, ensure_ascii=False, default=str)
         else:
-            text = str(result)
+            text = str(raw)
+
+        if len(text) > TOOL_RESULT_MAX_CHARS and isinstance(raw, (dict, list)):
+            compact = _compact_data(raw)
+            text = json.dumps(compact, ensure_ascii=False, default=str)
 
         if len(text) > TOOL_RESULT_MAX_CHARS:
-            # Extract auth URLs before truncation so they survive
             auth_urls = _AUTH_URL_RE.findall(text)
             text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
             if auth_urls:

@@ -78,11 +78,30 @@ class ComposioClient:
             logger.error("composio_init_failed", error=str(e))
             self._composio = None
 
-    def _get_session(self, workspace_id: str) -> Any:
+        self._entity_id_map: dict[str, str] = {}
+
+    def set_entity_id(self, workspace_id: str, entity_id: str) -> None:
+        """Register a stable entity ID for a workspace.
+
+        This ensures Composio connections persist across database resets
+        by mapping workspace UUID → Slack team_id.
+        """
+        self._entity_id_map[str(workspace_id)] = entity_id
+
+    def _get_session(
+        self,
+        workspace_id: str,
+        *,
+        entity_id_override: str | None = None,
+    ) -> Any:
         """Get or create a Composio session for a workspace.
 
         Thread-safe with double-checked locking. Includes LRU eviction
         (max _MAX_CACHED_SESSIONS) and stale session auto-recovery.
+
+        If entity_id_override is set, it is used as the Composio user_id
+        instead of workspace_id, ensuring the entity persists across
+        database resets.
         """
         if not self._composio:
             raise RuntimeError("Composio SDK not initialized")
@@ -108,7 +127,17 @@ class ComposioClient:
                 self._tools_cache.pop(oldest_key, None)
                 logger.debug("composio_lru_eviction", evicted=oldest_key)
 
-            session = self._composio.create(user_id=workspace_id)
+            entity_id = (
+                entity_id_override
+                or self._entity_id_map.get(str(workspace_id))
+                or str(workspace_id)
+            )
+            session = self._composio.create(user_id=entity_id)
+            logger.debug(
+                "composio_entity_resolved",
+                workspace_id=workspace_id,
+                entity_id=entity_id,
+            )
             self._session_cache[workspace_id] = (now + self._cache_ttl, session)
 
             session_id = getattr(session, "id", None) or getattr(session, "session_id", None)

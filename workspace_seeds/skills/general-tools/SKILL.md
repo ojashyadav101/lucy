@@ -5,7 +5,7 @@ description: Search the web, send emails, generate images, manage calendars, and
 
 # General Tools
 
-Lucy has access to thousands of tools through Composio's meta-tools. The key insight: **you don't need to know tool names upfront** — use `COMPOSIO_SEARCH_TOOLS` to discover what's available for any task.
+Lucy has access to thousands of tools through Composio's meta-tools. The key insight: **you don't need to know tool names upfront**. Use `COMPOSIO_SEARCH_TOOLS` to discover what's available for any task.
 
 ## Discovery Pattern (use this for everything)
 
@@ -15,7 +15,7 @@ Lucy has access to thousands of tools through Composio's meta-tools. The key ins
 3. COMPOSIO_MULTI_EXECUTE_TOOL → call the discovered tool with arguments
 ```
 
-**If you're about to say "I don't have access to X" — STOP and search first.**
+**If you're about to say "I don't have access to X", STOP and search first.**
 
 ## Tool Categories
 
@@ -130,7 +130,7 @@ Use `COMPOSIO_MULTI_EXECUTE_TOOL` to run up to 20 tools in a single call when ta
 ## Anti-Patterns
 
 - Don't say "I don't have access to X" without searching first
-- Don't hardcode tool slugs — always use `COMPOSIO_SEARCH_TOOLS` to discover them
+- Don't hardcode tool slugs; always use `COMPOSIO_SEARCH_TOOLS` to discover them
 - Don't send emails without showing the user a preview and getting confirmation
 - Don't create calendar events without confirming timezone with the user
 - Don't use code execution for tasks that have dedicated tools (e.g. don't scrape Gmail with requests when there's a Gmail tool)

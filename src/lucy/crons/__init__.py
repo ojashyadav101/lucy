@@ -1,5 +1,15 @@
 """Proactivity engine: APScheduler-based cron system for autonomous tasks."""
 
-from lucy.crons.scheduler import CronScheduler, get_scheduler
+from lucy.crons.scheduler import (
+    CronConfig,
+    CronScheduler,
+    get_scheduler,
+    validate_cron_expression,
+)
 
-__all__ = ["CronScheduler", "get_scheduler"]
+__all__ = [
+    "CronConfig",
+    "CronScheduler",
+    "get_scheduler",
+    "validate_cron_expression",
+]

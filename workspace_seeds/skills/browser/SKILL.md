@@ -3,9 +3,9 @@ name: browser
 description: Browse websites using CamoFox anti-detection browser. Use when scraping data, filling forms, automating web tasks, or researching sites without API access.
 ---
 
-# Browser Automation — CamoFox
+# Browser Automation: CamoFox
 
-Lucy uses [CamoFox](https://github.com/redf0x1/camofox-browser), an anti-detection browser server built on Camoufox (a stealth Firefox fork). Anti-detection is at the C++ engine level — not detectable by standard bot-detection systems.
+Lucy uses [CamoFox](https://github.com/redf0x1/camofox-browser), an anti-detection browser server built on Camoufox (a stealth Firefox fork). Anti-detection is at the C++ engine level and is not detectable by standard bot-detection systems.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ CamoFox runs as a REST API server (default port 9377) alongside Lucy. It provide
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST /tabs` | Create tab | `{"userId": "workspace_id"}` — persistent profile per user |
+| `POST /tabs` | Create tab | `{"userId": "workspace_id"}`: persistent profile per user |
 | `GET /tabs` | List tabs | Returns all open tabs |
 | `DELETE /tabs/:id` | Close tab | Clean up when done |
 
@@ -41,9 +41,9 @@ CamoFox runs as a REST API server (default port 9377) alongside Lucy. It provide
 | Method | Endpoint | Body |
 |--------|----------|------|
 | `POST /tabs/:id/navigate` | Go to URL | `{"url": "https://..."}` |
-| `POST /tabs/:id/go_back` | Browser back | — |
-| `POST /tabs/:id/go_forward` | Browser forward | — |
-| `POST /tabs/:id/reload` | Reload page | — |
+| `POST /tabs/:id/go_back` | Browser back | (no body) |
+| `POST /tabs/:id/go_forward` | Browser forward | (no body) |
+| `POST /tabs/:id/reload` | Reload page | (no body) |
 
 ### Snapshot (Read the Page)
 
@@ -51,7 +51,7 @@ CamoFox runs as a REST API server (default port 9377) alongside Lucy. It provide
 |--------|----------|-------------|
 | `GET /tabs/:id/snapshot` | Accessibility snapshot | Returns page structure with `eN` element refs |
 
-Snapshots are ~90% smaller than raw HTML — extremely token-efficient for LLM consumption. Each interactive element gets a unique `eN` reference (e.g. `e14`, `e27`) that you use for click/type interactions.
+Snapshots are ~90% smaller than raw HTML; extremely token-efficient for LLM consumption. Each interactive element gets a unique `eN` reference (e.g. `e14`, `e27`) that you use for click/type interactions.
 
 ### Interaction
 
@@ -124,18 +124,18 @@ Built-in search macros navigate and extract structured results automatically:
 
 ## Best Practices
 
-1. **Always snapshot before interacting** — don't click blindly; read the page first
-2. **Use search macros for research** — they're faster and more reliable than manual navigation
-3. **Close tabs when done** — free up browser resources
-4. **Prefer APIs over browsing** — check if there's a Composio integration first
-5. **Use persistent profiles** — set `userId` to workspace_id so login sessions persist
-6. **Handle dynamic pages** — wait 1-3 seconds after navigation, then snapshot to check if content loaded
-7. **Short incremental waits** — prefer waiting 2s → snapshot → check, rather than one long 10s wait
+1. **Always snapshot before interacting**: don't click blindly; read the page first
+2. **Use search macros for research**: they're faster and more reliable than manual navigation
+3. **Close tabs when done**: free up browser resources
+4. **Prefer APIs over browsing**: check if there's a Composio integration first
+5. **Use persistent profiles**: set `userId` to workspace_id so login sessions persist
+6. **Handle dynamic pages**: wait 1-3 seconds after navigation, then snapshot to check if content loaded
+7. **Short incremental waits**: prefer waiting 2s → snapshot → check, rather than one long 10s wait
 
 ## Anti-Patterns
 
 - Don't browse when an API/integration exists (check `COMPOSIO_SEARCH_TOOLS` first)
 - Don't click elements without snapshotting first to get current `eN` refs
-- Don't keep tabs open indefinitely — close them when the task is complete
-- Don't rapid-fire requests — add small delays between interactions for page rendering
-- Don't try to interact with iframe content — only elements outside iframes are accessible
+- Don't keep tabs open indefinitely; close them when the task is complete
+- Don't rapid-fire requests; add small delays between interactions for page rendering
+- Don't try to interact with iframe content; only elements outside iframes are accessible

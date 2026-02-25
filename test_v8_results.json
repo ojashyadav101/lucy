@@ -1,0 +1,52 @@
+[
+  {
+    "label": "clerk_auth_breakdown",
+    "elapsed_s": 123.0,
+    "response": null,
+    "thread_ts": "1771970294.857729",
+    "status": "timeout"
+  },
+  {
+    "label": "clerk_monthly_growth",
+    "elapsed_s": 123.2,
+    "response": null,
+    "thread_ts": "1771970417.788289",
+    "status": "timeout"
+  },
+  {
+    "label": "concurrent_clerk",
+    "elapsed_s": 37.5,
+    "response": "You currently have *3,021 users* in Clerk.\n\n*Authentication breakdown:*\n\u2022 *Google OAuth:* 2,347 users (78%)\n\u2022 *Email/Password:* 674 users (22%)\n\nSignups have been trending down since a peak in July/August 2025, you're at 201 so far in February. Want me to pull more detailed user data or check anything specific?",
+    "thread_ts": "1771970541.047039",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "concurrent_gmail",
+    "elapsed_s": 37.5,
+    "response": "You have *201 unread emails* in your inbox.\n\nThat's a fair bit to go through. Want me to pull a summary of the most recent ones so you can triage quickly?",
+    "thread_ts": "1771970544.669219",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "gmail_analysis_to_sheet",
+    "initial_s": 45.3,
+    "followup_s": 101.3,
+    "initial_response": "Here are your 5 most recent unread emails:  *1. Cursor Team*, *New Cloud Agents with Computer Use* Agents can now interact with the software they are creating to verify and demo their work. *Received: Feb 24, 7:53 PM*  *2. Cursor Team*, *New Cloud Agents with Computer Use* (same email, different thr",
+    "followup_response": "Created your *Email Triage* spreadsheet and populated it with those 5 emails.\n\n*<https://docs.google.com/spreadsheets/d/1CO02NiXE9IqlPQngniyH8IbwkbHqcaov748RWYOd2S0/edit|Open Email Triage sheet>*\n\n*What's in there:*\n\u2022 *From*, sender name\n\u2022 *Subject*, email subject line\n\u2022 *Priority*, my estimate based on the content (all 5 were Cursor product updates, so Medium/Low since they're feature announcements)\n\nAll 6 rows populated (headers + 5 emails). Want me to adjust the priority ratings or add more columns like \"Received Date\" or \"Action\"?",
+    "thread_ts": "1771970578.596469",
+    "status": "ok"
+  },
+  {
+    "label": "clerk_and_github_combined",
+    "elapsed_s": 61.7,
+    "response": "You have *3,021 total Clerk users* and *57 GitHub repositories* in the Serprisingly org.",
+    "thread_ts": "1771970728.180109",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  }
+]

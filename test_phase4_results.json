@@ -1,0 +1,23 @@
+[
+  {
+    "label": "clerk_users",
+    "elapsed_s": 43.6,
+    "response": "Here are the users in your Clerk system:  *User 1* \u2022 *Name:* Asimina Antoniou  \u2022 *Email:* <mailto:antoniou.asimina1@gmail.com|antoniou.asimina1@gmail.com>  \u2022 *User ID:* `user_3A7dO4igIuQ7P4ibzVPXNxgcGVK`  \u2022 *Status:* Active, email verified  \u2022 *Auth:* Password-based   *User 2* \u2022 *Name:* Samantha Smit",
+    "thread_ts": "1771953392.159289",
+    "status": "ok"
+  },
+  {
+    "label": "composio_connections",
+    "elapsed_s": 39.7,
+    "response": "Here's what I found:\n\n*Currently Connected:*\nNone of the common integrations are set up yet. I can connect them for you in a few clicks.\n\n*Custom Integrations (Ready to use):*\n\u2022 *Polar.sh* \u2014 Manage products, subscriptions, customers, orders, discounts, and analytics\n\u2022 *Clerk* \u2014 Manage users, organiz",
+    "thread_ts": "1771953435.721719",
+    "status": "ok"
+  },
+  {
+    "label": "composio_search",
+    "elapsed_s": 40.3,
+    "response": "Here are the *Gmail tools* available through :  ---  *Core Email Management*  \u2022 *Fetch Emails* \u2014 Search and retrieve emails with filters (query, labels, date range). Returns message previews, metadata, and pagination support.  \u2022 *Fetch Message by ID* \u2014 Get full email content including headers and bo",
+    "thread_ts": "1771953475.456909",
+    "status": "ok"
+  }
+]

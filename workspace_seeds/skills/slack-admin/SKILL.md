@@ -86,20 +86,20 @@ Slack enforces strict rate limits. Key limits:
 - **Messages**: 1 message per second per channel
 - **API calls**: Tier 2 methods (most reads) allow ~20 req/min; Tier 3 (writes) allow ~50 req/min
 - **Search**: Limited to ~20 req/min
-- If you hit a rate limit, Slack returns a `Retry-After` header — Composio handles backoff automatically
+- If you hit a rate limit, Slack returns a `Retry-After` header; Composio handles backoff automatically
 
 ## Timezone Awareness
 
 Every Slack user has timezone data in their profile:
-- `tz` — IANA timezone identifier (e.g. `America/New_York`)
-- `tz_label` — human-readable label (e.g. `Eastern Standard Time`)
-- `tz_offset` — seconds from UTC (changes with DST)
+- `tz`: IANA timezone identifier (e.g. `America/New_York`)
+- `tz_label`: human-readable label (e.g. `Eastern Standard Time`)
+- `tz_offset`: seconds from UTC (changes with DST)
 
 Use this when:
 - Scheduling meetings across timezones
 - Determining "today" for a specific user
 - Sending time-sensitive messages at appropriate local times
-- Don't cache `tz_offset` for long — it changes silently with DST
+- Don't cache `tz_offset` for long; it changes silently with DST
 
 ## Block Kit Formatting
 
@@ -118,12 +118,12 @@ For rich messages, use Block Kit JSON in the `blocks` parameter:
 
 ## Best Practices
 
-1. **Thread awareness** — always reply in the thread if the triggering message was in a thread
-2. **Rate limits** — space messages at 1/sec/channel; batch reads into single API calls where possible
-3. **Channel selection** — for proactive messages (from crons), choose the most relevant channel based on topic
-4. **Ephemeral messages** — use for responses only the requesting user should see (confirmations, previews)
-5. **Formatting** — use mrkdwn for text (*bold*, `code`, >quotes); use Block Kit for interactive or structured content
-6. **File sharing** — when sharing generated files (PDFs, spreadsheets), use file upload rather than external links
+1. **Thread awareness**: always reply in the thread if the triggering message was in a thread
+2. **Rate limits**: space messages at 1/sec/channel; batch reads into single API calls where possible
+3. **Channel selection**: for proactive messages (from crons), choose the most relevant channel based on topic
+4. **Ephemeral messages**: use for responses only the requesting user should see (confirmations, previews)
+5. **Formatting**: use mrkdwn for text (*bold*, `code`, >quotes); use Block Kit for interactive or structured content
+6. **File sharing**: when sharing generated files (PDFs, spreadsheets), use file upload rather than external links
 
 ## Anti-Patterns
 

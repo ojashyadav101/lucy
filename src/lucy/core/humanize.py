@@ -32,32 +32,41 @@ _REPHRASER_PROMPT = (
     "Rephrase the following message naturally. "
     "Keep it to 1-2 sentences max. Sound like a helpful colleague, "
     "not a chatbot or template. Never use emojis unless the user did. "
-    "Your response IS the message — output nothing else."
+    "Never use em dashes. "
+    "Your response IS the message, output nothing else."
 )
 
 _POOL_GENERATOR_PROMPT = (
     "You are Lucy, a warm, approachable AI coworker. "
     "For each category below, generate exactly 6 unique, natural "
     "variations of the described message. Each variation should feel "
-    "like it was written by a real person — slightly different tone, "
-    "phrasing, and word choice. No emojis. "
+    "like it was written by a real person, with slightly different tone, "
+    "phrasing, and word choice. No emojis. Never use em dashes. "
     "Return ONLY valid JSON: {\"category_name\": [\"variation1\", ...]}. "
     "No markdown, no explanation."
 )
 
 POOL_CATEGORIES: dict[str, str] = {
     "greeting": (
-        "Say hi to a colleague who just messaged you. "
-        "Be welcoming and ask what they need help with. Max 1 sentence."
+        "Greet a colleague who just said hi to you. "
+        "Be warm and friendly, reciprocate their greeting naturally. "
+        "If they asked how you are, tell them you're doing well. "
+        "Don't immediately ask what they need, just be friendly first. "
+        "Examples: 'Hey! Doing great, how about you?', "
+        "'Hi there! Good to see you 👋'. Max 1-2 sentences."
     ),
     "status": (
         "Let a colleague know you're online and available. "
         "Keep it short and casual. Max 1 sentence."
     ),
     "help": (
-        "Briefly explain your core capabilities: research, integrations "
-        "(calendar, email, GitHub, etc), document creation, code help, "
-        "and automation. 2-4 bullet points. Keep it friendly."
+        "Introduce yourself as Lucy, an AI coworker. "
+        "Describe WHO you are and WHAT you do in 2-3 sentences. "
+        "Focus on your identity and purpose, not a bullet list of features. "
+        "Example: 'I'm Lucy, I work alongside your team to help with "
+        "research, integrations, documents, code, and automating the tedious stuff. "
+        "Think of me as the teammate who handles the things you don't have time for.' "
+        "Keep it conversational and personal, not a feature list."
     ),
     "progress_early": (
         "You just started working on someone's request. "
@@ -123,65 +132,64 @@ POOL_CATEGORIES: dict[str, str] = {
 
 _FALLBACKS: dict[str, list[str]] = {
     "greeting": [
-        "Hey! What can I help with?",
-        "Hi there — what are you working on?",
-        "Hey! What do you need?",
-        "Hi! Ready when you are.",
+        "Hey! Doing well, thanks for asking 👋 How are you doing?",
+        "Hi there! Good to see you. How's your day going?",
+        "Hey! I'm good, what's on your mind today?",
+        "Hi! Always nice to chat. How are things going?",
     ],
     "status": [
-        "I'm here — what do you need?",
+        "I'm here, what's going on?",
         "Online and ready. What's up?",
-        "Yep, I'm around! What can I help with?",
+        "Yep, I'm around! How can I help?",
     ],
     "help": [
         (
-            "I can help with a lot — here's a quick rundown:\n\n"
-            "• *Search & research* — web, competitors, market data\n"
-            "• *Integrations* — Google Calendar, Gmail, GitHub, Linear, Sheets\n"
-            "• *Documents* — create PDFs, spreadsheets, presentations\n"
-            "• *Code* — review PRs, debug, write scripts, deploy\n"
-            "• *Automate* — set up recurring tasks, workflows, alerts\n\n"
-            "Just tell me what you need and I'll figure out the best way to do it."
+            "I'm Lucy, I work alongside your team as an AI coworker. "
+            "I can help with research, manage your integrations "
+            "(calendar, email, GitHub, and more), create documents, "
+            "write and review code, and automate recurring tasks. "
+            "Think of me as the teammate who handles the things "
+            "you don't have time for. Just let me know what you need!"
         ),
     ],
-    "progress_early": ["On it — pulling that together now."],
+    "progress_early": ["On it, pulling that together now."],
     "progress_mid": [
-        "Still working through this — almost have what you need."
+        "Still working through this, almost have what you need."
     ],
     "progress_late": [
         "Taking a bit longer than usual, but I'm making good headway."
     ],
     "progress_final": [
-        "This is a thorough one — hang tight, wrapping up now."
+        "This is a thorough one, hang tight. Wrapping up now."
     ],
-    "task_cancelled": ["Got it — I've cancelled that."],
+    "task_cancelled": ["Got it, I've cancelled that."],
     "task_background_ack": [
-        "Working on this in the background — I'll post updates here "
+        "Working on this in the background. I'll post updates here "
         "as I make progress. You can keep chatting in the meantime."
     ],
     "error_timeout": [
-        "That one's taking longer than expected — I'm still "
-        "working on it and will follow up here shortly."
+        "Taking a bit longer than expected. "
+        "Still working on it and will follow up here shortly."
     ],
     "error_rate_limit": [
-        "I'm getting a lot of requests right now — give me "
-        "a moment and I'll get back to you on this."
+        "Getting a lot of requests right now, "
+        "give me a moment and I'll get back to you."
     ],
     "error_connection": [
         "Having a bit of trouble reaching one of the services "
         "I need. Let me retry in a moment."
     ],
     "error_generic": [
-        "Working on getting that sorted — I'll follow up "
+        "Working on getting that sorted. I'll follow up "
         "right here in a moment."
     ],
     "error_task_timeout": [
         "This research is taking longer than expected. "
-        "I've hit the time limit — want me to continue?"
+        "I've hit the time limit, want me to continue?"
     ],
     "error_task_failed": [
         "Ran into an issue with that. "
-        "Let me try a different approach — what specifically are you looking for?"
+        "Let me try a different approach. What specifically are you looking for?"
     ],
     "hitl_approved": ["Approved by {user}. Executing now..."],
     "hitl_expired": ["That action has already been handled or expired."],
@@ -253,10 +261,26 @@ async def humanize(
         result = (response.content or "").strip()
         if result and len(result) > 5:
             return result
-        return intent
+        return _humanize_fallback(intent)
     except Exception as exc:
         logger.debug("humanize_fallback", intent=intent[:60], error=str(exc))
-        return intent
+        return _humanize_fallback(intent)
+
+
+def _humanize_fallback(intent: str) -> str:
+    """If humanize LLM fails, return a safe fallback instead of the raw prompt."""
+    lower = intent.lower()
+    if "still working" in lower or "previous request" in lower:
+        return "Still working on your previous request, one moment!"
+    if "clarify" in lower or "rephrase" in lower:
+        return "Could you give me a bit more detail on what you need?"
+    if "workspace" in lower or "trouble" in lower:
+        return "Something went wrong on my end. Could you try again?"
+    if "cancel" in lower:
+        return "Got it, cancelled."
+    if len(intent) > 80:
+        return "Give me just a moment."
+    return intent
 
 
 # ═══════════════════════════════════════════════════════════════════════════

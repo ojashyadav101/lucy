@@ -1,0 +1,70 @@
+[
+  {
+    "label": "dashboard_retry",
+    "elapsed_s": 184.1,
+    "response": "Done. Here's your *Quick Stats* spreadsheet with the three numbers:\n\n\u2022 Clerk Users, Count: 3,021\n\u2022 Unread Emails, Count: 502\n\u2022 Google Sheets Files, Count: 1,000+\n\nThe file has formatted headers and a timestamp. Notes:\n\n- *Clerk*: 3,021 total users in your instance\n- *Unread emails*: 502 unread messages in your inbox (<mailto:hello@ojash.com|hello@ojash.com>)\n- *Google Sheets*: Found 1,000 files in the first batch; there may be more\n\n&lt;url|Download Quick_Stats.xlsx&gt;\n\nWant me to add anything else to it, like a breakdown of unread emails by sender or the most recently modified Sheets?",
+    "thread_ts": "1771968823.386269",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "clerk_gmail_sheets",
+    "initial_s": 78.5,
+    "followup_s": 162.0,
+    "initial_response": "Here are your top 3 oldest Clerk users by signup date:  *1. <mailto:shashwat+prodtesting_app@serprisingly.com|shashwat+prodtesting_app@serprisingly.com>* \u2022 Signed up: June 8, 2025 \u2022 User ID: user_2yEQ217BZOyiFnxRvs1yTM8PWiu  *2. <mailto:shashwat+prodtesting_app_1@serprisingly.com|shashwat+prodtesting_app_1@serprisingly.com>* \u2022 Signed up: June 16, 2025 \u2022 User ID: user_2yaAq4nB7MBEAu3IfBYTWVVOvff  *3. s",
+    "followup_response": "Done! I've created a Google Sheet called *\"VIP Users Report\"* with your top 3 oldest Clerk users by signup date.\n\nHere's what's in the sheet:\n\n\u2022 *1*, User: <mailto:shashwat+prodtesting_app@serprisingly.com|shashwat+prodtesting_app@serprisingly.com>, Signup Date: June 8, 2025\n\u2022 *2*, User: <mailto:shashwat+prodtesting_app_1@serprisingly.com|shashwat+prodtesting_app_1@serprisingly.com>, Signup Date: June 16, 2025\n\u2022 *3*, User: <mailto:shashwat+prodtesting_app_3@serprisingly.com|shashwat+prodtesting_app_3@serprisingly.com>, Signup Date: June 16, 2025\n\n*<https://docs.google.com/spreadsheets/d/1SXho46FlCChYSA0fl1Z0PmI1PsgBPTLhA3BfOqn3NtE/edit|Open VIP Users Report>*\n\nAll three appear to be test accounts created by Shashwat during early app testing. I also noticed the 4th oldest user is you (<mailto:hello@ojash.com|hello@ojash.com>), followed by Shashwat's real account, the first \"real\" users beyond test data.\n\nI haven't checked email activity yet since I'd need access to your email system. Want me to search for any emails from these addresses in Gmail?",
+    "thread_ts": "1771969007.689019",
+    "status": "ok"
+  },
+  {
+    "label": "clerk_breakdown",
+    "elapsed_s": 150.8,
+    "response": null,
+    "thread_ts": "1771969250.920249",
+    "status": "timeout"
+  },
+  {
+    "label": "gmail_specific_search",
+    "elapsed_s": 106.2,
+    "response": "On it, pulling that together now.",
+    "thread_ts": "1771969401.641019",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "nonexistent_sheet",
+    "elapsed_s": 56.1,
+    "response": "I searched through your Google Drive but couldn't find a sheet called \"Q4 Revenue Projections 2027.\" \n\nI did find these spreadsheets in your account:\n- *Orb Topical Map*\n- *Mentions Financial Dashboard*\n- *VIP Users Report*\n- *Company Dashboard*\n\nCould you double-check the exact name? It might be slightly different, or it could be stored in a shared drive I don't have access to.",
+    "thread_ts": "1771969507.803319",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "impossible_data",
+    "elapsed_s": 122.6,
+    "response": null,
+    "thread_ts": "1771969563.930269",
+    "status": "timeout"
+  },
+  {
+    "label": "rapid_razorpay",
+    "elapsed_s": 297.4,
+    "response": "",
+    "thread_ts": "1771969686.569189",
+    "status": "timeout",
+    "has_em_dash": false,
+    "has_en_dash": false
+  },
+  {
+    "label": "rapid_github",
+    "elapsed_s": 297.4,
+    "response": "On it, pulling that together now.",
+    "thread_ts": "1771969689.161049",
+    "status": "ok",
+    "has_em_dash": false,
+    "has_en_dash": false
+  }
+]

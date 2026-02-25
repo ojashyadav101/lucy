@@ -3,14 +3,21 @@
 Loads task.json files from each workspace's crons/ directory and
 schedules them as recurring jobs. Each cron triggers a fresh Lucy
 agent run with the task description as the instruction.
+
+Capabilities:
+- Cron expression validation before scheduling
+- Per-job retry with exponential backoff
+- Slack notification on persistent failures
+- Timezone-aware scheduling
+- Runtime cron creation/deletion with auto-reload
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -18,9 +25,42 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from lucy.config import settings
-from lucy.workspace.filesystem import WorkspaceFS, get_workspace
+from lucy.workspace.filesystem import get_workspace
 
 logger = structlog.get_logger()
+
+MAX_RETRIES = 2
+RETRY_DELAY_BASE = 30
+
+
+def validate_cron_expression(expr: str) -> str | None:
+    """Return None if valid, error message if invalid."""
+    try:
+        CronTrigger.from_crontab(expr)
+        return None
+    except (ValueError, TypeError) as e:
+        return str(e)
+
+
+def _estimate_daily_runs(cron_expr: str) -> int:
+    """Rough estimate of how many times a cron fires per day."""
+    parts = cron_expr.strip().split()
+    if len(parts) < 5:
+        return 1
+
+    minute, hour = parts[0], parts[1]
+
+    def _count_field(field: str, total: int) -> int:
+        if field == "*":
+            return total
+        if field.startswith("*/"):
+            step = int(field[2:])
+            return max(1, total // step)
+        return len(field.split(","))
+
+    minute_hits = _count_field(minute, 60)
+    hour_hits = _count_field(hour, 24)
+    return minute_hits * hour_hits
 
 
 @dataclass
@@ -34,6 +74,12 @@ class CronConfig:
     workspace_dir: str
     created_at: str = ""
     updated_at: str = ""
+    timezone: str = ""
+    max_retries: int = MAX_RETRIES
+    notify_on_failure: bool = True
+    delivery_channel: str = ""
+    requesting_user_id: str = ""
+    delivery_mode: str = "channel"
 
     @property
     def job_id(self) -> str:
@@ -69,23 +115,8 @@ class CronScheduler:
             crons = await self._load_crons(ws_id)
             for cron in crons:
                 try:
-                    trigger = CronTrigger.from_crontab(cron.cron)
-                    self.scheduler.add_job(
-                        self._run_cron,
-                        trigger=trigger,
-                        args=[ws_id, cron],
-                        id=cron.job_id,
-                        name=cron.title,
-                        replace_existing=True,
-                    )
+                    self._schedule_cron(ws_id, cron)
                     total_jobs += 1
-                    logger.info(
-                        "cron_scheduled",
-                        workspace_id=ws_id,
-                        cron_path=cron.path,
-                        schedule=cron.cron,
-                        title=cron.title,
-                    )
                 except Exception as e:
                     logger.error(
                         "cron_schedule_failed",
@@ -124,15 +155,7 @@ class CronScheduler:
         crons = await self._load_crons(workspace_id)
         for cron in crons:
             try:
-                trigger = CronTrigger.from_crontab(cron.cron)
-                self.scheduler.add_job(
-                    self._run_cron,
-                    trigger=trigger,
-                    args=[workspace_id, cron],
-                    id=cron.job_id,
-                    name=cron.title,
-                    replace_existing=True,
-                )
+                self._schedule_cron(workspace_id, cron)
             except Exception as e:
                 logger.error(
                     "cron_reload_failed",
@@ -140,6 +163,9 @@ class CronScheduler:
                     cron_path=cron.path,
                     error=str(e),
                 )
+
+        self._schedule_slack_sync(workspace_id)
+        self._schedule_memory_consolidation(workspace_id)
 
         logger.info(
             "workspace_crons_reloaded",
@@ -157,11 +183,221 @@ class CronScheduler:
         await self._run_cron(workspace_id, target)
         return True
 
+    def _schedule_cron(self, workspace_id: str, cron: CronConfig) -> None:
+        """Schedule a single cron job with timezone support."""
+        tz = cron.timezone if cron.timezone else None
+        trigger = CronTrigger.from_crontab(cron.cron, timezone=tz)
+        self.scheduler.add_job(
+            self._run_cron,
+            trigger=trigger,
+            args=[workspace_id, cron],
+            id=cron.job_id,
+            name=cron.title,
+            replace_existing=True,
+        )
+        logger.info(
+            "cron_scheduled",
+            workspace_id=workspace_id,
+            cron_path=cron.path,
+            schedule=cron.cron,
+            title=cron.title,
+            timezone=tz or "server",
+        )
+
+    async def create_cron(
+        self,
+        workspace_id: str,
+        name: str,
+        cron_expr: str,
+        title: str,
+        description: str,
+        tz: str = "",
+        notify_on_failure: bool = True,
+        delivery_channel: str = "",
+        requesting_user_id: str = "",
+        delivery_mode: str = "channel",
+    ) -> dict[str, Any]:
+        """Create a new cron job: write task.json and register with scheduler.
+
+        delivery_mode controls where the result is posted:
+        - "channel": post to the delivery_channel (default)
+        - "dm": DM the requesting_user_id directly
+
+        Returns a result dict with status and details.
+        """
+        validation_err = validate_cron_expression(cron_expr)
+        if validation_err:
+            return {
+                "success": False,
+                "error": f"Invalid cron expression '{cron_expr}': {validation_err}",
+            }
+
+        runs_per_day = _estimate_daily_runs(cron_expr)
+        cost_warning = ""
+        if runs_per_day > 24:
+            cost_warning = (
+                f"This task will run ~{runs_per_day} times per day. "
+                f"Each run uses LLM tokens. Consider a longer interval "
+                f"if this is an agent-based task."
+            )
+        elif runs_per_day > 6:
+            cost_warning = (
+                f"This task will run ~{runs_per_day} times per day. "
+                f"Keep in mind each run uses LLM tokens."
+            )
+
+        slug = name.lower().replace(" ", "-")
+        slug = "".join(c for c in slug if c.isalnum() or c == "-")
+        path = f"/{slug}"
+
+        now = datetime.now(timezone.utc).isoformat()
+        task_data = {
+            "path": path,
+            "cron": cron_expr,
+            "title": title,
+            "description": description,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if tz:
+            task_data["timezone"] = tz
+        if not notify_on_failure:
+            task_data["notify_on_failure"] = False
+        if delivery_channel:
+            task_data["delivery_channel"] = delivery_channel
+        if requesting_user_id:
+            task_data["requesting_user_id"] = requesting_user_id
+        if delivery_mode != "channel":
+            task_data["delivery_mode"] = delivery_mode
+
+        ws = get_workspace(workspace_id)
+        cron_dir = f"crons/{slug}"
+        file_path = f"{cron_dir}/task.json"
+        content = json.dumps(task_data, indent=2, ensure_ascii=False)
+        await ws.write_file(file_path, content)
+
+        count = await self.reload_workspace(workspace_id)
+        result: dict[str, Any] = {
+            "success": True,
+            "cron_name": slug,
+            "schedule": cron_expr,
+            "title": title,
+            "timezone": tz or "server default",
+            "total_workspace_crons": count,
+        }
+        if cost_warning:
+            result["cost_warning"] = cost_warning
+        return result
+
+    async def delete_cron(
+        self, workspace_id: str, cron_name: str
+    ) -> dict[str, Any]:
+        """Delete a cron job: remove task.json directory and unschedule.
+
+        Supports fuzzy matching: if exact slug not found, searches by
+        title substring match.
+        """
+        import shutil
+
+        slug = cron_name.lower().replace(" ", "-")
+        slug = "".join(c for c in slug if c.isalnum() or c == "-")
+
+        ws = get_workspace(workspace_id)
+        cron_dir = ws.root / "crons" / slug
+
+        if not cron_dir.is_dir():
+            match = await self._fuzzy_find_cron(workspace_id, cron_name)
+            if not match:
+                available = await self._load_crons(workspace_id)
+                names = [c.title for c in available]
+                return {
+                    "success": False,
+                    "error": f"Cron '{cron_name}' not found.",
+                    "available_crons": names,
+                }
+            slug = match.path.strip("/")
+            cron_dir = ws.root / "crons" / slug
+
+        job_id = f"{workspace_id}:/{slug}"
+        try:
+            self.scheduler.remove_job(job_id)
+        except Exception:
+            pass
+
+        shutil.rmtree(cron_dir, ignore_errors=True)
+        logger.info("cron_deleted", workspace_id=workspace_id, cron_name=slug)
+        return {"success": True, "deleted": slug}
+
+    async def modify_cron(
+        self,
+        workspace_id: str,
+        cron_name: str,
+        new_cron_expr: str | None = None,
+        new_description: str | None = None,
+        new_title: str | None = None,
+        new_tz: str | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing cron's schedule, description, or title.
+
+        Supports fuzzy matching: if exact slug not found, searches by
+        title substring match.
+        """
+        slug = cron_name.lower().replace(" ", "-")
+        slug = "".join(c for c in slug if c.isalnum() or c == "-")
+
+        ws = get_workspace(workspace_id)
+        task_file = ws.root / "crons" / slug / "task.json"
+
+        if not task_file.is_file():
+            match = await self._fuzzy_find_cron(workspace_id, cron_name)
+            if not match:
+                available = await self._load_crons(workspace_id)
+                names = [c.title for c in available]
+                return {
+                    "success": False,
+                    "error": f"Cron '{cron_name}' not found.",
+                    "available_crons": names,
+                }
+            slug = match.path.strip("/")
+            task_file = ws.root / "crons" / slug / "task.json"
+
+        try:
+            data = json.loads(task_file.read_text("utf-8"))
+        except Exception as e:
+            return {"success": False, "error": f"Failed to read task.json: {e}"}
+
+        if new_cron_expr:
+            validation_err = validate_cron_expression(new_cron_expr)
+            if validation_err:
+                return {
+                    "success": False,
+                    "error": f"Invalid cron expression: {validation_err}",
+                }
+            data["cron"] = new_cron_expr
+        if new_description:
+            data["description"] = new_description
+        if new_title:
+            data["title"] = new_title
+        if new_tz is not None:
+            data["timezone"] = new_tz
+
+        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        task_file.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        count = await self.reload_workspace(workspace_id)
+        return {
+            "success": True,
+            "updated": slug,
+            "total_workspace_crons": count,
+        }
+
     def list_jobs(self) -> list[dict[str, Any]]:
-        """Return a snapshot of all scheduled jobs."""
+        """Return a snapshot of all scheduled jobs with rich metadata."""
         jobs = []
         for job in self.scheduler.get_jobs():
-            jobs.append({
+            entry: dict[str, Any] = {
                 "id": job.id,
                 "name": job.name,
                 "next_run": (
@@ -169,7 +405,24 @@ class CronScheduler:
                     if job.next_run_time
                     else None
                 ),
-            })
+            }
+            if hasattr(job.trigger, "FIELD_NAMES"):
+                try:
+                    fields = {
+                        f.name: str(f) for f in job.trigger.fields
+                    }
+                    entry["schedule_fields"] = fields
+                except Exception:
+                    pass
+            if job.args and len(job.args) >= 2:
+                cron_cfg = job.args[1]
+                if isinstance(cron_cfg, CronConfig):
+                    entry["schedule"] = cron_cfg.cron
+                    entry["description"] = cron_cfg.description[:200]
+                    entry["created_at"] = cron_cfg.created_at
+                    if cron_cfg.timezone:
+                        entry["timezone"] = cron_cfg.timezone
+            jobs.append(entry)
         return jobs
 
     def _schedule_memory_consolidation(self, workspace_id: str) -> None:
@@ -313,6 +566,21 @@ class CronScheduler:
                 continue
             try:
                 data = json.loads(task_file.read_text("utf-8"))
+                for required in ("path", "cron", "title", "description"):
+                    if required not in data:
+                        raise ValueError(f"missing required field: {required}")
+
+                validation_err = validate_cron_expression(data["cron"])
+                if validation_err:
+                    logger.error(
+                        "cron_invalid_expression",
+                        workspace_id=workspace_id,
+                        file=str(task_file),
+                        cron=data["cron"],
+                        error=validation_err,
+                    )
+                    continue
+
                 configs.append(CronConfig(
                     path=data["path"],
                     cron=data["cron"],
@@ -321,6 +589,12 @@ class CronScheduler:
                     workspace_dir=workspace_id,
                     created_at=data.get("created_at", ""),
                     updated_at=data.get("updated_at", ""),
+                    timezone=data.get("timezone", ""),
+                    max_retries=int(data.get("max_retries", MAX_RETRIES)),
+                    notify_on_failure=data.get("notify_on_failure", True),
+                    delivery_channel=data.get("delivery_channel", ""),
+                    requesting_user_id=data.get("requesting_user_id", ""),
+                    delivery_mode=data.get("delivery_mode", "channel"),
                 ))
             except Exception as e:
                 logger.warning(
@@ -332,12 +606,99 @@ class CronScheduler:
 
         return configs
 
-    async def _run_cron(self, workspace_id: str, cron: CronConfig) -> None:
-        """Execute a single cron job.
+    def _build_cron_instruction(
+        self, cron: CronConfig, learnings: str | None,
+    ) -> str:
+        """Build the instruction that the cron agent receives.
 
+        The instruction frames Lucy as proactively reaching out rather
+        than answering a question. It preserves full SOUL personality
+        through the normal agent.run() pipeline while preventing the
+        agent from recursively creating new crons or asking questions
+        into the void. Includes a self-validation layer so the agent
+        sanity-checks its own results before delivering them.
+        """
+        parts: list[str] = []
+
+        parts.append(
+            "You are Lucy, running a scheduled task. This is a proactive "
+            "action, not a response to a user message. Write your output "
+            "as if you're reaching out to a teammate: natural, warm, and "
+            "useful. Your output will be posted to Slack automatically."
+        )
+
+        parts.append(
+            "\nRules for this execution:\n"
+            "- Do NOT create, modify, or delete any cron jobs\n"
+            "- Do NOT ask clarifying questions (nobody is listening live)\n"
+            "- Do NOT suggest setting up reminders or schedules\n"
+            "- If the task requires data, use your tools to fetch it\n"
+            "- If the task has nothing to report, return SKIP (literally "
+            "the word SKIP and nothing else)\n"
+            "- Keep your response concise and actionable"
+        )
+
+        parts.append(
+            "\n## Self-validation (important)\n"
+            "Before returning your result, critically check it:\n"
+            "1. Does your output actually answer the task? Re-read the "
+            "task description and compare.\n"
+            "2. If you fetched data, does it look reasonable? Check for "
+            "empty results, error pages, stale data, or nonsensical "
+            "values. If the data looks wrong, try a different approach "
+            "or tool before giving up.\n"
+            "3. If the result is clearly not what the user intended "
+            "(e.g. wrong product, wrong metric, data from the wrong "
+            "time period), note it in your output honestly. Do not "
+            "deliver confidently wrong information.\n"
+            "4. Log any issues or observations to "
+            f"crons/{cron.path.strip('/')}/LEARNINGS.md so future "
+            "runs can improve. Include what worked, what didn't, and "
+            "what to try next time."
+        )
+
+        parts.append(f"\n## Task\n{cron.description}")
+
+        if cron.requesting_user_id:
+            parts.append(
+                f"\nThis task was set up by <@{cron.requesting_user_id}>. "
+                f"Address them naturally if relevant."
+            )
+
+        if learnings:
+            parts.append(f"\n## Context from previous runs\n{learnings}")
+
+        return "\n".join(parts)
+
+    def _resolve_delivery_target(self, cron: CronConfig) -> str | None:
+        """Determine where to post the cron result.
+
+        Priority:
+        1. delivery_mode=dm + requesting_user_id -> DM the user
+        2. delivery_mode=channel + delivery_channel -> post to channel
+        3. delivery_channel exists -> post to channel (default)
+        4. No delivery info -> log only (system crons)
+        """
+        if cron.delivery_mode == "dm" and cron.requesting_user_id:
+            return cron.requesting_user_id
+        if cron.delivery_channel:
+            return cron.delivery_channel
+        return None
+
+    async def _run_cron(self, workspace_id: str, cron: CronConfig) -> None:
+        """Execute a cron job through the full Lucy agent pipeline.
+
+        The cron wakes Lucy up with the task instruction. Lucy runs with
+        her full personality (SOUL), tools, and memory. The result is
+        delivered to Slack (channel or DM) based on the cron's config.
+
+        Flow:
         1. Read LEARNINGS.md for accumulated context
-        2. Run the agent with the cron description + learnings
-        3. Log the execution
+        2. Build instruction with personality framing
+        3. Run the full agent with SOUL, tools, and connected services
+        4. Deliver the result to the right Slack destination
+        5. Log the execution for future learning
+        6. Retry on failure with exponential backoff
         """
         import time as _time
 
@@ -350,79 +711,245 @@ class CronScheduler:
         )
 
         ws = get_workspace(workspace_id)
-
-        # Read accumulated learnings for this cron
         cron_dir_name = cron.path.strip("/")
+
         learnings = await ws.read_file(
             f"crons/{cron_dir_name}/LEARNINGS.md"
         )
 
-        # Build the instruction for the agent
-        instruction_parts = [cron.description]
-        if learnings:
-            instruction_parts.append(
-                f"\n\n## Accumulated Learnings\n{learnings}"
+        instruction = self._build_cron_instruction(cron, learnings)
+
+        last_error: Exception | None = None
+        max_attempts = 1 + cron.max_retries
+
+        delivery_target = self._resolve_delivery_target(cron)
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                from lucy.core.agent import AgentContext, get_agent
+
+                agent = get_agent()
+                ctx = AgentContext(
+                    workspace_id=workspace_id,
+                    channel_id=delivery_target,
+                    user_slack_id=cron.requesting_user_id or None,
+                )
+
+                response = await agent.run(
+                    message=instruction,
+                    ctx=ctx,
+                    slack_client=self.slack_client,
+                )
+
+                elapsed_ms = round((_time.monotonic() - t0) * 1000)
+
+                skip = (
+                    response.strip().upper() == "SKIP"
+                    if response else True
+                )
+
+                if (
+                    not skip
+                    and response
+                    and response.strip()
+                    and delivery_target
+                    and self.slack_client
+                ):
+                    await self._deliver_to_slack(
+                        delivery_target, response,
+                    )
+
+                now = datetime.now(timezone.utc).isoformat()
+                status = "skipped" if skip else "delivered"
+                log_entry = (
+                    f"\n## {now} (elapsed: {elapsed_ms}ms, "
+                    f"status: {status})"
+                )
+                if attempt > 1:
+                    log_entry += f" [succeeded on attempt {attempt}]"
+                log_entry += f"\n{response[:500]}\n"
+                await ws.append_file(
+                    f"crons/{cron_dir_name}/execution.log", log_entry
+                )
+
+                from lucy.workspace.activity_log import log_activity
+                await log_activity(
+                    ws,
+                    f"Cron '{cron.title}' {status} in {elapsed_ms}ms",
+                )
+
+                logger.info(
+                    "cron_execution_complete",
+                    workspace_id=workspace_id,
+                    cron_path=cron.path,
+                    elapsed_ms=elapsed_ms,
+                    attempt=attempt,
+                    response_length=len(response) if response else 0,
+                    delivered_to=delivery_target or "log_only",
+                    status=status,
+                )
+                return
+
+            except Exception as e:
+                last_error = e
+                elapsed_ms = round((_time.monotonic() - t0) * 1000)
+                logger.warning(
+                    "cron_execution_attempt_failed",
+                    workspace_id=workspace_id,
+                    cron_path=cron.path,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    error=str(e),
+                    elapsed_ms=elapsed_ms,
+                )
+
+                if attempt < max_attempts:
+                    delay = RETRY_DELAY_BASE * (2 ** (attempt - 1))
+                    await asyncio.sleep(delay)
+
+        elapsed_ms = round((_time.monotonic() - t0) * 1000)
+        error_str = str(last_error) if last_error else "unknown"
+
+        logger.error(
+            "cron_execution_failed",
+            workspace_id=workspace_id,
+            cron_path=cron.path,
+            error=error_str,
+            elapsed_ms=elapsed_ms,
+            attempts=max_attempts,
+            exc_info=True,
+        )
+
+        now = datetime.now(timezone.utc).isoformat()
+        await ws.append_file(
+            f"crons/{cron_dir_name}/execution.log",
+            f"\n## {now} -- FAILED after {max_attempts} attempts"
+            f" ({elapsed_ms}ms)\n{error_str[:300]}\n",
+        )
+
+        if cron.notify_on_failure and self.slack_client:
+            await self._notify_cron_failure(
+                workspace_id, cron, error_str, max_attempts, elapsed_ms,
             )
 
-        instruction = "\n".join(instruction_parts)
-
+    async def _notify_cron_failure(
+        self,
+        workspace_id: str,
+        cron: CronConfig,
+        error: str,
+        attempts: int,
+        elapsed_ms: int,
+    ) -> None:
+        """Post a DM to the workspace owner when a cron fails persistently."""
         try:
-            from lucy.core.agent import AgentContext, get_agent
+            owner_id = await self._resolve_workspace_owner(workspace_id)
+            if not owner_id:
+                return
 
-            agent = get_agent()
-            ctx = AgentContext(workspace_id=workspace_id)
-
-            response = await agent.run(
-                message=instruction,
-                ctx=ctx,
-                slack_client=self.slack_client,
+            msg = (
+                f"Your scheduled task *{cron.title}* failed after "
+                f"{attempts} attempts ({elapsed_ms}ms total).\n\n"
+                f"Error: `{error[:200]}`\n\n"
+                f"Schedule: `{cron.cron}`\n"
+                f"I'll try again at the next scheduled run. "
+                f"Let me know if you want me to look into this."
             )
-
-            elapsed_ms = round((_time.monotonic() - t0) * 1000)
-
-            # Log execution to the cron's execution.log
-            now = datetime.now(timezone.utc).isoformat()
-            log_entry = (
-                f"\n## {now} (elapsed: {elapsed_ms}ms)\n"
-                f"{response[:500]}\n"
+            await self.slack_client.chat_postMessage(
+                channel=owner_id,
+                text=msg,
             )
-            await ws.append_file(
-                f"crons/{cron_dir_name}/execution.log", log_entry
-            )
-
-            # Also log to the daily activity log
-            from lucy.workspace.activity_log import log_activity
-
-            await log_activity(
-                ws,
-                f"Cron '{cron.title}' completed in {elapsed_ms}ms",
-            )
-
-            logger.info(
-                "cron_execution_complete",
-                workspace_id=workspace_id,
-                cron_path=cron.path,
-                elapsed_ms=elapsed_ms,
-                response_length=len(response),
-            )
-
         except Exception as e:
-            elapsed_ms = round((_time.monotonic() - t0) * 1000)
-            logger.error(
-                "cron_execution_failed",
+            logger.warning(
+                "cron_failure_notification_failed",
                 workspace_id=workspace_id,
-                cron_path=cron.path,
                 error=str(e),
-                elapsed_ms=elapsed_ms,
-                exc_info=True,
             )
 
-            # Log the failure
-            now = datetime.now(timezone.utc).isoformat()
-            await ws.append_file(
-                f"crons/{cron_dir_name}/execution.log",
-                f"\n## {now} — FAILED ({elapsed_ms}ms)\n{str(e)[:300]}\n",
+    async def _deliver_to_slack(
+        self, channel: str, text: str,
+    ) -> None:
+        """Post the cron result to a Slack channel or DM.
+
+        Runs the full output pipeline (sanitizer, Markdown-to-Slack
+        converter, tone validator, de-AI filter) before posting, so
+        cron output gets the same treatment as normal messages.
+        """
+        try:
+            from lucy.core.output import process_output
+            from lucy.slack.rich_output import format_links
+
+            formatted = await process_output(text)
+            formatted = format_links(formatted)
+
+            await self.slack_client.chat_postMessage(
+                channel=channel,
+                text=formatted,
             )
+            logger.info(
+                "cron_result_delivered",
+                channel=channel,
+                text_length=len(formatted),
+            )
+        except Exception as e:
+            logger.warning(
+                "cron_delivery_failed",
+                channel=channel,
+                error=str(e),
+            )
+
+    async def _fuzzy_find_cron(
+        self, workspace_id: str, query: str
+    ) -> CronConfig | None:
+        """Find a cron by fuzzy matching on title or path."""
+        crons = await self._load_crons(workspace_id)
+        if not crons:
+            return None
+
+        query_lower = query.lower().strip()
+        query_words = set(query_lower.replace("-", " ").split())
+
+        best: CronConfig | None = None
+        best_score = 0
+
+        for cron in crons:
+            title_lower = cron.title.lower()
+            path_lower = cron.path.strip("/").replace("-", " ")
+
+            if query_lower in title_lower or query_lower in path_lower:
+                return cron
+
+            title_words = set(title_lower.split())
+            path_words = set(path_lower.split())
+            all_words = title_words | path_words
+
+            overlap = len(query_words & all_words)
+            if overlap > best_score:
+                best_score = overlap
+                best = cron
+
+        if best_score >= max(1, len(query_words) // 2):
+            return best
+        return None
+
+    async def _resolve_workspace_owner(self, workspace_id: str) -> str | None:
+        """Find the Slack user ID of the workspace owner for DM notifications."""
+        try:
+            from lucy.db.session import db_session
+            from sqlalchemy import text
+
+            async with db_session() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT slack_user_id FROM users "
+                        "WHERE workspace_id = :ws_id AND role = 'owner' "
+                        "LIMIT 1"
+                    ),
+                    {"ws_id": workspace_id},
+                )
+                row = result.fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
 
 
 # ── Singleton ───────────────────────────────────────────────────────────

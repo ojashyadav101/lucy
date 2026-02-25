@@ -2,7 +2,7 @@
 
 from lucy.core.agent import AgentContext, LucyAgent, get_agent
 from lucy.core.openclaw import OpenClawClient
-from lucy.core.output import process_output
+from lucy.core.output import process_output, process_output_sync
 from lucy.core.prompt import build_system_prompt
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "OpenClawClient",
     "build_system_prompt",
     "process_output",
+    "process_output_sync",
 ]
 
 

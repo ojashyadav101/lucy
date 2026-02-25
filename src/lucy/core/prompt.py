@@ -1,7 +1,13 @@
 """System prompt builder.
 
-Combines SOUL.md (personality), SYSTEM_PROMPT.md (instructions),
-and dynamic skill descriptions into the final system message.
+Assembles the system prompt from layered components. Content is ordered
+static-to-dynamic so that LLM providers with automatic prefix caching
+(Gemini, DeepSeek, Kimi) get maximum cache hits.
+
+Order:
+  STATIC PREFIX  — SOUL.md + SYSTEM_CORE.md + common modules + env block
+  ─── cache boundary ───
+  DYNAMIC SUFFIX — intent modules, custom integrations, skills, knowledge
 """
 
 from __future__ import annotations
@@ -25,6 +31,12 @@ logger = structlog.get_logger()
 _ASSETS_DIR = Path(__file__).parent.parent.parent.parent / "assets"
 _SOUL_PATH = _ASSETS_DIR / "SOUL.md"
 _PROMPT_TEMPLATE_PATH = _ASSETS_DIR / "SYSTEM_PROMPT.md"
+_SYSTEM_CORE_PATH = _ASSETS_DIR / "SYSTEM_CORE.md"
+_PROMPT_MODULES_DIR = _ASSETS_DIR / "prompt_modules"
+
+# Separator used between prompt sections
+_SECTION_SEP = "\n\n---\n\n"
+
 
 def _load_soul() -> str:
     if _SOUL_PATH.exists():
@@ -35,7 +47,10 @@ def _load_soul() -> str:
     )
 
 
-def _load_template() -> str:
+def _load_system_core() -> str:
+    """Load SYSTEM_CORE.md (Phase 2) or fall back to full SYSTEM_PROMPT.md."""
+    if _SYSTEM_CORE_PATH.exists():
+        return _SYSTEM_CORE_PATH.read_text(encoding="utf-8")
     if _PROMPT_TEMPLATE_PATH.exists():
         return _PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
     return (
@@ -44,63 +59,86 @@ def _load_template() -> str:
     )
 
 
+def _load_prompt_modules(names: list[str]) -> str:
+    """Load and concatenate prompt module files by name."""
+    if not _PROMPT_MODULES_DIR.exists():
+        return ""
+    parts: list[str] = []
+    for name in names:
+        path = _PROMPT_MODULES_DIR / f"{name}.md"
+        if path.exists():
+            parts.append(path.read_text(encoding="utf-8"))
+    return "\n\n".join(parts)
+
+
+# Modules loaded into the static prefix for all non-chat intents.
+_COMMON_MODULES = ["tool_use", "memory"]
+
+
 async def build_system_prompt(
     ws: WorkspaceFS,
     connected_services: list[str] | None = None,
     user_message: str | None = None,
+    prompt_modules: list[str] | None = None,
 ) -> str:
     """Build the complete system prompt for a workspace.
 
-    Combines:
-    1. SOUL.md — personality traits and voice
-    2. SYSTEM_PROMPT.md — structured instructions with {available_skills} placeholder
-    3. Dynamic skill descriptions from the workspace
-    4. Full content of skills relevant to the user's message
-    5. Connected services environment block (runtime)
-    6. Team/company knowledge
+    Content is ordered static-to-dynamic for prefix caching:
+
+    STATIC PREFIX (identical across requests per workspace):
+      1. SOUL.md — personality traits and voice
+      2. SYSTEM_CORE.md — core instructions
+      3. Common modules (tool_use + memory) for non-chat intents
+      4. Connected services environment block
+
+    DYNAMIC SUFFIX (varies per request):
+      5. Intent-specific prompt modules (research, coding, etc.)
+      6. Custom integrations block
+      7. Skill descriptions + relevant skill content
+      8. Knowledge blocks (company/team)
+
+    Session memory is NOT included here — it is injected via
+    _preflight_context() as a late system message to preserve
+    the cacheable prefix.
     """
     soul = _load_soul()
-    template = _load_template()
+    system_core = _load_system_core()
     skill_descriptions = await get_skill_descriptions_for_prompt(ws)
     key_content = await get_key_skill_content(ws)
 
-    prompt = template.replace("{available_skills}", skill_descriptions)
+    # ── STATIC PREFIX ────────────────────────────────────────────
+    system_core_with_skills = system_core.replace(
+        "{available_skills}", skill_descriptions,
+    )
 
-    full_prompt = f"{soul}\n\n---\n\n{prompt}"
+    common_modules_text = _load_prompt_modules(_COMMON_MODULES)
 
-    relevant_skills = ""
-    if user_message:
-        relevant_skills = await load_relevant_skill_content(ws, user_message)
-        if relevant_skills:
-            full_prompt += (
-                "\n\n<relevant_skill_details>\n"
-                "The following skill details are relevant to the current request. "
-                "Use these implementation details, code patterns, and best practices "
-                "to deliver high-quality output.\n\n"
-                f"{relevant_skills}\n"
-                "</relevant_skill_details>"
-            )
-
-    if key_content:
-        full_prompt += f"\n\n<knowledge>\n{key_content}\n</knowledge>"
-
-    from lucy.workspace.memory import get_session_context_for_prompt
-    session_ctx = await get_session_context_for_prompt(ws)
-    if session_ctx:
-        full_prompt += f"\n\n<session_memory>\n{session_ctx}\n</session_memory>"
+    static_parts: list[str] = [soul, system_core_with_skills]
+    if common_modules_text:
+        static_parts.append(common_modules_text)
 
     if connected_services:
         services_str = ", ".join(connected_services)
         env_block = (
-            "\n\n<current_environment>\n"
+            "<current_environment>\n"
             "You are communicating via: Slack (already connected and authenticated)\n"
             f"Connected integrations: {services_str}\n"
-            f"DO NOT ask users to connect any of these — they are already active.\n"
+            "DO NOT ask users to connect any of these — they are already active.\n"
             "You are ON Slack — never suggest 'connecting to Slack'.\n"
             "When a user asks what integrations are available, list ONLY these.\n"
             "</current_environment>"
         )
-        full_prompt += env_block
+        static_parts.append(env_block)
+
+    static_prefix = _SECTION_SEP.join(static_parts)
+
+    # ── DYNAMIC SUFFIX ───────────────────────────────────────────
+    dynamic_parts: list[str] = []
+
+    if prompt_modules:
+        intent_modules_text = _load_prompt_modules(prompt_modules)
+        if intent_modules_text:
+            dynamic_parts.append(intent_modules_text)
 
     from lucy.integrations.wrapper_generator import discover_saved_wrappers
     custom_wrappers = discover_saved_wrappers()
@@ -115,7 +153,7 @@ async def build_system_prompt(
 
     if custom_wrappers:
         lines = [
-            "\n\n<custom_integrations>",
+            "<custom_integrations>",
             "IMPORTANT: You have built the following custom integrations. "
             "Their tools are in your tool list prefixed with lucy_custom_. "
             "When a user asks about one of these services, call the "
@@ -136,17 +174,41 @@ async def build_system_prompt(
             key_stored = bool(ci_keys.get("api_key"))
             status = "READY" if key_stored else "needs API key"
             lines.append(
-                f"- {svc} [{status}]: use lucy_custom_{slug}_* tools ({tools_list})"
+                f"- {svc} [{status}]: use lucy_custom_{slug}_* tools "
+                f"({tools_list})"
             )
         lines.append("</custom_integrations>")
-        full_prompt += "\n".join(lines)
+        dynamic_parts.append("\n".join(lines))
+
+    relevant_skills = ""
+    if user_message:
+        relevant_skills = await load_relevant_skill_content(ws, user_message)
+        if relevant_skills:
+            dynamic_parts.append(
+                "<relevant_skill_details>\n"
+                "The following skill details are relevant to the current "
+                "request. Use these implementation details, code patterns, "
+                "and best practices to deliver high-quality output.\n\n"
+                f"{relevant_skills}\n"
+                "</relevant_skill_details>"
+            )
+
+    if key_content:
+        dynamic_parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
+
+    if dynamic_parts:
+        full_prompt = static_prefix + _SECTION_SEP + "\n\n".join(dynamic_parts)
+    else:
+        full_prompt = static_prefix
 
     logger.debug(
         "system_prompt_built",
         workspace_id=ws.workspace_id,
         prompt_length=len(full_prompt),
+        static_prefix_length=len(static_prefix),
         connected_services=connected_services or [],
         has_relevant_skills=bool(relevant_skills),
+        prompt_modules=prompt_modules or [],
     )
     return full_prompt
 

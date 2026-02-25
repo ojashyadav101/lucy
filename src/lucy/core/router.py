@@ -8,21 +8,25 @@ Model tiers (configurable in config.py):
     fast     — cheap, low-latency (greetings, short follow-ups, lookups)
     default  — balanced (tool-calling, general tasks)
     code     — optimized for code generation and debugging
-    frontier — deep reasoning, research, analysis
+    research — 1M context, deep investigation
+    document — reasoning depth for client-facing docs
+    frontier — sparingly, deep analysis
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from lucy.config import settings
 
 MODEL_TIERS: dict[str, str] = {
-    "fast": getattr(settings, "model_tier_fast", "google/gemini-2.5-flash-lite"),
-    "default": getattr(settings, "model_tier_default", settings.openclaw_model),
-    "code": getattr(settings, "model_tier_code", "deepseek/deepseek-chat-v3-0324"),
-    "frontier": getattr(settings, "model_tier_frontier", "anthropic/claude-sonnet-4"),
+    "fast": settings.model_tier_fast,
+    "default": settings.model_tier_default,
+    "code": settings.model_tier_code,
+    "research": settings.model_tier_research,
+    "document": settings.model_tier_document,
+    "frontier": settings.model_tier_frontier,
 }
 
 _CODE_KEYWORDS = re.compile(
@@ -33,23 +37,24 @@ _CODE_KEYWORDS = re.compile(
 )
 
 _RESEARCH_LIGHT = re.compile(
-    r"\b(research|analyze|compare|strategy|report|competitor|"
+    r"\b(research|analyze|compare|strategy|competitor|"
     r"market|pricing model|evaluation|"
     r"investigate|audit|benchmark|"
-    r"tell me about|summarize|overview|what do you know|"
-    r"what integrations|what.+connected|list.+all|how many)\b",
+    r"tell me about|summarize|overview|what do you know)\b",
     re.IGNORECASE,
 )
 
 _RESEARCH_HEAVY = re.compile(
-    r"\b(deep dive|comprehensive|thorough|investigate|audit|"
-    r"benchmark|detailed analysis|competitive analysis|full report)\b",
+    r"\b(deep dive|deep analysis|comprehensive|thorough|investigate|audit|"
+    r"benchmark|detailed analysis|competitive analysis|full report|"
+    r"in[- ]depth|exhaustive|complete analysis)\b",
     re.IGNORECASE,
 )
 
 _GREETING_PATTERNS = re.compile(
     r"^(hi|hey|hello|yo|sup|thanks|thank you|ok|okay|got it|"
-    r"sounds good|perfect|great|cool|nice|yes|no|yep|nope|sure)\s*[!.?]?$",
+    r"sounds good|perfect|great|cool|nice|yes|no|yep|nope|sure)"
+    r"(\s+(there|lucy|everyone|all|team))*\s*[!.?]*$",
     re.IGNORECASE,
 )
 
@@ -71,9 +76,31 @@ _CHECK_PATTERNS = re.compile(
 _DATA_SOURCE_KEYWORDS = re.compile(
     r"\b(calendar|email|emails|gmail|inbox|unread|schedule|meeting|meetings|"
     r"slack|github|issues?|pull requests?|commits?|notion|sheets?|"
-    r"spreadsheet|jira|linear|trello|drive|news|latest)\b",
+    r"spreadsheet|jira|linear|trello|drive|news|latest|"
+    r"integrations?|connected|connections?)\b",
     re.IGNORECASE,
 )
+
+_DOCUMENT_KEYWORDS = re.compile(
+    r"\b(pdf|report|document|spreadsheet|excel|csv|"
+    r"create a (?:report|pdf|document|spreadsheet))\b",
+    re.IGNORECASE,
+)
+
+# Dynamic prompt modules loaded AFTER the static prefix (tool_use + memory
+# are already in the static prefix for all non-chat intents). Only truly
+# intent-specific modules are listed here.
+INTENT_MODULES: dict[str, list[str]] = {
+    "chat": [],
+    "lookup": [],
+    "confirmation": [],
+    "followup": [],
+    "tool_use": [],
+    "command": ["integrations"],
+    "code": ["coding"],
+    "reasoning": ["research"],
+    "document": [],
+}
 
 
 @dataclass
@@ -81,6 +108,7 @@ class ModelChoice:
     intent: str
     model: str
     tier: str
+    prompt_modules: list[str] = field(default_factory=list)
 
 
 def classify_and_route(
@@ -100,101 +128,63 @@ def classify_and_route(
     """
     text = message.strip()
 
+    def _choice(intent: str, tier: str) -> ModelChoice:
+        return ModelChoice(
+            intent=intent,
+            model=MODEL_TIERS[tier],
+            tier=tier,
+            prompt_modules=INTENT_MODULES.get(intent, []),
+        )
+
     # 1. Pure greetings/acknowledgments
     if _GREETING_PATTERNS.match(text):
         if prev_had_tool_calls:
-            return ModelChoice(
-                intent="confirmation",
-                model=MODEL_TIERS["default"],
-                tier="default",
-            )
-        return ModelChoice(
-            intent="chat",
-            model=MODEL_TIERS["fast"],
-            tier="fast",
-        )
+            return _choice("confirmation", "default")
+        return _choice("chat", "fast")
 
     # 2. Short messages deep in threads
     if thread_depth > 5 and len(text) < 50:
         if prev_had_tool_calls:
-            return ModelChoice(
-                intent="followup",
-                model=MODEL_TIERS["default"],
-                tier="default",
-            )
+            return _choice("followup", "default")
         if _ACTION_VERBS.search(text):
-            return ModelChoice(
-                intent="command",
-                model=MODEL_TIERS["default"],
-                tier="default",
-            )
-        return ModelChoice(
-            intent="followup",
-            model=MODEL_TIERS["fast"],
-            tier="fast",
-        )
+            return _choice("command", "default")
+        return _choice("followup", "fast")
 
-    # 3. Deep research / analysis — check before code to avoid
+    # 3. Document creation — check BEFORE research so "create a report
+    #    about competitors" routes to document, not research.
+    if _DOCUMENT_KEYWORDS.search(text) and _ACTION_VERBS.search(text):
+        return _choice("document", "document")
+
+    # 4. Deep research / analysis — check before code to avoid
     #    "research code tools" being classified as coding.
-    #    Only escalate to frontier for genuinely complex tasks.
     has_heavy = bool(_RESEARCH_HEAVY.search(text))
     light_matches = _RESEARCH_LIGHT.findall(text)
     if has_heavy or len(light_matches) >= 3:
-        return ModelChoice(
-            intent="reasoning",
-            model=MODEL_TIERS["frontier"],
-            tier="frontier",
-        )
+        return _choice("reasoning", "research")
+    if len(light_matches) >= 2 and len(text) > 50:
+        return _choice("reasoning", "research")
     if light_matches and len(text) > 40:
-        return ModelChoice(
-            intent="tool_use",
-            model=MODEL_TIERS["default"],
-            tier="default",
-        )
+        return _choice("tool_use", "default")
 
-    # 4. Coding tasks (removed "build" — "build me a report" is not code)
+    # 5. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
     if has_code:
         if _CHECK_PATTERNS.search(text) and len(text) < 80:
-            return ModelChoice(
-                intent="tool_use",
-                model=MODEL_TIERS["default"],
-                tier="default",
-            )
-        return ModelChoice(
-            intent="code",
-            model=MODEL_TIERS["code"],
-            tier="code",
-        )
+            return _choice("tool_use", "default")
+        return _choice("code", "code")
 
-    # 5. Messages referencing external data sources always need tools
+    # 6. Messages referencing external data sources always need tools
     if _DATA_SOURCE_KEYWORDS.search(text):
-        return ModelChoice(
-            intent="tool_use",
-            model=MODEL_TIERS["default"],
-            tier="default",
-        )
+        return _choice("tool_use", "default")
 
-    # 6. Short check/verify requests — need tool calls, not fast tier
+    # 7. Short check/verify requests — need tool calls, not fast tier
     if len(text) < 60 and _CHECK_PATTERNS.search(text):
-        return ModelChoice(
-            intent="tool_use",
-            model=MODEL_TIERS["default"],
-            tier="default",
-        )
+        return _choice("tool_use", "default")
 
-    # 7. Simple lookups — truly simple questions only
+    # 8. Simple lookups — truly simple questions with no data dependency
     if len(text) < 40 and _SIMPLE_QUESTION.match(text):
-        if not _CHECK_PATTERNS.search(text):
-            return ModelChoice(
-                intent="lookup",
-                model=MODEL_TIERS["fast"],
-                tier="fast",
-            )
+        if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
+            return _choice("lookup", "fast")
 
-    # 8. Default — tool-calling, general tasks
-    return ModelChoice(
-        intent="tool_use",
-        model=MODEL_TIERS["default"],
-        tier="default",
-    )
+    # 9. Default — tool-calling, general tasks
+    return _choice("tool_use", "default")

@@ -39,9 +39,11 @@ class Settings(BaseSettings):
     openclaw_read_timeout: float = 120.0
 
     # Model tiers for dynamic routing
-    model_tier_fast: str = "google/gemini-2.5-flash-lite"
-    model_tier_default: str = "google/gemini-2.5-flash"
-    model_tier_code: str = "deepseek/deepseek-chat"
+    model_tier_fast: str = "google/gemini-2.5-flash"
+    model_tier_default: str = "moonshotai/kimi-k2.5"
+    model_tier_code: str = "minimax/minimax-m2.5"
+    model_tier_research: str = "google/gemini-3-flash-preview"
+    model_tier_document: str = "moonshotai/kimi-k2.5"
     model_tier_frontier: str = "google/gemini-3.1-pro-preview"
 
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)

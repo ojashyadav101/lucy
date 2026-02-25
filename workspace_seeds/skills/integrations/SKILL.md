@@ -3,7 +3,7 @@ name: integrations
 description: Check, connect, and configure third-party integrations via Composio. Use when managing integrations, connecting new services, or troubleshooting tool access.
 ---
 
-Lucy uses Composio's meta-tools to access 10,000+ third-party integrations. You never call individual API tools directly — instead, you use 5 meta-tools that handle discovery, authentication, and execution.
+Lucy uses Composio's meta-tools to access 10,000+ third-party integrations. You never call individual API tools directly; instead, you use 5 meta-tools that handle discovery, authentication, and execution.
 
 ## Available Meta-Tools
 
@@ -54,7 +54,7 @@ These sub-skills document:
 
 ## Important Notes
 
-- Never guess whether an integration is connected — always verify
-- Some integrations require additional scopes — check connection status after auth
+- Never guess whether an integration is connected; always verify
+- Some integrations require additional scopes; check connection status after auth
 - Per-user OAuth: each team member has their own connections
 - If a tool returns an error, check if the connection has expired before retrying

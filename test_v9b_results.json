@@ -1,0 +1,32 @@
+[
+  {
+    "label": "step1_create",
+    "status": "pass",
+    "elapsed": 28.4,
+    "reply": "Done. Your daily standup reminder is now scheduled for 10am IST.\n\n*Quick note:* The task will run every day including weekends right now. When it triggers, I'll need to know which Slack channel to post to (maybe #general or a standup-specific channel?). Want me to update the description once you confirm, or shall I just have it post to your main team channel?"
+  },
+  {
+    "label": "step2_modify",
+    "status": "pass",
+    "elapsed": 150.5,
+    "reply": "Done. Your morning standup reminder is now set for 9:30 AM IST instead of 10:00 AM. It'll start firing at the new time tomorrow."
+  },
+  {
+    "label": "step3_verify_list",
+    "status": "pass",
+    "elapsed": 17.3,
+    "reply": "Here are your scheduled tasks:  *Heartbeat* \u2022 *Schedule:* Every weekday at 9:00 AM, 12:00 PM, 3:00 PM, and 6:00 PM \u2022 *Next run:* Wednesday, February 25 at 09:00 AM \u2022 *What it does:* Periodic check-in to find opportunities to help and add value  *Morning Standup Reminder* \u2022 *Schedule:* Daily at 9:30 "
+  },
+  {
+    "label": "step4_delete",
+    "status": "pass",
+    "elapsed": 22.8,
+    "reply": "Done. The Morning Standup Reminder task has been removed."
+  },
+  {
+    "label": "step5_verify_deletion",
+    "status": "pass",
+    "elapsed": 23.6,
+    "reply": "Your scheduled tasks are:\n\n\u2022 *Heartbeat*, Runs at 9am, 12pm, 3pm, 6pm on weekdays\n\u2022 *Channel Introductions*, Daily at 10am on weekdays \n\u2022 *Workflow Discovery*, Mondays and Thursdays at 10am\n\nI don't see a standup reminder in the list. It looks like it was successfully removed.\n\nWant me to set up a new reminder, or were you checking to make sure the old one was gone?"
+  }
+]

@@ -80,7 +80,7 @@ async def format_task_status(
         for task in active:
             elapsed = time.monotonic() - task.started_at if task.started_at else 0
             elapsed_str = f"{int(elapsed)}s" if elapsed > 0 else "just started"
-            lines.append(f"• *{task.description[:80]}* — {task.state.value} ({elapsed_str})")
+            lines.append(f"• *{task.description[:80]}*: {task.state.value} ({elapsed_str})")
 
         return "\n".join(lines)
 
