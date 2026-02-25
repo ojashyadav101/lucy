@@ -347,6 +347,43 @@ class LucyAgent:
                                     "or anything meant for one person."
                                 ),
                             },
+                            "type": {
+                                "type": "string",
+                                "enum": ["agent", "script"],
+                                "description": (
+                                    "Type of cron job. 'agent' spins up a full LLM "
+                                    "session with your personality and tools (default). "
+                                    "'script' runs a deterministic python script without "
+                                    "invoking the LLM. If type is 'script', the description "
+                                    "field MUST be the exact path to the python script to run "
+                                    "(e.g. 'scripts/report.py')."
+                                ),
+                            },
+                            "condition_script_path": {
+                                "type": "string",
+                                "description": (
+                                    "Optional path to a python script to run before "
+                                    "the main cron job. If the script exits with code 0, "
+                                    "the cron job proceeds. If non-zero, it skips execution "
+                                    "entirely. Perfect for saving LLM costs on high-frequency "
+                                    "checks."
+                                ),
+                            },
+                            "max_runs": {
+                                "type": "integer",
+                                "description": (
+                                    "Optional integer. If set > 0, the cron job will automatically "
+                                    "delete itself after successfully running this many times."
+                                ),
+                            },
+                            "depends_on": {
+                                "type": "string",
+                                "description": (
+                                    "Optional string. The name or slug of another cron job that "
+                                    "MUST have successfully run today before this one can execute. "
+                                    "E.g., 'data-sync' or 'daily-revenue'."
+                                ),
+                            },
                         },
                         "required": ["name", "cron_expression", "title", "description"],
                     },
@@ -1465,6 +1502,11 @@ class LucyAgent:
                 channel = (ctx.channel_id if ctx else None) or ""
                 user_id = (ctx.user_slack_id if ctx else None) or ""
                 mode = parameters.get("delivery_mode", "channel")
+                cron_type = parameters.get("type", "agent")
+                condition_script_path = parameters.get("condition_script_path", "")
+                max_runs = parameters.get("max_runs", 0)
+                depends_on = parameters.get("depends_on", "")
+                
                 return await scheduler.create_cron(
                     workspace_id=workspace_id,
                     name=parameters.get("name", ""),
@@ -1475,6 +1517,10 @@ class LucyAgent:
                     delivery_channel=channel,
                     requesting_user_id=user_id,
                     delivery_mode=mode,
+                    type=cron_type,
+                    condition_script_path=condition_script_path,
+                    max_runs=max_runs,
+                    depends_on=depends_on,
                 )
 
             if tool_name == "lucy_delete_cron":

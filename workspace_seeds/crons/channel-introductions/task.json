@@ -1,8 +1,10 @@
 {
   "path": "/channel-introductions",
   "cron": "0 10 * * 1-5",
-  "title": "Channel Introductions",
-  "description": "You introduce Lucy to one Slack channel per run. This cron runs 3 times then you should stop (check execution.log for how many you've done).\n\n## Each Run\n1. Read `skills/workflow-discovery/SKILL.md` and check available integrations via COMPOSIO_SEARCH_TOOLS\n2. List public channels, pick one small-to-medium channel based on recent activity and where Lucy can add the most value\n3. Skip channels already in `crons/channel-introductions/execution.log`\n4. Send a short, friendly intro with one concrete example of how Lucy can help that specific channel (based on the channel topic and current discussions)\n5. Log the channel name to execution.log\n\n## After the 3rd Introduction\nStop introducing yourself. Note in LEARNINGS.md that introductions are complete.\n\n## Guidelines\n- Keep it short and specific — no generic \"Hi I'm an AI\" messages\n- Lead with value: show don't tell\n- Read the channel's recent messages to tailor your intro\n- Be warm but professional",
-  "created_at": "2026-02-22T00:00:00Z",
-  "updated_at": "2026-02-22T00:00:00Z"
+  "title": "Introduce Lucy to public channels",
+  "description": "Scan recent public channel activity. Pick one active channel that Lucy has not introduced herself to yet. Send a short, friendly introduction with one concrete, contextual example of how you can help them based on what they are currently discussing. Log the channel name to `execution.log`.",
+  "type": "agent",
+  "timezone": "UTC",
+  "delivery_mode": "channel",
+  "max_runs": 3
 }

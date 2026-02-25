@@ -72,6 +72,10 @@ class CronConfig:
     title: str
     description: str
     workspace_dir: str
+    type: str = "agent"  # "agent" or "script"
+    condition_script_path: str = ""
+    max_runs: int = 0
+    depends_on: str = ""
     created_at: str = ""
     updated_at: str = ""
     timezone: str = ""
@@ -216,6 +220,10 @@ class CronScheduler:
         delivery_channel: str = "",
         requesting_user_id: str = "",
         delivery_mode: str = "channel",
+        type: str = "agent",
+        condition_script_path: str = "",
+        max_runs: int = 0,
+        depends_on: str = "",
     ) -> dict[str, Any]:
         """Create a new cron job: write task.json and register with scheduler.
 
@@ -234,13 +242,13 @@ class CronScheduler:
 
         runs_per_day = _estimate_daily_runs(cron_expr)
         cost_warning = ""
-        if runs_per_day > 24:
+        if runs_per_day > 24 and type == "agent":
             cost_warning = (
                 f"This task will run ~{runs_per_day} times per day. "
                 f"Each run uses LLM tokens. Consider a longer interval "
                 f"if this is an agent-based task."
             )
-        elif runs_per_day > 6:
+        elif runs_per_day > 6 and type == "agent":
             cost_warning = (
                 f"This task will run ~{runs_per_day} times per day. "
                 f"Keep in mind each run uses LLM tokens."
@@ -258,7 +266,14 @@ class CronScheduler:
             "description": description,
             "created_at": now,
             "updated_at": now,
+            "type": type,
         }
+        if condition_script_path:
+            task_data["condition_script_path"] = condition_script_path
+        if max_runs > 0:
+            task_data["max_runs"] = max_runs
+        if depends_on:
+            task_data["depends_on"] = depends_on
         if tz:
             task_data["timezone"] = tz
         if not notify_on_failure:
@@ -275,6 +290,38 @@ class CronScheduler:
         file_path = f"{cron_dir}/task.json"
         content = json.dumps(task_data, indent=2, ensure_ascii=False)
         await ws.write_file(file_path, content)
+
+        # Create default LEARNINGS.md if it doesn't exist
+        learnings_path = f"{cron_dir}/LEARNINGS.md"
+        existing_learnings = await ws.read_file(learnings_path)
+        if not existing_learnings and type == "agent":
+            default_learnings = (
+                f"# {title} - Learnings\n\n"
+                "## Pending Items\n- [ ] Initial run pending\n\n"
+                "## Team Dynamics & Context\n- \n\n"
+                "## Infrastructure Notes\n- \n\n"
+                "## Recent Actions\n- \n"
+            )
+            await ws.write_file(learnings_path, default_learnings)
+
+        # Create discovery.md for workflow-discovery
+        if slug == "workflow-discovery":
+            discovery_path = f"{cron_dir}/discovery.md"
+            existing_discovery = await ws.read_file(discovery_path)
+            if not existing_discovery:
+                default_discovery = (
+                    "# Workflow Discovery Progress\n\n"
+                    "## Team Members Investigated\n"
+                    "| Person | Role | Investigated | Ideas Found | Proposals Made |\n"
+                    "| ------ | ---- | ------------ | ----------- | -------------- |\n"
+                    "|        |      |              |             |                |\n\n"
+                    "## Connected Integrations\n- [ ] \n\n"
+                    "## Ideas Per Person\n\n"
+                    "## Proposals Made\n"
+                    "| Workflow | For | Status | Implementation |\n"
+                    "| -------- | --- | ------ | -------------- |\n"
+                )
+                await ws.write_file(discovery_path, default_discovery)
 
         count = await self.reload_workspace(workspace_id)
         result: dict[str, Any] = {
@@ -587,6 +634,10 @@ class CronScheduler:
                     title=data["title"],
                     description=data["description"],
                     workspace_dir=workspace_id,
+                    type=data.get("type", "agent"),
+                    condition_script_path=data.get("condition_script_path", ""),
+                    max_runs=int(data.get("max_runs", 0)),
+                    depends_on=data.get("depends_on", ""),
                     created_at=data.get("created_at", ""),
                     updated_at=data.get("updated_at", ""),
                     timezone=data.get("timezone", ""),
@@ -607,7 +658,7 @@ class CronScheduler:
         return configs
 
     def _build_cron_instruction(
-        self, cron: CronConfig, learnings: str | None,
+        self, cron: CronConfig, learnings: str | None, global_context: str | None = None,
     ) -> str:
         """Build the instruction that the cron agent receives.
 
@@ -668,6 +719,9 @@ class CronScheduler:
         if learnings:
             parts.append(f"\n## Context from previous runs\n{learnings}")
 
+        if global_context:
+            parts.append(f"\n## Global Context\n{global_context}")
+
         return "\n".join(parts)
 
     def _resolve_delivery_target(self, cron: CronConfig) -> str | None:
@@ -686,21 +740,20 @@ class CronScheduler:
         return None
 
     async def _run_cron(self, workspace_id: str, cron: CronConfig) -> None:
-        """Execute a cron job through the full Lucy agent pipeline.
-
-        The cron wakes Lucy up with the task instruction. Lucy runs with
-        her full personality (SOUL), tools, and memory. The result is
-        delivered to Slack (channel or DM) based on the cron's config.
+        """Execute a cron job through the full Lucy agent pipeline or as a script.
 
         Flow:
+        0. Check condition script (if configured)
         1. Read LEARNINGS.md for accumulated context
         2. Build instruction with personality framing
-        3. Run the full agent with SOUL, tools, and connected services
+        3. Run the full agent (or deterministic script)
         4. Deliver the result to the right Slack destination
         5. Log the execution for future learning
         6. Retry on failure with exponential backoff
+        7. Enforce max_runs (self-deletion)
         """
         import time as _time
+        import os
 
         t0 = _time.monotonic()
         logger.info(
@@ -708,75 +761,142 @@ class CronScheduler:
             workspace_id=workspace_id,
             cron_path=cron.path,
             title=cron.title,
+            type=cron.type,
         )
 
         ws = get_workspace(workspace_id)
         cron_dir_name = cron.path.strip("/")
 
-        learnings = await ws.read_file(
-            f"crons/{cron_dir_name}/LEARNINGS.md"
-        )
+        # --- Phase 3.1: Dependency Check ---
+        if cron.depends_on:
+            dep_slug = cron.depends_on.lower().replace(" ", "-")
+            dep_slug = "".join(c for c in dep_slug if c.isalnum() or c == "-")
+            try:
+                dep_log = await ws.read_file(f"crons/{dep_slug}/execution.log")
+                if not dep_log:
+                    logger.info("cron_dependency_not_met_no_log", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
+                    return
+                    
+                from datetime import datetime, timezone
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                
+                ran_today = False
+                for line in reversed(dep_log.splitlines()):
+                    if line.startswith("## ") and today in line:
+                        if "FAILED" not in line:
+                            ran_today = True
+                        break
+                
+                if not ran_today:
+                    logger.info("cron_dependency_not_met", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
+                    return
+            except Exception as e:
+                logger.warning("cron_dependency_check_failed", error=str(e))
 
-        instruction = self._build_cron_instruction(cron, learnings)
+        # --- Phase 1.1: Condition Script Check ---
+        if cron.condition_script_path:
+            script_path = ws.root / cron.condition_script_path.lstrip("/")
+            if script_path.exists():
+                process = await asyncio.create_subprocess_exec(
+                    "python3", str(script_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env={**os.environ, "WORKSPACE_ID": workspace_id}
+                )
+                await process.communicate()
+                if process.returncode != 0:
+                    logger.info("cron_condition_unmet", workspace_id=workspace_id, cron_path=cron.path)
+                    return
+            else:
+                logger.warning("cron_condition_script_not_found", workspace_id=workspace_id, path=str(script_path))
+
+        learnings = await ws.read_file(f"crons/{cron_dir_name}/LEARNINGS.md")
+        
+        company_ctx = await ws.read_file("company/SKILL.md") or ""
+        team_ctx = await ws.read_file("team/SKILL.md") or ""
+        
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        
+        global_context_parts = [f"Current Time: {now_utc}"]
+        if company_ctx.strip():
+            global_context_parts.append(f"\n[Company Context]\n{company_ctx.strip()}")
+        if team_ctx.strip():
+            global_context_parts.append(f"\n[Team Directory]\n{team_ctx.strip()}")
+            
+        try:
+            from lucy.integrations.composio_client import get_composio_client
+            cclient = get_composio_client()
+            connected_apps = await cclient.get_connected_app_names_reliable(workspace_id)
+            if connected_apps:
+                global_context_parts.append(f"\n[Connected Integrations]\n{', '.join(connected_apps)}")
+        except Exception as e:
+            logger.debug("failed_to_inject_integrations", error=str(e))
+            
+        global_context = "\n".join(global_context_parts)
+        
+        instruction = self._build_cron_instruction(cron, learnings, global_context)
 
         last_error: Exception | None = None
-        max_attempts = 1 + cron.max_retries
-
+        max_attempts = 1 if cron.type == "script" else (1 + cron.max_retries)
         delivery_target = self._resolve_delivery_target(cron)
 
         for attempt in range(1, max_attempts + 1):
             try:
-                from lucy.core.agent import AgentContext, get_agent
-
-                agent = get_agent()
-                ctx = AgentContext(
-                    workspace_id=workspace_id,
-                    channel_id=delivery_target,
-                    user_slack_id=cron.requesting_user_id or None,
-                )
-
-                response = await agent.run(
-                    message=instruction,
-                    ctx=ctx,
-                    slack_client=self.slack_client,
-                )
+                # --- Phase 1.2: Script vs Agent Execution ---
+                if cron.type == "script":
+                    script_file = cron.description.replace("Script:", "").strip()
+                    if script_file.startswith("/work/"):
+                        script_file = script_file.replace("/work/", "")
+                    elif script_file.startswith("/workspace/"):
+                        script_file = script_file.replace("/workspace/", "")
+                    
+                    target_script = ws.root / script_file.lstrip("/")
+                    if not target_script.exists():
+                        raise RuntimeError(f"Script file not found: {target_script}")
+                    
+                    process = await asyncio.create_subprocess_exec(
+                        "python3", str(target_script),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env={**os.environ, "WORKSPACE_ID": workspace_id}
+                    )
+                    stdout, stderr = await process.communicate()
+                    if process.returncode != 0:
+                        raise RuntimeError(f"Script failed (exit {process.returncode}): {stderr.decode()}")
+                    
+                    response = stdout.decode().strip()
+                else:
+                    from lucy.core.agent import AgentContext, get_agent
+                    agent = get_agent()
+                    ctx = AgentContext(
+                        workspace_id=workspace_id,
+                        channel_id=delivery_target,
+                        user_slack_id=cron.requesting_user_id or None,
+                    )
+                    response = await agent.run(
+                        message=instruction,
+                        ctx=ctx,
+                        slack_client=self.slack_client,
+                    )
 
                 elapsed_ms = round((_time.monotonic() - t0) * 1000)
+                skip = (response.strip().upper() == "SKIP" if response else True)
 
-                skip = (
-                    response.strip().upper() == "SKIP"
-                    if response else True
-                )
-
-                if (
-                    not skip
-                    and response
-                    and response.strip()
-                    and delivery_target
-                    and self.slack_client
-                ):
-                    await self._deliver_to_slack(
-                        delivery_target, response,
-                    )
+                if not skip and response and response.strip() and delivery_target and self.slack_client:
+                    await self._deliver_to_slack(delivery_target, response)
 
                 now = datetime.now(timezone.utc).isoformat()
                 status = "skipped" if skip else "delivered"
-                log_entry = (
-                    f"\n## {now} (elapsed: {elapsed_ms}ms, "
-                    f"status: {status})"
-                )
+                log_entry = f"\n## {now} (elapsed: {elapsed_ms}ms, status: {status})"
                 if attempt > 1:
                     log_entry += f" [succeeded on attempt {attempt}]"
                 log_entry += f"\n{response[:500]}\n"
-                await ws.append_file(
-                    f"crons/{cron_dir_name}/execution.log", log_entry
-                )
+                
+                await ws.append_file(f"crons/{cron_dir_name}/execution.log", log_entry)
 
                 from lucy.workspace.activity_log import log_activity
-                await log_activity(
-                    ws,
-                    f"Cron '{cron.title}' {status} in {elapsed_ms}ms",
-                )
+                await log_activity(ws, f"Cron '{cron.title}' {status} in {elapsed_ms}ms")
 
                 logger.info(
                     "cron_execution_complete",
@@ -788,6 +908,15 @@ class CronScheduler:
                     delivered_to=delivery_target or "log_only",
                     status=status,
                 )
+
+                # --- Phase 1.3: Max Runs / Self-deleting ---
+                if cron.max_runs > 0:
+                    log_content = await ws.read_file(f"crons/{cron_dir_name}/execution.log")
+                    run_count = sum(1 for line in log_content.splitlines() if line.startswith("## "))
+                    if run_count >= cron.max_runs:
+                        logger.info("cron_max_runs_reached", workspace_id=workspace_id, cron_path=cron.path)
+                        await self.delete_cron(workspace_id, cron.path)
+
                 return
 
             except Exception as e:
@@ -823,14 +952,11 @@ class CronScheduler:
         now = datetime.now(timezone.utc).isoformat()
         await ws.append_file(
             f"crons/{cron_dir_name}/execution.log",
-            f"\n## {now} -- FAILED after {max_attempts} attempts"
-            f" ({elapsed_ms}ms)\n{error_str[:300]}\n",
+            f"\n## {now} -- FAILED after {max_attempts} attempts ({elapsed_ms}ms)\n{error_str[:300]}\n",
         )
 
         if cron.notify_on_failure and self.slack_client:
-            await self._notify_cron_failure(
-                workspace_id, cron, error_str, max_attempts, elapsed_ms,
-            )
+            await self._notify_cron_failure(workspace_id, cron, error_str, max_attempts, elapsed_ms)
 
     async def _notify_cron_failure(
         self,
@@ -870,11 +996,26 @@ class CronScheduler:
     ) -> None:
         """Post the cron result to a Slack channel or DM.
 
-        Runs the full output pipeline (sanitizer, Markdown-to-Slack
-        converter, tone validator, de-AI filter) before posting, so
-        cron output gets the same treatment as normal messages.
+        Supports raw text (passed through the output pipeline) OR
+        raw JSON string containing {"blocks": [...] } for rich Block Kit output.
         """
         try:
+            # Check if output is a Block Kit JSON payload
+            text_trimmed = text.strip()
+            if text_trimmed.startswith("{") and text_trimmed.endswith("}") and '"blocks"' in text_trimmed:
+                try:
+                    payload = json.loads(text_trimmed)
+                    if "blocks" in payload:
+                        await self.slack_client.chat_postMessage(
+                            channel=channel,
+                            blocks=payload["blocks"],
+                            text=payload.get("text", "Automated report"),
+                        )
+                        logger.info("cron_result_delivered_blocks", channel=channel, blocks=len(payload["blocks"]))
+                        return
+                except json.JSONDecodeError:
+                    pass  # Fallback to plain text processing if invalid JSON
+
             from lucy.core.output import process_output
             from lucy.slack.rich_output import format_links
 

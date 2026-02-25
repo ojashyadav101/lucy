@@ -1,8 +1,9 @@
 {
   "path": "/workflow-discovery",
-  "cron": "0 10 * * 1,4",
-  "title": "Workflow Discovery",
-  "description": "You discover ways Lucy can help the team and propose new workflows.\n\nRead and follow the `skills/workflow-discovery/SKILL.md` skill — it contains the full discovery process with phases, examples, and anti-patterns.\n\n## Your Approach\n1. Read recent Slack messages across channels to understand what people are working on\n2. Check `crons/workflow-discovery/discovery.md` to see what you've already proposed\n3. For 2-3 key people, reach out directly via DM with a personalized workflow suggestion based on what you observed\n4. Ask about their pain points — what takes too long, what's repetitive, what falls through the cracks\n5. Propose specific, concrete automations or assistance (not vague offers)\n\n## Key Rules\n- Read the workflow-discovery skill FIRST — it has detailed instructions\n- Be specific: \"I noticed you check X every morning — want me to do that and DM you a summary?\" beats \"How can I help?\"\n- Track all proposals and their outcomes in `crons/workflow-discovery/discovery.md`\n- Don't re-propose something that was already rejected\n- Focus on high-impact, low-friction wins first",
-  "created_at": "2026-02-22T00:00:00Z",
-  "updated_at": "2026-02-22T00:00:00Z"
+  "cron": "0 10 * * 2,4",
+  "title": "Workflow Discovery & Proactive Setup",
+  "description": "Read and strictly follow `skills/workflow-discovery/SKILL.md`. Investigate one team member's slack history, analyze their pain points, and brainstorm 3 possible integrations or automations. Reach out to them via DM with a personalized proposal. Log your progress in `crons/workflow-discovery/discovery.md` so you know who you have already investigated.",
+  "type": "agent",
+  "timezone": "UTC",
+  "delivery_mode": "dm"
 }

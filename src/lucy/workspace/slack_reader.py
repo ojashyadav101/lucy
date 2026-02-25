@@ -90,6 +90,91 @@ async def get_new_messages(
     return messages
 
 
+async def get_local_messages(
+    ws: object,  # WorkspaceFS
+    since_iso: str,
+    channel_names: list[str] | None = None,
+) -> str:
+    """Read synchronized Slack messages from local filesystem.
+
+    Reads files in slack_logs/{channel_name}/{YYYY-MM-DD}.md
+    Filters out messages before since_iso timestamp.
+    
+    Args:
+        ws: The WorkspaceFS instance.
+        since_iso: ISO 8601 timestamp string (e.g. "2026-02-24T10:00:00").
+        channel_names: Optional list of specific channels to read.
+                       If None, reads all available channels.
+
+    Returns:
+        A combined Markdown string of new messages grouped by channel.
+    """
+    from datetime import datetime, timezone
+    
+    try:
+        since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+    except ValueError:
+        return "(Invalid since_iso timestamp)"
+        
+    since_date = since_dt.strftime("%Y-%m-%d")
+    
+    # List channels in slack_logs/
+    channels_to_read = channel_names
+    if not channels_to_read:
+        logs_dir = ws.root / "slack_logs"
+        if logs_dir.is_dir():
+            channels_to_read = [d.name for d in logs_dir.iterdir() if d.is_dir()]
+        else:
+            channels_to_read = []
+            
+    if not channels_to_read:
+        return "(No local Slack logs found)"
+        
+    output_parts: list[str] = []
+    
+    for channel in channels_to_read:
+        chan_dir = ws.root / "slack_logs" / channel
+        if not chan_dir.is_dir():
+            continue
+            
+        # Get all daily logs that are >= since_date
+        daily_logs = [
+            f.name for f in chan_dir.iterdir() 
+            if f.is_file() and f.name.endswith(".md") and f.name[:-3] >= since_date
+        ]
+        daily_logs.sort()
+        
+        channel_msgs = []
+        for log_file in daily_logs:
+            date_str = log_file[:-3]
+            try:
+                content = (chan_dir / log_file).read_text("utf-8")
+                lines = content.splitlines()
+                for line in lines:
+                    # Line format: [HH:MM:SS] <user> text
+                    if line.startswith("[") and "]" in line:
+                        time_str = line[1:line.find("]")]
+                        msg_dt_str = f"{date_str}T{time_str}Z"
+                        try:
+                            msg_dt = datetime.fromisoformat(msg_dt_str.replace("Z", "+00:00"))
+                            if msg_dt > since_dt:
+                                channel_msgs.append(line)
+                        except ValueError:
+                            # Parse error, include just in case if date is > since_date
+                            if date_str > since_date:
+                                channel_msgs.append(line)
+            except Exception as e:
+                logger.debug("failed_reading_log", path=str(chan_dir / log_file), error=str(e))
+                
+        if channel_msgs:
+            output_parts.append(f"### #{channel}\n" + "\n".join(channel_msgs) + "\n")
+            
+    if not output_parts:
+        return "(No new messages since last check)"
+        
+    return "\n".join(output_parts)
+
+
 async def get_lucy_channels(slack_client: object) -> list[dict[str, str]]:
     """List all channels Lucy is a member of.
 
