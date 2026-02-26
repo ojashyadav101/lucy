@@ -119,17 +119,31 @@ async def generate_pdf(
 # Excel Generation
 # ═══════════════════════════════════════════════════════════════════════════
 
+_SHEET_ACCENT_PALETTE = [
+    ("1F4E79", "D6E4F0"),  # deep blue  / light blue
+    ("548235", "E2EFDA"),  # forest green / light green
+    ("BF8F00", "FFF2CC"),  # amber       / light yellow
+    ("C00000", "FCE4EC"),  # red         / light pink
+    ("7030A0", "E8DAEF"),  # purple      / light purple
+    ("00B0F0", "DAEEF3"),  # cyan        / light cyan
+    ("ED7D31", "FBE5D6"),  # orange      / light orange
+    ("595959", "F2F2F2"),  # gray        / light gray
+]
+
+_CURRENCY_KEYWORDS = {"mrr", "revenue", "price", "cost", "amount", "total", "fee", "spend"}
+_PERCENT_KEYWORDS = {"rate", "percent", "pct", "%", "ratio", "churn", "conversion"}
+
+
 async def generate_excel(
     title: str,
     sheets: dict[str, list[list[Any]]],
     filename: str | None = None,
 ) -> Path:
-    """Generate an Excel file from tabular data.
+    """Generate a beautifully formatted Excel workbook.
 
     Args:
         title: Workbook title (used in filename).
-        sheets: Dict of sheet_name → list of rows (first row = headers).
-            Example: {"Revenue": [["Month", "MRR"], ["Jan", 18000], ...]}
+        sheets: Dict of sheet_name -> list of rows (first row = headers).
         filename: Output filename. Auto-generated if None.
 
     Returns:
@@ -137,47 +151,104 @@ async def generate_excel(
     """
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.styles import (
+            Alignment, Border, Font, NamedStyle, PatternFill, Side, numbers,
+        )
+        from openpyxl.utils import get_column_letter
     except ImportError:
         raise RuntimeError(
-            "openpyxl not installed. Add to pyproject.toml: "
-            "openpyxl >= 3.1.0"
+            "openpyxl not installed. Add to pyproject.toml: openpyxl >= 3.1.0"
         )
 
     wb = Workbook()
-
-    header_font = Font(bold=True, size=11)
-    header_fill = PatternFill(
-        start_color="F0F2F5", end_color="F0F2F5", fill_type="solid",
-    )
-    thin_border = Border(
-        bottom=Side(style="thin", color="DDDDDD"),
+    base_font = Font(name="Calibri", size=10)
+    thin_side = Side(style="thin", color="D9D9D9")
+    cell_border = Border(
+        bottom=thin_side, top=thin_side, left=thin_side, right=thin_side,
     )
 
-    for i, (sheet_name, rows) in enumerate(sheets.items()):
-        if i == 0:
+    for sheet_idx, (sheet_name, rows) in enumerate(sheets.items()):
+        if sheet_idx == 0:
             ws = wb.active
-            ws.title = sheet_name
+            ws.title = sheet_name[:31]
         else:
-            ws = wb.create_sheet(title=sheet_name)
+            ws = wb.create_sheet(title=sheet_name[:31])
+
+        accent_dark, accent_light = _SHEET_ACCENT_PALETTE[
+            sheet_idx % len(_SHEET_ACCENT_PALETTE)
+        ]
+
+        header_font = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        header_fill = PatternFill(
+            start_color=accent_dark, end_color=accent_dark, fill_type="solid",
+        )
+        alt_fill = PatternFill(
+            start_color=accent_light, end_color=accent_light, fill_type="solid",
+        )
+
+        ws.sheet_properties.tabColor = accent_dark
+
+        headers = rows[0] if rows else []
+        col_formats: dict[int, str] = {}
+        for ci, h in enumerate(headers):
+            h_lower = str(h).lower()
+            if any(k in h_lower for k in _CURRENCY_KEYWORDS):
+                col_formats[ci] = "currency"
+            elif any(k in h_lower for k in _PERCENT_KEYWORDS):
+                col_formats[ci] = "percent"
 
         for row_idx, row in enumerate(rows):
             for col_idx, value in enumerate(row):
                 cell = ws.cell(
                     row=row_idx + 1, column=col_idx + 1, value=value,
                 )
+                cell.border = cell_border
+                cell.font = base_font
+
                 if row_idx == 0:
                     cell.font = header_font
                     cell.fill = header_fill
-                cell.border = thin_border
+                    cell.alignment = Alignment(
+                        horizontal="center", vertical="center", wrap_text=True,
+                    )
+                else:
+                    if row_idx % 2 == 0:
+                        cell.fill = alt_fill
 
-        for col_idx in range(len(rows[0]) if rows else 0):
-            max_length = 0
-            col_letter = ws.cell(row=1, column=col_idx + 1).column_letter
-            for row in rows:
-                if col_idx < len(row):
-                    max_length = max(max_length, len(str(row[col_idx])))
-            ws.column_dimensions[col_letter].width = min(max_length + 4, 50)
+                    fmt = col_formats.get(col_idx)
+                    is_numeric = isinstance(value, (int, float))
+                    if fmt == "currency" and is_numeric:
+                        cell.number_format = '$#,##0.00'
+                        cell.alignment = Alignment(horizontal="right")
+                    elif fmt == "percent" and is_numeric:
+                        if value > 1:
+                            cell.number_format = '0.0"%"'
+                        else:
+                            cell.number_format = '0.0%'
+                        cell.alignment = Alignment(horizontal="right")
+                    elif is_numeric:
+                        cell.number_format = '#,##0.##'
+                        cell.alignment = Alignment(horizontal="right")
+                    else:
+                        cell.alignment = Alignment(
+                            horizontal="left", vertical="center", wrap_text=True,
+                        )
+
+        if rows:
+            for col_idx in range(len(headers)):
+                col_letter = get_column_letter(col_idx + 1)
+                max_len = 0
+                for row in rows:
+                    if col_idx < len(row):
+                        max_len = max(max_len, len(str(row[col_idx])))
+                ws.column_dimensions[col_letter].width = min(
+                    max(max_len + 4, 10), 55,
+                )
+
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = (
+                f"A1:{get_column_letter(len(headers))}{len(rows)}"
+            )
 
     if not filename:
         safe_title = "".join(
@@ -281,24 +352,53 @@ async def upload_file_to_slack(
         )
         return result
     except Exception as e:
-        logger.error(
-            "slack_file_upload_failed",
+        logger.warning(
+            "slack_file_upload_v2_failed",
             filename=file_path.name,
             error=str(e),
         )
-        try:
-            result = await slack_client.files_upload(
-                channels=channel_id,
-                file=str(file_path),
-                filename=file_path.name,
-                title=title or file_path.name,
-                initial_comment=comment or "",
-                thread_ts=thread_ts,
-            )
-            return result
-        except Exception as e2:
-            logger.error("slack_file_upload_v1_failed", error=str(e2))
-            raise
+
+    try:
+        result = await slack_client.files_upload(
+            channels=channel_id,
+            file=str(file_path),
+            filename=file_path.name,
+            title=title or file_path.name,
+            initial_comment=comment or "",
+            thread_ts=thread_ts,
+        )
+        logger.info(
+            "file_uploaded_to_slack_v1",
+            filename=file_path.name,
+            channel=channel_id,
+        )
+        return result
+    except Exception as e2:
+        logger.warning("slack_file_upload_v1_failed", error=str(e2))
+
+    try:
+        content = file_path.read_bytes()
+        result = await slack_client.files_upload_v2(
+            channel=channel_id,
+            content=content,
+            filename=file_path.name,
+            title=title or file_path.name,
+            initial_comment=comment or "",
+            thread_ts=thread_ts,
+        )
+        logger.info(
+            "file_uploaded_to_slack_content",
+            filename=file_path.name,
+            channel=channel_id,
+        )
+        return result
+    except Exception as e3:
+        logger.error(
+            "slack_file_upload_all_failed",
+            filename=file_path.name,
+            error=str(e3),
+        )
+        raise
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -437,9 +537,14 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": "lucy_generate_excel",
                 "description": (
-                    "Generate an Excel spreadsheet. ONLY use when the user "
-                    "explicitly asks for a spreadsheet, Excel file, or .xlsx "
-                    "download. Do NOT use for general data display."
+                    "Generate a multi-sheet Excel workbook (.xlsx). Use when "
+                    "the user asks for a spreadsheet, Excel file, or data "
+                    "export. Supports MULTIPLE SHEETS — use separate sheets "
+                    "for different views (e.g. 'Master List', 'Active "
+                    "Subscribers', 'Data Sources', 'Summary'). Include a "
+                    "summary/stats sheet for comprehensive reports. First row "
+                    "of each sheet is the header row with human-readable "
+                    "column names. Auto-uploaded to Slack."
                 ),
                 "parameters": {
                     "type": "object",
@@ -504,6 +609,48 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _resolve_mangled_path(raw_path: str, ws_root: str) -> Path | None:
+    """Recover a valid workspace path when the LLM mangles it.
+
+    Common LLM mistakes:
+      - /home/user/src/App.tsx
+      - ...worktrees/lucy/rdj/[workspace]/src/App.tsx
+      - ...worktrees/lucy/rdj/workspace/src/App.tsx
+    """
+    import re
+
+    # Extract the relative filename from the path (e.g. "src/App.tsx")
+    rel_match = re.search(r"(src/.+\.tsx?)$", raw_path)
+    if not rel_match:
+        return None
+    relative = rel_match.group(1)
+
+    # workspace_root is already the top-level workspaces dir
+    spaces_root = Path(ws_root)
+    if not spaces_root.exists():
+        return None
+
+    newest: Path | None = None
+    newest_mtime = 0.0
+    for ws_dir in spaces_root.iterdir():
+        sp = ws_dir / "spaces"
+        if not sp.is_dir():
+            continue
+        for proj in sp.iterdir():
+            if not proj.is_dir():
+                continue
+            config = proj / "project.json"
+            if config.exists():
+                mtime = config.stat().st_mtime
+                if mtime > newest_mtime:
+                    newest_mtime = mtime
+                    newest = proj
+
+    if newest is None:
+        return None
+    return newest / relative
+
+
 async def execute_file_tool(
     tool_name: str,
     parameters: dict[str, Any],
@@ -523,13 +670,50 @@ async def execute_file_tool(
             content = parameters.get("content")
             if not path_str or content is None:
                 return {"error": "Missing required parameters: path, content"}
-            
+
             p = Path(path_str)
+
+            from lucy.config import settings
+            ws_root = str(settings.workspace_root)
+            resolved = str(p.resolve())
+
+            if not resolved.startswith(ws_root):
+                p = _resolve_mangled_path(path_str, ws_root)
+                if p is None:
+                    logger.warning(
+                        "file_write_rejected",
+                        original_path=path_str,
+                        reason="outside workspace, could not auto-correct",
+                    )
+                    return {
+                        "error": (
+                            f"Cannot write to {path_str} — path is invalid. "
+                            f"Use the exact app_tsx_path returned by "
+                            f"lucy_spaces_init."
+                        ),
+                    }
+                logger.info(
+                    "file_write_path_corrected",
+                    original=path_str,
+                    corrected=str(p),
+                )
+
+            logger.info(
+                "file_write_attempt",
+                path=str(p),
+                content_length=len(content) if content else 0,
+            )
+
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+            logger.info(
+                "file_write_success",
+                path=str(p),
+                chars=len(content),
+            )
             return {
-                "result": f"Successfully wrote {len(content)} characters to {path_str}",
-                "file_path": str(path_str),
+                "result": f"Successfully wrote {len(content)} characters to {p}",
+                "file_path": str(p),
             }
 
         elif tool_name == "lucy_edit_file":
@@ -606,15 +790,22 @@ async def execute_file_tool(
 
         upload_result = None
         if slack_client and channel_id:
-            upload_result = await upload_file_to_slack(
-                slack_client=slack_client,
-                file_path=path,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                title=parameters.get("title", path.name),
-            )
+            try:
+                upload_result = await upload_file_to_slack(
+                    slack_client=slack_client,
+                    file_path=path,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    title=parameters.get("title", path.name),
+                )
+            except Exception as upload_err:
+                logger.warning(
+                    "file_tool_upload_failed",
+                    tool=tool_name,
+                    error=str(upload_err),
+                )
 
-        result = {
+        result: dict[str, Any] = {
             "result": f"Generated {path.name} ({path.stat().st_size} bytes)",
             "file_path": str(path),
             "filename": path.name,
@@ -622,6 +813,12 @@ async def execute_file_tool(
         if upload_result:
             result["uploaded"] = True
             result["result"] += " — uploaded to Slack."
+        elif slack_client and channel_id:
+            result["uploaded"] = False
+            result["result"] += (
+                " — file upload to Slack failed (missing files:write scope). "
+                "Tell the user the file was generated successfully."
+            )
 
         return result
 

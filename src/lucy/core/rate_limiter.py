@@ -278,6 +278,10 @@ class RateLimiter:
             if "clickup" in candidate:
                 return "clickup"
 
+            if "lucy_custom_" in candidate:
+                slug = candidate.replace("lucy_custom_", "").split("_", 1)[0]
+                return f"custom_{slug}"
+
         return None
 
     @property

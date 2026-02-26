@@ -1,0 +1,495 @@
+"""Lucy Spaces platform orchestrator.
+
+Coordinates Convex, Vercel, and the template to manage the full
+lifecycle of a space project: init, deploy, list, status, delete.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import secrets
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+from lucy.config import settings
+from lucy.spaces.convex_api import get_convex_api
+from lucy.spaces.project_config import SpaceProject
+from lucy.spaces.vercel_api import get_vercel_api
+
+logger = structlog.get_logger()
+
+_TEMPLATE_DIR = Path(__file__).parent.parent.parent.parent / "templates" / "lucy-spaces"
+
+
+def _slugify(name: str) -> str:
+    """Convert a project name to a URL-safe slug."""
+    slug = re.sub(r"[^a-z0-9-]", "-", name.lower().strip())
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug[:40]
+
+
+def _spaces_dir(workspace_id: str) -> Path:
+    return settings.workspace_root / workspace_id / "spaces"
+
+
+def _project_dir(workspace_id: str, slug: str) -> Path:
+    return _spaces_dir(workspace_id) / slug
+
+
+def _project_config_path(workspace_id: str, slug: str) -> Path:
+    return _project_dir(workspace_id, slug) / "project.json"
+
+
+async def init_app_project(
+    project_name: str,
+    description: str,
+    workspace_id: str,
+) -> dict[str, Any]:
+    """Scaffold a new Lucy Spaces project.
+
+    1. Validate + slugify name
+    2. Copy template to workspace
+    3. Create Convex project + deployment
+    4. Create Vercel project + domain + protection bypass
+    5. Generate secrets + write .env.local
+    6. Save project.json
+    """
+    slug = _slugify(project_name)
+    if not slug:
+        return {"success": False, "error": "Invalid project name"}
+
+    project_dir = _project_dir(workspace_id, slug)
+    if project_dir.exists():
+        return {"success": False, "error": f"Project '{slug}' already exists"}
+
+    if not _TEMPLATE_DIR.exists():
+        return {"success": False, "error": "Lucy Spaces template not found"}
+
+    short_hash = secrets.token_hex(3)
+    subdomain = f"{slug}-{short_hash}.{settings.spaces_domain}"
+    project_secret = secrets.token_hex(32)
+    vercel_project_name = f"lucy-{slug}-{short_hash}"
+
+    try:
+        shutil.copytree(
+            _TEMPLATE_DIR, project_dir,
+            ignore=shutil.ignore_patterns(
+                "node_modules", ".git", "dist", "tmp", "bun.lock",
+                "package-lock.json", "_generated",
+            ),
+        )
+        logger.info("spaces_template_copied", slug=slug)
+
+        convex = get_convex_api()
+        convex_result = await convex.create_project(project_name)
+        convex_project_id = convex_result["projectId"]
+
+        deployments = await convex.list_deployments(convex_project_id)
+        if deployments:
+            dev_dep = deployments[0]
+        else:
+            dev_dep = await convex.create_deployment(convex_project_id, "dev")
+
+        deployment_name = dev_dep["name"]
+        deployment_url = dev_dep.get("deploymentUrl", "")
+
+        deploy_key_result = await convex.create_deploy_key(deployment_name)
+        deploy_key = deploy_key_result.get("deployKey", "")
+
+        vercel = get_vercel_api()
+        vercel_result = await vercel.create_project(vercel_project_name)
+        vercel_project_id = vercel_result["id"]
+
+        bypass_secret = await vercel.generate_protection_bypass(vercel_project_id)
+
+        await vercel.add_domain(vercel_project_id, subdomain)
+
+        env_local = project_dir / ".env.local"
+        env_local.write_text(
+            f"VITE_CONVEX_URL={deployment_url}\n"
+            f"LUCY_SPACES_API_URL=\n"
+            f"LUCY_SPACES_PROJECT_NAME={slug}\n"
+            f"LUCY_SPACES_PROJECT_SECRET={project_secret}\n"
+            f"CONVEX_DEPLOY_KEY={deploy_key}\n",
+            encoding="utf-8",
+        )
+
+        config = SpaceProject(
+            name=project_name,
+            description=description,
+            workspace_id=workspace_id,
+            convex_project_id=convex_project_id,
+            convex_deployment_name=deployment_name,
+            convex_deployment_url=deployment_url,
+            convex_deploy_key=deploy_key,
+            vercel_project_id=vercel_project_id,
+            subdomain=subdomain,
+            project_secret=project_secret,
+            vercel_project_name=vercel_project_name,
+            vercel_bypass_secret=bypass_secret,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        config.save(_project_config_path(workspace_id, slug))
+
+        return {
+            "success": True,
+            "project_name": project_name,
+            "slug": slug,
+            "sandbox_path": str(project_dir),
+            "convex_url": deployment_url,
+            "subdomain": subdomain,
+            "preview_url": f"https://{subdomain}",
+        }
+
+    except Exception as e:
+        logger.error("spaces_init_failed", slug=slug, error=str(e))
+        if project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+        return {"success": False, "error": str(e)}
+
+
+async def deploy_app(
+    project_name: str,
+    workspace_id: str,
+    environment: str = "preview",
+) -> dict[str, Any]:
+    """Build, deploy, wait for readiness, and validate a Lucy Spaces project."""
+    slug = _slugify(project_name)
+    config_path = _project_config_path(workspace_id, slug)
+
+    if not config_path.exists():
+        return {"success": False, "error": f"Project \'{slug}\' not found"}
+
+    config = SpaceProject.load(config_path)
+    project_dir = _project_dir(workspace_id, slug)
+
+    try:
+        build_result = await _build_project(project_dir)
+        if not build_result["success"]:
+            return build_result
+
+        dist_dir = project_dir / "dist"
+        if not dist_dir.exists():
+            return {"success": False, "error": "Build completed but dist/ not found"}
+
+        vercel = get_vercel_api()
+        target = "production" if environment == "production" else "preview"
+        deploy_name = config.vercel_project_name or f"lucy-{slug}"
+        result = await vercel.deploy_directory(
+            project_id=config.vercel_project_id,
+            dist_dir=str(dist_dir),
+            project_name=deploy_name,
+            target=target,
+        )
+
+        deployment_id = result.get("id", "")
+        deploy_url = result.get("url", "")
+
+        ready_state = await _wait_for_deployment(vercel, deployment_id)
+        if ready_state != "READY":
+            error_msg = f"Deployment failed with state: {ready_state}"
+            logger.error("deployment_not_ready", state=ready_state, id=deployment_id)
+            return {"success": False, "error": error_msg}
+
+        config.last_deployed_at = datetime.now(timezone.utc).isoformat()
+        config.vercel_deployment_url = deploy_url
+        config.save(config_path)
+
+        public_url = config.public_url()
+
+        validation = await _validate_deployment(public_url)
+        if not validation["ok"]:
+            logger.warning(
+                "deployment_validation_failed",
+                url=public_url,
+                reason=validation.get("reason"),
+            )
+            return {
+                "success": True,
+                "url": public_url,
+                "deployment_id": deployment_id,
+                "environment": environment,
+                "validation_warning": validation.get("reason", ""),
+            }
+
+        return {
+            "success": True,
+            "url": public_url,
+            "deployment_id": deployment_id,
+            "environment": environment,
+            "validated": True,
+        }
+
+    except Exception as e:
+        logger.error("spaces_deploy_failed", slug=slug, error=str(e))
+        return {"success": False, "error": str(e)}
+
+
+async def _wait_for_deployment(
+    vercel: Any, deployment_id: str, max_wait: int = 60,
+) -> str:
+    """Poll Vercel until deployment reaches a terminal state."""
+    import asyncio
+
+    for _ in range(max_wait // 3):
+        try:
+            dep = await vercel.get_deployment(deployment_id)
+            state = dep.get("readyState", "UNKNOWN")
+            if state in ("READY", "ERROR", "CANCELED"):
+                return state
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+    return "TIMEOUT"
+
+
+async def _validate_deployment(url: str) -> dict[str, Any]:
+    """Fetch the deployed URL and verify the app renders content.
+
+    Checks: HTTP status, response size, HTML structure, JS error indicators,
+    and content rendering signals.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return {"ok": False, "reason": f"HTTP {resp.status_code}"}
+
+            body = resp.text
+            if len(body) < 100:
+                return {"ok": False, "reason": "Response too small — likely blank page"}
+
+            if "<script" not in body and "<div" not in body:
+                return {"ok": False, "reason": "No HTML content detected"}
+
+            warnings: list[str] = []
+
+            js_error_signals = [
+                "Uncaught ReferenceError",
+                "Uncaught TypeError",
+                "Uncaught SyntaxError",
+                "ChunkLoadError",
+                "Failed to fetch dynamically imported module",
+                "Module not found",
+            ]
+            for signal in js_error_signals:
+                if signal in body:
+                    warnings.append(f"JS error detected: {signal}")
+
+            if "<!DOCTYPE html>" not in body and "<html" not in body:
+                warnings.append("Missing HTML document structure")
+
+            hard_failures = [w for w in warnings if "JS error" in w or "Missing HTML" in w]
+            if hard_failures:
+                return {
+                    "ok": False,
+                    "reason": "; ".join(hard_failures),
+                }
+
+            if warnings:
+                logger.info("deployment_soft_warnings", warnings=warnings, url=url)
+
+            return {"ok": True}
+
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
+async def _build_project(project_dir: Path) -> dict[str, Any]:
+    """Run tsc check + bun install + vite build inside the project directory."""
+    import asyncio
+
+    from lucy.coding.validator import check_typescript
+
+    bun_path = Path.home() / ".bun" / "bin" / "bun"
+    bun = str(bun_path) if bun_path.exists() else "bun"
+
+    path_env = os.environ.get("PATH", "")
+    env = {**os.environ, "PATH": f"{bun_path.parent}:{path_env}"}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            bun, "install",
+            cwd=str(project_dir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace")
+            logger.error("bun_install_failed", error=err[:500])
+            return {"success": False, "error": f"bun install failed: {err[:300]}"}
+
+        logger.info("bun_install_complete", project=str(project_dir.name))
+
+        tsc_result = await check_typescript(project_dir)
+        if not tsc_result.ok:
+            error_detail = tsc_result.error_summary(max_errors=8)
+            logger.warning(
+                "tsc_pre_build_failed",
+                project=project_dir.name,
+                error_count=len(tsc_result.errors),
+            )
+            return {
+                "success": False,
+                "error": f"TypeScript errors found:\n{error_detail}",
+                "fixable": True,
+                "error_count": len(tsc_result.errors),
+                "errors": [
+                    {
+                        "file": e.file,
+                        "line": e.line,
+                        "message": e.message,
+                    }
+                    for e in tsc_result.errors[:10]
+                ],
+            }
+
+        npx = str(bun_path.parent / "npx") if (bun_path.parent / "npx").exists() else "npx"
+
+        for build_attempt in range(2):
+            proc2 = await asyncio.create_subprocess_exec(
+                npx, "vite", "build",
+                cwd=str(project_dir),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout2, stderr2 = await asyncio.wait_for(
+                proc2.communicate(), timeout=120,
+            )
+            if proc2.returncode == 0:
+                break
+
+            err2 = stderr2.decode(errors="replace")
+            resolve_match = re.search(
+                r'failed to resolve import "([^"]+)"', err2,
+            )
+            if resolve_match and build_attempt == 0:
+                missing_pkg = resolve_match.group(1).split("/")
+                pkg_name = (
+                    "/".join(missing_pkg[:2])
+                    if missing_pkg[0].startswith("@")
+                    else missing_pkg[0]
+                )
+                logger.info(
+                    "auto_install_missing_dep",
+                    package=pkg_name, project=project_dir.name,
+                )
+                add_proc = await asyncio.create_subprocess_exec(
+                    bun, "add", pkg_name,
+                    cwd=str(project_dir), env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(add_proc.communicate(), timeout=30)
+                continue
+
+            logger.error("vite_build_failed", error=err2[:500])
+            return {
+                "success": False,
+                "error": f"Build failed: {err2[:300]}",
+                "fixable": True,
+            }
+
+        logger.info("vite_build_complete", project=str(project_dir.name))
+        return {"success": True}
+
+    except asyncio.TimeoutError:
+        return {"success": False, "error": "Build timed out (120s)"}
+
+
+async def list_apps(workspace_id: str) -> dict[str, Any]:
+    """List all Lucy Spaces projects in a workspace."""
+    spaces_root = _spaces_dir(workspace_id)
+    if not spaces_root.exists():
+        return {"apps": [], "count": 0}
+
+    apps: list[dict[str, Any]] = []
+    for entry in sorted(spaces_root.iterdir()):
+        config_path = entry / "project.json"
+        if config_path.exists():
+            try:
+                config = SpaceProject.load(config_path)
+                apps.append({
+                    "name": config.name,
+                    "slug": entry.name,
+                    "url": config.public_url(),
+                    "created_at": config.created_at,
+                    "last_deployed": config.last_deployed_at,
+                })
+            except Exception:
+                apps.append({
+                    "name": entry.name,
+                    "slug": entry.name,
+                    "error": "corrupt config",
+                })
+
+    return {"apps": apps, "count": len(apps)}
+
+
+async def get_app_status(
+    project_name: str, workspace_id: str,
+) -> dict[str, Any]:
+    """Get detailed status for a Lucy Spaces project."""
+    slug = _slugify(project_name)
+    config_path = _project_config_path(workspace_id, slug)
+
+    if not config_path.exists():
+        return {"success": False, "error": f"Project '{slug}' not found"}
+
+    config = SpaceProject.load(config_path)
+    return {
+        "success": True,
+        "name": config.name,
+        "slug": slug,
+        "description": config.description,
+        "url": config.public_url(),
+        "convex_url": config.convex_deployment_url,
+        "created_at": config.created_at,
+        "last_deployed": config.last_deployed_at,
+    }
+
+
+async def delete_app_project(
+    project_name: str, workspace_id: str,
+) -> dict[str, Any]:
+    """Delete a Lucy Spaces project (Convex + Vercel + local files)."""
+    slug = _slugify(project_name)
+    config_path = _project_config_path(workspace_id, slug)
+
+    if not config_path.exists():
+        return {"success": False, "error": f"Project '{slug}' not found"}
+
+    config = SpaceProject.load(config_path)
+    deleted: list[str] = []
+
+    try:
+        convex = get_convex_api()
+        await convex.delete_project(config.convex_project_id)
+        deleted.append(f"Convex project {config.convex_project_id}")
+    except Exception as e:
+        logger.warning("convex_delete_failed", error=str(e))
+
+    try:
+        vercel = get_vercel_api()
+        await vercel.delete_project(config.vercel_project_id)
+        deleted.append(f"Vercel project {config.vercel_project_id}")
+    except Exception as e:
+        logger.warning("vercel_delete_failed", error=str(e))
+
+    project_dir = _project_dir(workspace_id, slug)
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+        deleted.append(f"Local files at {project_dir}")
+
+    return {"success": True, "deleted": deleted}

@@ -87,6 +87,15 @@ _DOCUMENT_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+_DATA_PROCESSING_KEYWORDS = re.compile(
+    r"\b(export|all users|all customers|all records|merge|de-?duplicate|"
+    r"bulk|master list|data extract|pull (?:all|every)|"
+    r"cross[- ]reference|import data|full list|complete list|"
+    r"generate (?:a )?(?:report|spreadsheet|excel)|"
+    r"fetch (?:all|every)|3[,.]?0\d\d|hundreds of|thousands of)\b",
+    re.IGNORECASE,
+)
+
 # Dynamic prompt modules loaded AFTER the static prefix (tool_use + memory
 # are already in the static prefix for all non-chat intents). Only truly
 # intent-specific modules are listed here.
@@ -149,6 +158,13 @@ def classify_and_route(
         if _ACTION_VERBS.search(text):
             return _choice("command", "default")
         return _choice("followup", "fast")
+
+    # 3a. Data processing / bulk tasks — check BEFORE document so
+    #     "merge data into Excel" routes to code, not document.
+    #     Use default tier (not code) — data tasks need multi-step
+    #     reasoning that cheap code models struggle with.
+    if _DATA_PROCESSING_KEYWORDS.search(text):
+        return _choice("code", "default")
 
     # 3. Document creation — check BEFORE research so "create a report
     #    about competitors" routes to document, not research.

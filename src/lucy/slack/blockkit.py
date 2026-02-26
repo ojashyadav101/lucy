@@ -14,23 +14,32 @@ from typing import Any
 
 _HEADER_RE = re.compile(r"^\*([^*]+)\*$")
 _BULLET_RE = re.compile(r"^[\u2022\-\*]\s+")
+_NUMBERED_RE = re.compile(r"^\d+[\.\)]\s+")
 _DIVIDER_RE = re.compile(r"^-{3,}$")
 _LINK_RE = re.compile(r"<(https?://[^|>]+)\|([^>]+)>")
 _CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_CONTEXT_RE = re.compile(r"^_([^_]+)_$")
 
-MIN_BLOCKS_THRESHOLD = 80
+MIN_BLOCKS_THRESHOLD = 40
+
+_RICH_SIGNAL_RE = re.compile(
+    r"\*[^*]+\*|[\u2022\-\*]\s+|\d+[\.\)]\s+|```|^-{3,}$",
+    re.MULTILINE,
+)
 
 
 def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
     """Convert processed mrkdwn text into Slack Block Kit blocks.
 
-    Returns None if the text is too short/simple to benefit from blocks,
-    so the caller can fall back to plain text.
+    Returns None only for truly simple one-liners with no formatting.
     """
     if not text or len(text) < MIN_BLOCKS_THRESHOLD:
         return None
 
-    if text.count("\n") < 2 and not _BULLET_RE.search(text):
+    has_rich_signals = bool(_RICH_SIGNAL_RE.search(text))
+    has_structure = text.count("\n") >= 2
+
+    if not has_rich_signals and not has_structure:
         return None
 
     blocks: list[dict[str, Any]] = []
@@ -41,10 +50,25 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
         if not current_section:
             return
         section_text = "\n".join(current_section).strip()
-        if section_text:
+        if not section_text:
+            current_section.clear()
+            return
+
+        context_match = _CONTEXT_RE.match(section_text)
+        if context_match and "\n" not in section_text:
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": section_text},
+                ],
+            })
+        else:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": _truncate(section_text, 3000)},
+                "text": {
+                    "type": "mrkdwn",
+                    "text": _truncate(section_text, 3000),
+                },
             })
         current_section.clear()
 
@@ -57,13 +81,19 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
             continue
 
         header_match = _HEADER_RE.match(stripped)
-        if header_match and len(stripped) < 120 and not _BULLET_RE.match(stripped):
+        if header_match and len(stripped) < 120:
             heading = header_match.group(1).strip()
-            if not any(c in heading for c in ["—", "•", ":"]):
+            if (
+                not _BULLET_RE.match(stripped)
+                and not any(c in heading for c in ["\u2014", "\u2022"])
+            ):
                 _flush_section()
                 blocks.append({
                     "type": "header",
-                    "text": {"type": "plain_text", "text": heading[:150]},
+                    "text": {
+                        "type": "plain_text",
+                        "text": heading[:150],
+                    },
                 })
                 continue
 
@@ -74,7 +104,7 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
 
     _flush_section()
 
-    if len(blocks) <= 1:
+    if not blocks:
         return None
 
     if len(blocks) > 50:

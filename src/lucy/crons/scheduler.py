@@ -722,6 +722,17 @@ class CronScheduler:
         if global_context:
             parts.append(f"\n## Global Context\n{global_context}")
 
+        from lucy.config import settings as _s
+        if _s.agentmail_enabled and _s.agentmail_api_key:
+            email_addr = f"lucy@{_s.agentmail_domain}"
+            parts.append(
+                f"\n## Email Capability\n"
+                f"You have your own email address: {email_addr}\n"
+                "You can send emails using the lucy_send_email tool. "
+                "Use this for sending reports, notifications, or any "
+                "communication that should come from your email identity."
+            )
+
         return "\n".join(parts)
 
     def _resolve_delivery_target(self, cron: CronConfig) -> str | None:

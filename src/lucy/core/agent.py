@@ -37,10 +37,13 @@ from lucy.core.trace import Trace
 logger = structlog.get_logger()
 
 MAX_TOOL_TURNS = 12
+MAX_TOOL_TURNS_CODE = 18  # Data tasks, script workflows need more room
 MAX_TOOL_TURNS_FRONTIER = 20  # Deep research gets more room
 MAX_CONTEXT_MESSAGES = 40
 TOOL_RESULT_MAX_CHARS = 16_000
 TOOL_RESULT_SUMMARY_THRESHOLD = 8_000
+IDLE_TIMEOUT_SECONDS = 180  # no progress for 3 min → assume hung
+ABSOLUTE_MAX_SECONDS = 900  # 15 min hard ceiling (safety net only)
 MAX_PAYLOAD_CHARS = 120_000
 
 _INTERNAL_PATH_RE = re.compile(r"/home/user/[^\s\"',}\]]+")
@@ -136,6 +139,135 @@ _NOISY_KEYS = frozenset({
 })
 
 
+def _save_overflow_to_workspace(text: str, tool_name: str = "") -> str | None:
+    """Save oversized tool result to a temp file and return the path."""
+    try:
+        import tempfile
+        safe_name = (tool_name or "tool_result").replace("/", "_")
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        fname = f"{safe_name}_{ts}.json"
+        overflow_dir = Path(tempfile.gettempdir()) / "lucy_overflow"
+        overflow_dir.mkdir(parents=True, exist_ok=True)
+        fp = overflow_dir / fname
+        fp.write_text(text, encoding="utf-8")
+        logger.info(
+            "tool_result_overflow_saved",
+            tool=tool_name,
+            path=str(fp),
+            chars=len(text),
+        )
+        return str(fp)
+    except Exception as e:
+        logger.warning("tool_result_overflow_save_failed", error=str(e))
+        return None
+
+
+_NON_DATA_TOOLS = {
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_GET_TOOL_SCHEMAS",
+    "COMPOSIO_MANAGE_CONNECTIONS",
+}
+
+
+def _build_overflow_summary(
+    raw: Any,
+    total_chars: int,
+    file_path: str = "",
+    tool_name: str = "",
+) -> str:
+    """Build a compact, actionable summary of overflowed tool result data.
+
+    For data-bearing tools (custom wrappers, fetch_all): includes data
+    preview, working script template, and action-required directive.
+    For meta-tools (COMPOSIO_SEARCH_TOOLS): just a compact summary
+    without the script template to avoid confusing the LLM.
+    """
+    is_data_tool = tool_name not in _NON_DATA_TOOLS
+
+    record_count = 0
+    fields: list[str] = []
+    sample_records: list[dict[str, Any]] = []
+    data_accessor = "data"
+
+    if isinstance(raw, dict) and "result" in raw:
+        inner = raw["result"]
+        data_accessor = "data['result']"
+        if isinstance(inner, list):
+            record_count = len(inner)
+            if inner and isinstance(inner[0], dict):
+                fields = list(inner[0].keys())[:15]
+                sample_records = inner[:2]
+        elif isinstance(inner, dict):
+            fields = list(inner.keys())[:15]
+    elif isinstance(raw, list):
+        record_count = len(raw)
+        if raw and isinstance(raw[0], dict):
+            fields = list(raw[0].keys())[:15]
+            sample_records = raw[:2]
+    elif isinstance(raw, dict):
+        if "items" in raw and isinstance(raw["items"], list):
+            data_accessor = "data['items']"
+            record_count = len(raw["items"])
+            if raw["items"] and isinstance(raw["items"][0], dict):
+                fields = list(raw["items"][0].keys())[:15]
+                sample_records = raw["items"][:2]
+        else:
+            fields = list(raw.keys())[:15]
+
+    parts = [
+        f"[DATA SAVED — {total_chars:,} chars, {record_count} records]",
+    ]
+    if fields:
+        parts.append(f"Fields: {', '.join(fields)}")
+
+    if not is_data_tool:
+        parts.append(
+            f"Full results saved to: {file_path}\n"
+            "Use the information above to proceed with the task."
+        )
+        return "\n".join(parts)
+
+    if file_path:
+        parts.append(f"OVERFLOW_FILE: {file_path}")
+
+    if sample_records:
+        import json as _json
+        preview_lines: list[str] = []
+        for rec in sample_records:
+            compact = {k: v for k, v in list(rec.items())[:8]
+                       if not isinstance(v, (dict, list))}
+            try:
+                preview_lines.append(_json.dumps(compact, default=str)[:300])
+            except Exception:
+                pass
+        if preview_lines:
+            parts.append("Sample records:")
+            for pl in preview_lines:
+                parts.append(f"  {pl}")
+
+    if file_path:
+        parts.append(
+            f"\nWORKING TEMPLATE (copy and extend):\n"
+            f"import json\n"
+            f"data = json.load(open('{file_path}'))\n"
+            f"items = {data_accessor}\n"
+            f"print(f'Loaded {{len(items)}} records')\n"
+        )
+
+    parts.append(
+        "\n=== ACTION REQUIRED ===\n"
+        "Data is fetched and saved to the file above.\n"
+        "DO NOT call this tool again — the data is already on disk.\n"
+        "YOUR NEXT STEP: Call lucy_run_script with a Python script that:\n"
+        "  1. Reads the JSON file(s) using the template above\n"
+        "  2. Processes, merges, de-duplicates the data\n"
+        "  3. Writes output (e.g., Excel with openpyxl)\n"
+        "  4. Prints the output file path so it auto-uploads to Slack\n"
+        "You MUST call lucy_run_script — do NOT respond with text only."
+    )
+    return "\n".join(parts)
+
+
 def _compact_data(data: Any, depth: int = 0) -> Any:
     """Strip verbose/noisy fields from API results to fit more
     useful data within the context limit.  Operates recursively
@@ -153,6 +285,111 @@ def _compact_data(data: Any, depth: int = 0) -> Any:
     if isinstance(data, list):
         return [_compact_data(item, depth + 1) for item in data]
     return data
+
+
+_ALWAYS_KEEP_TOOLS = {
+    "lucy_run_script",
+    "lucy_generate_excel",
+    "lucy_generate_csv",
+    "lucy_web_search",
+    "lucy_search_history",
+    "lucy_resolve_custom_integration",
+    "lucy_store_api_key",
+    "lucy_delete_custom_integration",
+    "COMPOSIO_SEARCH_TOOLS",
+    "COMPOSIO_MANAGE_CONNECTIONS",
+    "COMPOSIO_MULTI_EXECUTE_TOOL",
+    "COMPOSIO_GET_TOOL_SCHEMAS",
+}
+
+_SPACES_TOOLS = {
+    "lucy_spaces_init",
+    "lucy_spaces_update",
+    "lucy_write_file",
+    "lucy_edit_file",
+    "lucy_read_file",
+}
+
+_CRON_TOOLS = {
+    "lucy_list_crons",
+    "lucy_create_cron",
+    "lucy_delete_cron",
+    "lucy_modify_cron",
+    "lucy_trigger_cron",
+}
+
+_COMPOSIO_EXEC_TOOLS = {
+    "COMPOSIO_REMOTE_WORKBENCH",
+    "COMPOSIO_REMOTE_BASH_TOOL",
+}
+
+
+def _filter_tools_by_intent(
+    tools: list[dict[str, Any]],
+    intent: str,
+    user_message: str,
+) -> list[dict[str, Any]]:
+    """Reduce tool count based on routing intent and message content.
+
+    For general / chat intents, returns all tools (safe default).
+    For focused intents like code-data tasks, drops clearly irrelevant
+    tools (e.g. Spaces app builder during a data export).
+    """
+    if intent not in ("code", "code_reasoning"):
+        return tools
+
+    msg_lower = user_message.lower()
+
+    is_app_task = any(kw in msg_lower for kw in (
+        "app", "website", "dashboard", "page", "spaces", "deploy", "build me",
+    ))
+    is_data_task = any(kw in msg_lower for kw in (
+        "export", "spreadsheet", "excel", "csv", "pull", "fetch", "list",
+        "merge", "de-duplicate", "deduplicate", "report", "users",
+        "customers", "data",
+    ))
+
+    if is_app_task and not is_data_task:
+        return tools
+
+    if not is_data_task:
+        return tools
+
+    filtered: list[dict[str, Any]] = []
+    for tool in tools:
+        fn = tool.get("function", {})
+        name = fn.get("name", "")
+
+        if name in _ALWAYS_KEEP_TOOLS:
+            filtered.append(tool)
+            continue
+
+        if name in _COMPOSIO_EXEC_TOOLS:
+            filtered.append(tool)
+            continue
+
+        if name.startswith("lucy_custom_"):
+            slug = name.replace("lucy_custom_", "").split("_")[0]
+            if slug in msg_lower:
+                filtered.append(tool)
+            continue
+
+        if name.startswith("delegate_to_"):
+            filtered.append(tool)
+            continue
+
+        if name in _SPACES_TOOLS:
+            continue
+
+        if name in _CRON_TOOLS:
+            continue
+
+        if name.startswith("lucy_email_") or name.startswith("agentmail_"):
+            continue
+
+        filtered.append(tool)
+
+    return filtered
 
 
 @dataclass
@@ -193,6 +430,8 @@ class LucyAgent:
         self._current_channel_id = ctx.channel_id
         self._current_thread_ts = ctx.thread_ts
         self._current_user_slack_id = ctx.user_slack_id
+
+        ctx._slack_client = slack_client  # type: ignore[attr-defined]
 
         trace = Trace.start()
         trace.user_message = message
@@ -261,6 +500,23 @@ class LucyAgent:
 
             from lucy.tools.file_generator import get_file_tool_definitions
             tools.extend(get_file_tool_definitions())
+
+            from lucy.tools.script_tools import get_script_tool_definitions
+            tools.extend(get_script_tool_definitions())
+
+            from lucy.tools.web_search import get_web_search_tool_definitions
+            tools.extend(get_web_search_tool_definitions())
+
+            from lucy.coding.tools import get_coding_tool_definitions
+            tools.extend(get_coding_tool_definitions())
+
+            from lucy.tools.email_tools import get_email_tool_definitions
+            if settings.agentmail_enabled and settings.agentmail_api_key:
+                tools.extend(get_email_tool_definitions())
+
+            from lucy.tools.spaces import get_spaces_tool_definitions
+            if settings.spaces_enabled:
+                tools.extend(get_spaces_tool_definitions())
 
             tools.append({
                 "type": "function",
@@ -578,6 +834,17 @@ class LucyAgent:
             if isinstance(t, dict) and "function" in t
         }
 
+        # 3d. Intent-based tool filtering — reduce tool count for focused tasks
+        pre_filter_count = len(tools)
+        tools = _filter_tools_by_intent(tools, route.intent, message)
+        if len(tools) < pre_filter_count:
+            logger.info(
+                "tools_filtered",
+                intent=route.intent,
+                before=pre_filter_count,
+                after=len(tools),
+            )
+
         # 4. Build system prompt (SOUL + skills + instructions + environment)
         async with trace.span("build_prompt"):
             system_prompt = await build_system_prompt(
@@ -683,17 +950,33 @@ class LucyAgent:
                 "content": nudge,
             })
 
-        # 6. Multi-turn LLM loop
-        response_text = await self._agent_loop(
-            system_prompt=system_prompt,
-            messages=messages,
-            tools=tools,
-            ctx=ctx,
-            model=model,
-            trace=trace,
-            route=route,
-            slack_client=slack_client,
-        )
+        # 6. Multi-turn LLM loop (with absolute safety ceiling)
+        try:
+            response_text = await asyncio.wait_for(
+                self._agent_loop(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                    ctx=ctx,
+                    model=model,
+                    trace=trace,
+                    route=route,
+                    slack_client=slack_client,
+                ),
+                timeout=ABSOLUTE_MAX_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "agent_absolute_timeout",
+                workspace_id=ctx.workspace_id,
+                channel=ctx.channel_id,
+                timeout_seconds=ABSOLUTE_MAX_SECONDS,
+            )
+            response_text = (
+                "This is taking longer than expected — I'm still working "
+                "on it but had to pause. Want me to continue where I left "
+                "off, or try a different approach?"
+            )
 
         # 6b. Quality gate: catch service confusion and escalate if needed
         if route.tier != "frontier":
@@ -790,6 +1073,8 @@ class LucyAgent:
         slack_client: Any | None = None,
     ) -> str:
         """Multi-turn LLM <-> tool execution loop."""
+        import time as _time_mod
+
         client = await self._get_client()
         all_messages = list(messages)
         response_text = ""
@@ -798,8 +1083,13 @@ class LucyAgent:
         self._empty_retries = 0
         self._narration_retries = 0
         self._edit_attempts = 0
+        self._overflow_continuation_attempts = 0
+        overflow_data_files: list[str] = []
+        spaces_init_done = False
         progress_sent = False
         progress_ts: str | None = None
+        _last_progress = _time_mod.monotonic()
+        _loop_start = _last_progress
 
         tool_names = {
             t.get("function", {}).get("name", "")
@@ -809,16 +1099,48 @@ class LucyAgent:
 
         current_model = model
 
-        # Frontier tasks get more turns for deep research
         is_frontier = "frontier" in (model or "")
-        max_turns = MAX_TOOL_TURNS_FRONTIER if is_frontier else MAX_TOOL_TURNS
+        is_code_intent = getattr(route, "intent", "") == "code"
+        if is_frontier:
+            max_turns = MAX_TOOL_TURNS_FRONTIER
+        elif is_code_intent:
+            max_turns = MAX_TOOL_TURNS_CODE
+        else:
+            max_turns = MAX_TOOL_TURNS
+
+        has_code_tools = any(
+            t.get("function", {}).get("name", "").startswith(
+                ("lucy_spaces_", "lucy_write_file", "lucy_edit_file",
+                 "lucy_read_file", "lucy_check_errors")
+            )
+            for t in (tools or []) if isinstance(t, dict)
+        )
+        base_max_tokens = 32_768 if has_code_tools else 16_384
 
         for turn in range(max_turns):
             config = ChatConfig(
                 model=current_model,
                 system_prompt=system_prompt,
                 tools=tools,
+                max_tokens=base_max_tokens,
             )
+
+            # Idle check: if no progress for IDLE_TIMEOUT_SECONDS, stop.
+            idle_secs = _time_mod.monotonic() - _last_progress
+            elapsed_total = _time_mod.monotonic() - _loop_start
+            if idle_secs > IDLE_TIMEOUT_SECONDS:
+                logger.warning(
+                    "agent_idle_timeout",
+                    turn=turn,
+                    idle_seconds=round(idle_secs),
+                    workspace_id=ctx.workspace_id,
+                )
+                response_text = (
+                    "This is taking longer than expected — I'm still working "
+                    "on it but had to pause. Want me to continue where I left "
+                    "off, or try a different approach?"
+                )
+                break
 
             try:
                 async with trace.span(
@@ -828,6 +1150,7 @@ class LucyAgent:
                         messages=all_messages,
                         config=config,
                     )
+                    _last_progress = _time_mod.monotonic()
                     if response.usage:
                         for k, v in response.usage.items():
                             if isinstance(v, (int, float)):
@@ -853,6 +1176,27 @@ class LucyAgent:
 
             response_text = response.content or ""
             tool_calls = response.tool_calls
+
+            # Truncation detection: if output was cut off, continue
+            if response.usage and has_code_tools:
+                comp_tokens = response.usage.get("completion_tokens", 0)
+                if comp_tokens >= base_max_tokens - 10:
+                    from lucy.coding.engine import get_coding_engine
+                    engine = get_coding_engine()
+                    response_text = await engine.continue_truncated(
+                        all_messages, response_text, config,
+                    )
+                    logger.info(
+                        "truncation_recovery",
+                        turn=turn,
+                        original_tokens=comp_tokens,
+                    )
+
+            # Normalize tool names: some models return leading whitespace
+            if tool_calls:
+                for tc in tool_calls:
+                    if "name" in tc:
+                        tc["name"] = tc["name"].strip()
 
             # Empty response recovery: if the LLM returns nothing
             # after tool results, escalate model then nudge.
@@ -943,6 +1287,49 @@ class LucyAgent:
                     })
                     continue
 
+                script_called = "lucy_run_script" in trace.tool_calls_made
+                if (
+                    overflow_data_files
+                    and not script_called
+                    and self._overflow_continuation_attempts < 2
+                    and tools
+                ):
+                    self._overflow_continuation_attempts += 1
+                    files_list = "\n".join(
+                        f"  - {f}" for f in overflow_data_files
+                    )
+                    logger.warning(
+                        "overflow_data_not_processed",
+                        turn=turn,
+                        files=overflow_data_files,
+                        attempt=self._overflow_continuation_attempts,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP — you have fetched data that is saved to "
+                            "files but you have NOT processed it yet. "
+                            "The user needs an Excel file, not a text summary.\n"
+                            f"Data files on disk:\n{files_list}\n\n"
+                            "You MUST call lucy_run_script NOW with a Python "
+                            "script that:\n"
+                            "1. Reads ALL the JSON files above using "
+                            "json.load(open(path))\n"
+                            "2. Extracts, merges, and de-duplicates records "
+                            "by email\n"
+                            "3. Creates a multi-sheet Excel file using "
+                            "openpyxl\n"
+                            "4. Prints the output file path\n\n"
+                            "Call lucy_run_script RIGHT NOW. Do not respond "
+                            "with text."
+                        ),
+                    })
+                    continue
+
                 break
 
             # Loop detection — exact-signature repeats
@@ -974,10 +1361,11 @@ class LucyAgent:
                 "COMPOSIO_MULTI_EXECUTE_TOOL",
                 "COMPOSIO_REMOTE_BASH_TOOL",
                 "COMPOSIO_GET_TOOL_SCHEMAS",
+                "lucy_run_script", "lucy_generate_excel",
                 "COMPOSIO_MANAGE_CONNECTIONS",
             }
             for tc in tool_calls:
-                tn = tc.get("name", "")
+                tn = tc.get("name", "").strip()
                 tool_name_counts[tn] = tool_name_counts.get(tn, 0) + 1
             over_cap = [
                 n for n, c in tool_name_counts.items()
@@ -994,7 +1382,8 @@ class LucyAgent:
                     turn=turn,
                     violations=cap_violations,
                 )
-                if cap_violations >= 3:
+                # Force stop immediately on second cap hit
+                if cap_violations >= 2:
                     logger.warning(
                         "tool_cap_force_stop",
                         turn=turn,
@@ -1006,8 +1395,9 @@ class LucyAgent:
                             "CRITICAL: You have repeatedly ignored "
                             "instructions to stop calling the same tools. "
                             "You MUST respond to the user NOW with "
-                            "whatever data you have. Do NOT call any more "
-                            "tools. Summarize your findings."
+                            "whatever you have. Do NOT call any more "
+                            "tools. If you were building an app, call "
+                            "lucy_spaces_deploy with what you have so far."
                         ),
                     })
                     tools = None
@@ -1016,10 +1406,10 @@ class LucyAgent:
                     "role": "system",
                     "content": (
                         f"You have called {', '.join(over_cap)} too many "
-                        f"times. STOP calling it. Summarize the data you "
-                        f"already collected and respond to the user now. "
-                        f"If you don't have enough data, tell the user "
-                        f"what you found so far and offer next steps."
+                        f"times. STOP calling it. If you were writing app "
+                        f"code, the file is written — now call "
+                        f"lucy_spaces_deploy to deploy it. Do NOT write "
+                        f"more files."
                     ),
                 })
                 continue
@@ -1036,15 +1426,22 @@ class LucyAgent:
                 and ctx.channel_id
                 and ctx.thread_ts
                 and (
-                    (turn == 2 and not progress_sent)
-                    or (turn > 2 and turn % 3 == 0)
+                    (turn == 1 and not progress_sent and has_code_tools)
+                    or (turn == 2 and not progress_sent)
+                    or (turn > 2 and turn % 2 == 0)
                 )
             )
             if should_update:
                 progress_sent = True
                 completed_tools = list(trace.tool_calls_made)
                 if completed_tools:
-                    progress = _describe_progress(completed_tools, turn)
+                    called = {tc.get("name", "") for tc in tool_calls}
+                    progress = _describe_coding_progress(
+                        called, completed_tools, turn,
+                        task_hint=_extract_task_hint(all_messages),
+                    ) if has_code_tools else _describe_progress(
+                        completed_tools, turn,
+                    )
                     try:
                         if not progress_ts:
                             result = await slack_client.chat_postMessage(
@@ -1082,12 +1479,77 @@ class LucyAgent:
             }
             all_messages.append(assistant_msg)
 
-            # Execute tool calls in parallel
+            filtered_calls = []
+            synthetic_results: list[tuple[str, str]] = []
+            for tc in tool_calls:
+                tn = tc.get("name", "").strip()
+                cid = tc.get("id", f"call_{len(filtered_calls)}")
+                if tn == "lucy_spaces_init" and spaces_init_done:
+                    synthetic_results.append((
+                        cid,
+                        '{"error": "App already built and deployed. '
+                        'The URL was returned in the previous result. '
+                        'Share that URL with the user. Do NOT re-init."}',
+                    ))
+                    logger.warning(
+                        "duplicate_spaces_init_blocked",
+                        turn=turn,
+                    )
+                elif tn == "lucy_spaces_delete" and spaces_init_done:
+                    synthetic_results.append((
+                        cid,
+                        '{"error": "Cannot delete project that was just '
+                        'built. Share the deployed URL with the user."}',
+                    ))
+                    logger.warning(
+                        "spaces_delete_blocked",
+                        turn=turn,
+                    )
+                else:
+                    filtered_calls.append(tc)
+
+            # Execute remaining (non-blocked) tool calls in parallel
             tool_results = await self._execute_tools_parallel(
-                tool_calls, tool_names, ctx, trace, slack_client,
+                filtered_calls, tool_names, ctx, trace, slack_client,
             )
+            tool_results.extend(synthetic_results)
+            _last_progress = _time_mod.monotonic()
+
+            # After lucy_spaces_init pipeline succeeds, extract the
+            # summary and return directly — no additional LLM call needed.
+            # This avoids connection drops on the final response call.
+            just_called = {tc.get("name", "") for tc in tool_calls}
+            if "lucy_spaces_init" in just_called:
+                for _cid, _rs in tool_results:
+                    if not isinstance((_cid, _rs), tuple):
+                        continue
+                    if '"success": true' in _rs or '"success":true' in _rs:
+                        spaces_init_done = True
+                        try:
+                            _pipeline_result = json.loads(_rs)
+                            _pipeline_summary = _pipeline_result.get("summary", "")
+                            _pipeline_url = _pipeline_result.get("url", "")
+                            if _pipeline_url:
+                                logger.info(
+                                    "spaces_pipeline_complete_direct_reply",
+                                    url=_pipeline_url,
+                                    workspace_id=ctx.workspace_id,
+                                )
+                                response_text = _pipeline_summary or (
+                                    f"Your app is live at {_pipeline_url}"
+                                )
+                                trace.response_text = response_text
+                                return response_text
+                        except (json.JSONDecodeError, KeyError):
+                            pass
 
             for call_id, result_str in tool_results:
+                if "OVERFLOW_FILE:" in result_str:
+                    for line in result_str.splitlines():
+                        if line.startswith("OVERFLOW_FILE:"):
+                            fpath = line.split(":", 1)[1].strip()
+                            if fpath and fpath not in overflow_data_files:
+                                overflow_data_files.append(fpath)
                 if len(result_str) > TOOL_RESULT_SUMMARY_THRESHOLD:
                     result_str = (
                         result_str[:TOOL_RESULT_SUMMARY_THRESHOLD]
@@ -1110,10 +1572,10 @@ class LucyAgent:
                     before_chars=payload_size,
                 )
 
-            # Mid-loop model upgrade: only switch to code model
-            # when the original routing intent was code-related.
-            # Avoids slow DeepSeek calls for calendar/email tasks
-            # that happen to trigger REMOTE_WORKBENCH.
+            # Mid-loop model switch: only switch to code-tier model
+            # when the original routing was NOT already using a stronger
+            # model for this task (e.g. data processing routed to default
+            # tier should NOT be downgraded to code tier mid-loop).
             called_names = {tc.get("name", "") for tc in tool_calls}
             if (
                 called_names & {"COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"}
@@ -1122,7 +1584,21 @@ class LucyAgent:
             ):
                 from lucy.core.router import MODEL_TIERS
                 code_model = MODEL_TIERS.get("code", current_model)
-                if code_model != current_model:
+                routed_model = model
+                if (
+                    code_model != current_model
+                    and current_model == routed_model
+                    and routed_model == code_model
+                ):
+                    pass
+                elif (
+                    code_model != current_model
+                    and routed_model not in (
+                        MODEL_TIERS.get("default"),
+                        MODEL_TIERS.get("frontier"),
+                        MODEL_TIERS.get("research"),
+                    )
+                ):
                     logger.info(
                         "model_upgrade_mid_loop",
                         from_model=current_model,
@@ -1175,28 +1651,31 @@ class LucyAgent:
         """Produce a graceful fallback when the LLM returns an empty response.
 
         Never expose raw JSON, tool names, or internal data to the user.
+        Returns a warm, human-readable status message.
         """
-        has_tool_results = any(
-            msg.get("role") == "tool"
-            and msg.get("content", "")
-            and '"error"' not in msg.get("content", "")
-            for msg in messages
-        )
-        if has_tool_results:
-            tool_data = []
-            for msg in messages:
-                if msg.get("role") == "tool" and msg.get("content", ""):
-                    content = msg["content"]
-                    if '"error"' not in content:
-                        tool_data.append(content[:500])
-            summary = "; ".join(tool_data[:3]) if tool_data else ""
+        tool_count = 0
+        has_errors = False
+        for msg in messages:
+            if msg.get("role") == "tool" and msg.get("content", ""):
+                tool_count += 1
+                if '"error"' in msg.get("content", ""):
+                    has_errors = True
+
+        if tool_count == 0:
+            return ""
+
+        if has_errors:
             return (
-                f"Here's what I found so far: {summary}\n\n"
-                "I'm still piecing together the full picture. "
-                "Let me know if this helps or if you need me "
-                "to dig deeper."
-            ) if summary else ""
-        return ""
+                "I ran into a hiccup while processing your request. "
+                "Let me try a different approach."
+            )
+
+        from lucy.core.humanize import pick
+        msg = pick("progress_late")
+        return msg or (
+            "I've gathered the data and I'm processing it now. "
+            "Should have results for you shortly \U0001f4ca"
+        )
 
     # ── Parallel tool execution ─────────────────────────────────────────
 
@@ -1335,7 +1814,7 @@ class LucyAgent:
                     }
 
             trace.tool_calls_made.append(name)
-            return call_id, self._serialize_result(result)
+            return call_id, self._serialize_result(result, tool_name=name)
 
         results = await asyncio.gather(
             *[_run_one(i, tc) for i, tc in enumerate(tool_calls)]
@@ -1570,6 +2049,13 @@ class LucyAgent:
                 result_text = await execute_history_tool(ws, tool_name, parameters)
                 return {"result": result_text}
 
+            from lucy.coding.tools import is_coding_tool
+            if is_coding_tool(tool_name):
+                from lucy.coding.tools import execute_coding_tool
+                return await execute_coding_tool(
+                    tool_name, parameters, workspace_id=workspace_id,
+                )
+
             if tool_name in ["lucy_write_file", "lucy_edit_file"] or tool_name.startswith("lucy_generate_"):
                 from lucy.tools.file_generator import execute_file_tool
                 return await execute_file_tool(
@@ -1579,6 +2065,20 @@ class LucyAgent:
                     channel_id=self._current_channel_id,
                     thread_ts=self._current_thread_ts,
                 )
+
+            if tool_name == "lucy_run_script":
+                from lucy.tools.script_tools import execute_script_tool
+                return await execute_script_tool(
+                    parameters=parameters,
+                    workspace_id=workspace_id,
+                    slack_client=self._current_slack_client,
+                    channel_id=self._current_channel_id,
+                    thread_ts=self._current_thread_ts,
+                )
+
+            if tool_name == "lucy_web_search":
+                from lucy.tools.web_search import execute_web_search
+                return await execute_web_search(parameters)
 
             if tool_name == "lucy_resolve_custom_integration":
                 from lucy.integrations.resolver import resolve_multiple
@@ -1628,6 +2128,44 @@ class LucyAgent:
 
             if tool_name == "lucy_delete_custom_integration":
                 return self._delete_custom_integration(parameters)
+
+            from lucy.tools.spaces import is_spaces_tool
+            if is_spaces_tool(tool_name):
+                from lucy.tools.spaces import execute_spaces_tool
+
+                progress_cb = None
+                sc = getattr(ctx, "_slack_client", None) if ctx else None
+                ch = ctx.channel_id if ctx else None
+                ts = ctx.thread_ts if ctx else None
+                if sc and ch:
+                    _progress_ts: str | None = None
+
+                    async def _slack_progress(msg: str) -> None:
+                        nonlocal _progress_ts
+                        try:
+                            if _progress_ts:
+                                await sc.chat_update(
+                                    channel=ch, ts=_progress_ts, text=msg,
+                                )
+                            else:
+                                r = await sc.chat_postMessage(
+                                    channel=ch, thread_ts=ts, text=msg,
+                                )
+                                _progress_ts = r.get("ts")
+                        except Exception:
+                            pass
+
+                    progress_cb = _slack_progress
+
+                return await execute_spaces_tool(
+                    tool_name, parameters, workspace_id,
+                    progress_callback=progress_cb,
+                )
+
+            from lucy.tools.email_tools import is_email_tool
+            if is_email_tool(tool_name):
+                from lucy.tools.email_tools import execute_email_tool
+                return await execute_email_tool(tool_name, parameters)
 
             if tool_name.startswith("lucy_custom_"):
                 return await self._execute_custom_wrapper_tool(
@@ -1816,8 +2354,23 @@ class LucyAgent:
         if "error" in result:
             return result
 
+        prefix = f"lucy_custom_{slug}_"
+        before = len(self._tools)
+        self._tools = [
+            t for t in self._tools
+            if not t.get("function", {}).get("name", "").startswith(prefix)
+        ]
+        unloaded = before - len(self._tools)
+        logger.info(
+            "tools_hot_unloaded",
+            slug=slug,
+            unloaded=unloaded,
+            remaining=len(self._tools),
+        )
+
         return {
             "deleted": True,
+            "verified": result.get("verified", False),
             "service_name": service_name,
             "instruction": (
                 f"Tell the user: 'Done, I've removed the {service_name} "
@@ -2197,13 +2750,13 @@ class LucyAgent:
         return "||".join(sorted(parts))
 
     @staticmethod
-    def _serialize_result(result: Any) -> str:
+    def _serialize_result(result: Any, tool_name: str = "") -> str:
         """Serialize a tool result, compacting if too large.
 
         Auth/redirect URLs are extracted and preserved even when the
         result body is truncated.  For dict/list results that exceed
         the limit, strip verbose nested fields before falling back
-        to hard truncation so the LLM sees more useful data.
+        to saving overflow to workspace.
         """
         raw = result
 
@@ -2218,7 +2771,15 @@ class LucyAgent:
 
         if len(text) > TOOL_RESULT_MAX_CHARS:
             auth_urls = _AUTH_URL_RE.findall(text)
-            text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
+
+            overflow_path = _save_overflow_to_workspace(text, tool_name)
+            if overflow_path:
+                text = _build_overflow_summary(
+                    raw, len(text), overflow_path, tool_name,
+                )
+            else:
+                text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
+
             if auth_urls:
                 preserved = "\n".join(
                     f"AUTH_URL: {url}" for url in auth_urls
@@ -2576,6 +3137,75 @@ def _describe_progress(tool_calls: list[str], turn: int = 0) -> str:
         return pick("progress_mid")
     if turn <= 7:
         return pick("progress_late")
+    return pick("progress_final")
+
+
+def _extract_task_hint(messages: list[dict[str, Any]]) -> str:
+    """Pull a short task description from user messages.
+
+    Skips short greetings/mentions and finds the first substantive
+    user message that likely contains the actual task description.
+    """
+    import json as _json, time as _time
+    skip_prefixes = {"hey", "hi", "hello", "yo", "sup", "@"}
+    for msg in messages:
+        if msg.get("role") == "user":
+            text = msg.get("content", "")
+            if isinstance(text, str) and len(text) > 15:
+                cleaned = text.strip().split("\n")[0]
+                lower = cleaned.lower().strip()
+                if any(lower.startswith(p) for p in skip_prefixes) and len(lower) < 30:
+                    continue
+                if len(cleaned) > 50:
+                    cleaned = cleaned[:47] + "..."
+                return cleaned
+    return ""
+
+
+def _describe_coding_progress(
+    current_tools: set[str],
+    all_tools: list[str],
+    turn: int,
+    task_hint: str = "",
+) -> str:
+    """Context-aware progress for coding tasks.
+
+    Uses tool-specific messages when possible, falls back to
+    humanized progress pools. Never echoes the user's raw text.
+    """
+    from lucy.core.humanize import pick
+
+    if "lucy_spaces_init" in current_tools:
+        return "\u2692\ufe0f Setting up the project..."
+    if "lucy_write_file" in current_tools:
+        return "\u270d\ufe0f Writing the code now..."
+    if "lucy_check_errors" in current_tools:
+        return "\U0001f50d Running checks..."
+    if "lucy_edit_file" in current_tools:
+        return "\U0001f527 Fixing a few things..."
+    if "lucy_spaces_deploy" in current_tools:
+        return "\U0001f680 Deploying your app..."
+    if "lucy_read_file" in current_tools:
+        return "\U0001f4c2 Reading project files..."
+    if "lucy_run_script" in current_tools:
+        return "\u2699\ufe0f Running the data pipeline..."
+    if any(t.startswith("lucy_custom_") for t in current_tools):
+        return "\U0001f4e1 Pulling data from your integrations..."
+    if "lucy_generate_excel" in current_tools:
+        return "\U0001f4ca Generating your spreadsheet..."
+    if "lucy_generate_csv" in current_tools:
+        return "\U0001f4c4 Creating your CSV..."
+    if "lucy_send_email" in current_tools:
+        return "\u2709\ufe0f Sending the email..."
+
+    deploy_done = "lucy_spaces_deploy" in all_tools
+    if deploy_done:
+        return "\u2705 Almost done, verifying everything..."
+
+    if turn <= 2:
+        return pick("progress_early")
+    if turn <= 5:
+        return pick("progress_mid")
     return pick("progress_final")
 
 

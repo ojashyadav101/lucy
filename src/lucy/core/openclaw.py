@@ -94,7 +94,7 @@ class ChatConfig:
 
     model: str = ""
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 16_384
     system_prompt: str | None = None
     tools: list[dict[str, Any]] | None = None
 

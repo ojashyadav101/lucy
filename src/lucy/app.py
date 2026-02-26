@@ -91,8 +91,12 @@ async def lifespan(app: FastAPI):
     scheduler = get_scheduler(slack_client=bolt.client)
     await scheduler.start()
 
+    email_listener = await _start_email_listener(bolt.client)
+
     yield
 
+    if email_listener:
+        await email_listener.stop()
     await scheduler.stop()
     logger.info("app_shutting_down")
     await close_db()
@@ -132,6 +136,58 @@ async def health_db() -> dict[str, str]:
 async def slack_events(req: object) -> object:
     """Slack events endpoint for HTTP mode."""
     return await handler.handle(req)  # type: ignore[arg-type]
+
+
+if settings.spaces_enabled:
+    from lucy.spaces.http_endpoints import router as _spaces_router
+
+    api.include_router(_spaces_router)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EMAIL LISTENER STARTUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _start_email_listener(slack_client: object) -> object | None:
+    """Start the AgentMail WebSocket listener if configured."""
+    if not settings.agentmail_enabled or not settings.agentmail_api_key:
+        return None
+
+    try:
+        from lucy.integrations.email_listener import get_email_listener
+
+        listener = get_email_listener()
+        inbox_id = f"lucy@{settings.agentmail_domain}"
+
+        channel = None
+        try:
+            result = await slack_client.conversations_list(  # type: ignore[attr-defined]
+                types="public_channel", limit=100,
+            )
+            for ch in result.get("channels", []):
+                name = ch.get("name", "")
+                if name in ("talk-to-lucy", "lucy-my-ai", "lucy", "general"):
+                    channel = ch.get("id")
+                    break
+        except Exception:
+            pass
+
+        await listener.start(
+            slack_client=slack_client,
+            inbox_ids=[inbox_id],
+            notification_channel=channel,
+        )
+        logger.info(
+            "email_listener_started",
+            inbox_id=inbox_id,
+            notification_channel=channel,
+        )
+        return listener
+
+    except Exception as e:
+        logger.warning("email_listener_start_failed", error=str(e))
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -200,6 +256,8 @@ def main() -> None:
 
         scheduler = get_scheduler(slack_client=bolt.client)
         await scheduler.start()
+
+        await _start_email_listener(bolt.client)
 
         sm_handler = AsyncSocketModeHandler(bolt, settings.slack_app_token)
         await sm_handler.start_async()

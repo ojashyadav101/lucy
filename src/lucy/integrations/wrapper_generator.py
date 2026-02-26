@@ -50,33 +50,51 @@ Service info:
 
 Requirements:
 1. Use `httpx` for HTTP calls (it is installed). Always set `follow_redirects=True`.
+   Set explicit timeout of 30 seconds: `httpx.Timeout(30.0)`.
 2. The wrapper must be a single Python file that defines:
    a) A TOOLS list — each entry is a dict with:
       - "name": str (e.g. "{slug}_list_products")
-      - "description": str (clear, helpful description for an AI agent)
+      - "description": str (OPERATIONALLY ACCURATE — see rule 11)
       - "parameters": dict (JSON Schema for the function's input, including
         required fields and property descriptions)
    b) An `async def execute(tool_name: str, args: dict, api_key: str) -> dict`
       function that dispatches to the right API call based on tool_name.
 3. Auth credentials are passed as the `api_key` parameter to `execute()`.
    Use the auth header format specified above.
-4. Handle errors gracefully and return {{"error": "message"}} on failure.
+4. ROBUST ERROR HANDLING:
+   - Wrap _make_request with retry logic: on 429 or 5xx, retry up to 3 times
+     with exponential backoff (1s, 2s, 4s). Use asyncio.sleep().
+   - Parse rate limit headers (X-RateLimit-Remaining, Retry-After) and pace
+     requests when remaining is low.
+   - On 4xx (non-429), return {{"error": "message"}} without retry.
+   - NEVER let one failed request crash the entire operation.
 5. CRITICAL: Cover the full business lifecycle. Include tools for:
-   - ALL CRUD operations on primary resources (products, subscriptions, etc.)
-   - Checkout / purchase flows (if available)
+   - ALL CRUD operations on primary resources
    - Customer / user management
    - Orders, invoices, billing, and financial data
    - Search and list with pagination (accept `page` and `limit` params)
    - Any analytics or metrics endpoints
    - Webhook management if available
-   Aim for 15-30 tools covering every CATEGORY. Skip internal/admin-only
-   endpoints like OAuth2 internals, raw token management, etc.
-6. Include a module docstring explaining what the wrapper does.
-7. Do NOT import anything beyond httpx, json, and the standard library.
-8. Use descriptive tool names with the service prefix: {slug}_<action>_<resource>.
-9. Keep each function implementation concise. Share a common `_make_request`
-   helper to avoid code duplication.
-10. Keep the total code under 600 lines. Be efficient.
+   Aim for 15-30 tools covering every CATEGORY.
+6. AUTO-PAGINATION: For EVERY list endpoint, generate TWO tools:
+   - `{{slug}}_list_{{resource}}` — returns ONE page. Description MUST say:
+     "Returns ONE PAGE (default limit 10). Use {{slug}}_fetch_all_{{resource}}
+      for the complete dataset."
+   - `{{slug}}_fetch_all_{{resource}}` — auto-paginates internally. Fetches ALL
+     pages using maximum page size, sleeps 0.5s between pages to respect rate
+     limits, and returns the complete list. Description: "Fetches ALL records
+     with automatic pagination. Use for bulk data exports."
+7. RESPONSE COMPACTION: For list/fetch_all tools, strip verbose internal fields
+   (raw metadata, internal IDs, audit timestamps) and keep only fields an AI
+   agent needs: names, emails, statuses, dates, amounts, identifiers.
+8. Include a module docstring explaining what the wrapper does.
+9. Do NOT import anything beyond httpx, json, asyncio, and the standard library.
+10. Use descriptive tool names with the service prefix: {slug}_<action>_<resource>.
+11. TOOL DESCRIPTIONS MUST BE OPERATIONALLY ACCURATE:
+    - NEVER say "Lists all X" for a paginated endpoint. Say "Returns ONE PAGE of X".
+    - State default and max page sizes.
+    - State what fields are returned.
+12. Keep the total code under 800 lines. Be efficient but thorough.
 
 Categories to cover (based on endpoint inventory):
 {category_summary}
@@ -107,21 +125,28 @@ Since I could not fetch the full API documentation, please use your knowledge of
 
 Requirements:
 1. Use `httpx` for HTTP calls (it is installed). Always set `follow_redirects=True`.
+   Set explicit timeout: `httpx.Timeout(30.0)`.
 2. The wrapper must be a single Python file that defines:
    a) A TOOLS list — each entry is a dict with:
       - "name": str (e.g. "{slug}_list_products")
-      - "description": str (clear, helpful description for an AI agent)
+      - "description": str (OPERATIONALLY ACCURATE — never say "lists all" for
+        a paginated endpoint. Say "returns ONE PAGE".)
       - "parameters": dict (JSON Schema for the function's input)
    b) An `async def execute(tool_name: str, args: dict, api_key: str) -> dict`
       function that dispatches to the right API call based on tool_name.
 3. Auth credentials are passed as the `api_key` parameter to `execute()`.
-4. Handle errors gracefully and return {{"error": "message"}} on failure.
-5. Aim for 15-30 tools covering every business CATEGORY. Skip internal/admin-only
-   endpoints. Cover the full lifecycle from creating to selling to managing.
-6. Include a module docstring explaining what the wrapper does.
-7. Do NOT import anything beyond httpx, json, and the standard library.
-8. Use descriptive tool names with the service prefix: {slug}_<action>_<resource>.
-9. Share a common `_make_request` helper. Keep total code under 600 lines.
+4. ROBUST ERROR HANDLING: Wrap `_make_request` with retry logic. On 429 or 5xx,
+   retry up to 3 times with exponential backoff (asyncio.sleep 1s, 2s, 4s).
+   Parse rate limit headers. Return {{"error": "message"}} on permanent failures.
+5. For EVERY list endpoint, generate TWO tools:
+   - `{{slug}}_list_{{resource}}` — returns ONE page (say so in description)
+   - `{{slug}}_fetch_all_{{resource}}` — auto-paginates, fetches ALL records,
+     sleeps 0.5s between pages, returns the complete dataset
+6. Aim for 15-30 tools covering every business CATEGORY.
+7. Include a module docstring explaining what the wrapper does.
+8. Do NOT import anything beyond httpx, json, asyncio, and the standard library.
+9. Use descriptive tool names: {slug}_<action>_<resource>.
+10. Share a common `_make_request` helper with retry. Keep total code under 800 lines.
 
 Return ONLY the Python code. No markdown fences. No explanation.
 """
@@ -138,6 +163,150 @@ class WrapperDeployResult:
     error: str | None = None
     needs_api_key: bool = False
     api_key_env_var: str | None = None
+    quality_score: int = 0
+
+
+def _fix_common_syntax_issues(code: str) -> str:
+    """Fix common LLM-generated Python syntax errors before validation.
+
+    Handles:
+    - Unterminated strings (most common LLM failure)
+    - Markdown fences accidentally left in output
+    - Trailing commas in dicts/lists (Python allows these, so harmless)
+    """
+    if code.startswith("```"):
+        first_nl = code.find("\n")
+        code = code[first_nl + 1:]
+    if code.rstrip().endswith("```"):
+        code = code.rstrip()[:-3]
+
+    lines = code.split("\n")
+    fixed_lines = []
+    for line in lines:
+        stripped = line.rstrip()
+        single_count = stripped.count("'") - stripped.count("\\'")
+        double_count = stripped.count('"') - stripped.count('\\"')
+        triple_single = stripped.count("'''")
+        triple_double = stripped.count('"""')
+
+        if triple_single % 2 == 1 or triple_double % 2 == 1:
+            fixed_lines.append(line)
+            continue
+
+        if single_count % 2 == 1:
+            if stripped.endswith(","):
+                line = line.rstrip()[:-1] + "'" + ","
+            elif stripped.endswith(":"):
+                line = line.rstrip() + "'"
+            else:
+                line = line + "'"
+        elif double_count % 2 == 1:
+            if stripped.endswith(","):
+                line = line.rstrip()[:-1] + '"' + ","
+            elif stripped.endswith(":"):
+                line = line.rstrip() + '"'
+            else:
+                line = line + '"'
+
+        fixed_lines.append(line)
+
+    return "\n".join(fixed_lines)
+
+
+def _enhance_wrapper_quality(code: str, slug: str) -> tuple[str, int]:
+    """Post-generation enhancement: inject missing retry, pagination, and quality patterns.
+
+    Returns ``(enhanced_code, quality_score)`` where score is 0-5.
+    """
+    import re
+
+    score = 0
+
+    has_retry = "asyncio.sleep" in code and ("429" in code or "retry" in code.lower())
+    has_fetch_all = f"{slug}_fetch_all" in code
+    has_timeout = "Timeout" in code or "timeout=" in code
+    has_compaction = "_clean" in code or "_compact" in code or "_strip" in code
+    has_accurate_desc = "ONE PAGE" in code or "one page" in code
+
+    if has_retry:
+        score += 1
+    if has_fetch_all:
+        score += 1
+    if has_timeout:
+        score += 1
+    if has_compaction:
+        score += 1
+    if has_accurate_desc:
+        score += 1
+
+    if not has_retry and "_make_request" in code:
+        retry_helper = '''
+import asyncio
+
+_MAX_RETRIES = 3
+
+async def _retry_request(method, endpoint, api_key, **kwargs):
+    """Wrapper around _make_request with exponential backoff for 429/5xx."""
+    for attempt in range(_MAX_RETRIES):
+        result = await _make_request(method, endpoint, api_key, **kwargs)
+        if isinstance(result, dict) and "error" in result:
+            err = result["error"]
+            if any(code in err for code in ("429", "500", "502", "503", "504")):
+                if attempt < _MAX_RETRIES - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+        return result
+    return result
+'''
+        import_pos = code.find("import httpx")
+        if import_pos != -1:
+            line_end = code.find("\n", import_pos)
+            code = code[:line_end + 1] + retry_helper + code[line_end + 1:]
+            score += 1
+
+    if not has_timeout and "httpx.AsyncClient(" in code:
+        code = code.replace(
+            "httpx.AsyncClient(follow_redirects=True)",
+            "httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(30.0))",
+        )
+        code = code.replace(
+            "httpx.AsyncClient(follow_redirects=True,",
+            "httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(30.0),",
+        )
+        score += 1
+
+    list_pattern = re.compile(rf'"{slug}_list_(\w+)"')
+    list_tools = set(list_pattern.findall(code))
+    fetch_all_pattern = re.compile(rf'"{slug}_fetch_all_(\w+)"')
+    fetch_all_tools = set(fetch_all_pattern.findall(code))
+    missing_fetch_all = list_tools - fetch_all_tools
+
+    if missing_fetch_all:
+        logger.info(
+            "wrapper_quality_missing_fetch_all",
+            slug=slug,
+            missing=[f"{slug}_fetch_all_{r}" for r in missing_fetch_all],
+        )
+
+    if "lists all" in code.lower() or "list all" in code.lower():
+        code = re.sub(
+            r'"[Ll]ists? all ([^"]+)"',
+            r'"Returns ONE PAGE of \1. Use the fetch_all variant for complete data."',
+            code,
+        )
+
+    logger.info(
+        "wrapper_quality_score",
+        slug=slug,
+        score=score,
+        has_retry=has_retry or "_retry_request" in code,
+        has_fetch_all=has_fetch_all,
+        has_timeout=has_timeout or "Timeout" in code,
+        has_compaction=has_compaction,
+        has_accurate_desc=has_accurate_desc or "ONE PAGE" in code,
+    )
+
+    return code, score
 
 
 async def generate_and_deploy_wrapper(
@@ -163,7 +332,7 @@ async def generate_and_deploy_wrapper(
     if not init_file.exists():
         init_file.write_text("", encoding="utf-8")
 
-    max_attempts = 2
+    max_attempts = 3
     last_error = ""
     for attempt in range(1, max_attempts + 1):
         wrapper_code = await _generate_wrapper_code(classification, slug, env_var)
@@ -172,6 +341,9 @@ async def generate_and_deploy_wrapper(
                 service_name=service,
                 error="Failed to generate wrapper code via LLM",
             )
+
+        wrapper_code = _fix_common_syntax_issues(wrapper_code)
+        wrapper_code, quality_score = _enhance_wrapper_quality(wrapper_code, slug)
 
         try:
             wrapper_file.write_text(wrapper_code, encoding="utf-8")
@@ -236,6 +408,7 @@ async def generate_and_deploy_wrapper(
                     tools_registered=tool_names,
                     needs_api_key=needs_key,
                     api_key_env_var=env_var if needs_key else None,
+                    quality_score=quality_score,
                 )
 
             return WrapperDeployResult(
@@ -455,7 +628,8 @@ def discover_saved_wrappers() -> list[dict[str, Any]]:
 def delete_custom_wrapper(slug: str) -> dict[str, Any]:
     """Delete a custom wrapper directory and its API key from keys.json.
 
-    Returns a summary of what was removed.
+    Includes post-deletion verification and orphan cleanup.
+    Returns a summary of what was removed with a ``verified`` flag.
     """
     import shutil
 
@@ -479,7 +653,18 @@ def delete_custom_wrapper(slug: str) -> dict[str, Any]:
             pass
 
     shutil.rmtree(wrapper_dir, ignore_errors=True)
-    removed.append(f"wrapper directory: custom_wrappers/{slug}/")
+
+    if wrapper_dir.exists():
+        logger.warning("delete_wrapper_rmtree_failed_retrying", slug=slug)
+        import time
+        time.sleep(0.2)
+        shutil.rmtree(wrapper_dir, ignore_errors=True)
+
+    verified = not wrapper_dir.exists()
+    if verified:
+        removed.append(f"wrapper directory: custom_wrappers/{slug}/")
+    else:
+        logger.error("delete_wrapper_directory_persists", slug=slug, path=str(wrapper_dir))
 
     keys_path = Path(settings.workspace_root).parent / "keys.json"
     if keys_path.exists():
@@ -493,6 +678,8 @@ def delete_custom_wrapper(slug: str) -> dict[str, Any]:
                     encoding="utf-8",
                 )
                 removed.append(f"API key for '{slug}'")
+
+            _cleanup_orphaned_keys(keys_data, keys_path)
         except Exception as e:
             logger.warning("delete_wrapper_keys_cleanup_failed", slug=slug, error=str(e))
 
@@ -501,6 +688,7 @@ def delete_custom_wrapper(slug: str) -> dict[str, Any]:
         slug=slug,
         service=service_name,
         removed=removed,
+        verified=verified,
     )
 
     return {
@@ -508,4 +696,26 @@ def delete_custom_wrapper(slug: str) -> dict[str, Any]:
         "slug": slug,
         "tool_count": tool_count,
         "removed": removed,
+        "verified": verified,
     }
+
+
+def _cleanup_orphaned_keys(
+    keys_data: dict[str, Any],
+    keys_path: Path,
+) -> None:
+    """Remove keys.json entries whose wrapper directories no longer exist."""
+    ci = keys_data.get("custom_integrations", {})
+    orphans = [
+        s for s in ci
+        if not (_WRAPPERS_DIR / s).exists()
+    ]
+    if not orphans:
+        return
+    for s in orphans:
+        del ci[s]
+    keys_path.write_text(
+        json.dumps(keys_data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("orphaned_keys_cleaned", slugs=orphans)

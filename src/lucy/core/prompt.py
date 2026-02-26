@@ -130,10 +130,108 @@ async def build_system_prompt(
         )
         static_parts.append(env_block)
 
+    if settings.agentmail_enabled and settings.agentmail_api_key:
+        email_addr = f"lucy@{settings.agentmail_domain}"
+        static_parts.append(
+            "<email_identity>\n"
+            f"You have your own email address: {email_addr}\n"
+            "This is YOUR email, not the user's. You can send emails, "
+            "read your inbox, reply to threads, and search messages using "
+            "the lucy_send_email, lucy_read_emails, lucy_reply_to_email, "
+            "lucy_search_emails, and lucy_get_email_thread tools.\n"
+            "Use it for outbound communication, notifications, agent-to-agent "
+            "messaging, or any task where you need your own email identity.\n"
+            "When you receive an inbound email, you will be notified.\n"
+            "</email_identity>"
+        )
+
+    static_parts.append(
+        "<coding_rules>\n"
+        "READING FILES:\n"
+        "- Use lucy_read_file to read any file in the workspace.\n"
+        "- You MUST read a file before editing it with lucy_edit_file.\n"
+        "- When starting work on an existing project, read key files first.\n"
+        "\n"
+        "VALIDATING CODE:\n"
+        "- Use lucy_check_errors after writing or editing code to catch "
+        "errors before deploying.\n"
+        "- Fix any errors found before proceeding.\n"
+        "- Maximum 3 fix attempts per error, then report the issue.\n"
+        "\n"
+        "FILE LISTING:\n"
+        "- Use lucy_list_files to explore project structure.\n"
+        "\n"
+        "PROACTIVE CODING:\n"
+        "- After deploying an app, suggest 1-2 specific improvements "
+        "based on what you built.\n"
+        "- If the user has GitHub connected, offer to push the code.\n"
+        "- Save preferences you discover (color choices, UI style, "
+        "libraries they like) using lucy_save_memory.\n"
+        "- If branding is in memory, apply it automatically without "
+        "asking.\n"
+        "</coding_rules>"
+    )
+
+    if settings.spaces_enabled:
+        static_parts.append(
+            "<spaces_capability>\n"
+            "You can build and deploy web apps on zeeya.app.\n"
+            "WORKFLOW (4 steps):\n"
+            "1. lucy_spaces_init → scaffolds React project, returns sandbox_path "
+            "and a plan\n"
+            "2. lucy_write_file → write your app code to the EXACT "
+            "app_tsx_path returned\n"
+            "3. lucy_check_errors → validate code before deploying\n"
+            "4. lucy_spaces_deploy → builds, deploys, validates, returns "
+            "live URL\n"
+            "\n"
+            "WRITING CODE:\n"
+            "- For SIMPLE apps: write everything in a single App.tsx file.\n"
+            "- For COMPLEX apps (3+ distinct views, shared state, reusable "
+            "components): you MAY create additional files:\n"
+            "  • {sandbox_path}/src/components/MyComponent.tsx\n"
+            "  • {sandbox_path}/src/hooks/useMyHook.ts\n"
+            "  • {sandbox_path}/src/lib/utils.ts\n"
+            "  Import them in App.tsx with relative paths: "
+            "import { X } from './components/X'\n"
+            "- App.tsx is ALWAYS the entry point. "
+            "Export default: export default function App() { ... }\n"
+            "- Pre-installed libraries:\n"
+            "  • shadcn/ui: import { Button } from '@/components/ui/button', "
+            "etc. (53 components available)\n"
+            "  • lucide-react: icons\n"
+            "  • framer-motion: animations\n"
+            "  • recharts: charts\n"
+            "  • react, react-dom, react-router-dom\n"
+            "  • Tailwind CSS classes in className\n"
+            "\n"
+            "BUILD ERRORS:\n"
+            "- If lucy_spaces_deploy returns fixable errors, fix them with "
+            "lucy_edit_file and redeploy. Max 3 attempts.\n"
+            "- If lucy_check_errors finds issues, fix before deploying.\n"
+            "\n"
+            "AFTER DEPLOY:\n"
+            "- The deploy tool validates the app loads before returning.\n"
+            "- If it returns a validation_warning, the app has issues — "
+            "investigate.\n"
+            "- Share the EXACT url from the result, including query strings.\n"
+            "- Do NOT dump raw JSON. Summarize in natural language.\n"
+            "- NEVER use COMPOSIO tools for spaces.\n"
+            "</spaces_capability>"
+        )
+
     static_prefix = _SECTION_SEP.join(static_parts)
 
     # ── DYNAMIC SUFFIX ───────────────────────────────────────────
     dynamic_parts: list[str] = []
+
+    from lucy.coding.memory import load_coding_memory
+    coding_mem = load_coding_memory(ws.workspace_id)
+    if not coding_mem.is_empty():
+        mem_text = coding_mem.to_prompt_section()
+        dynamic_parts.append(
+            f"<coding_memory>\n{mem_text}\n</coding_memory>"
+        )
 
     if prompt_modules:
         intent_modules_text = _load_prompt_modules(prompt_modules)

@@ -5,5 +5,6 @@
   "description": "Read and follow the `skills/async-workflows/SKILL.md` skill, particularly the proactive heartbeat section. Your goal is to be VISIBLY helpful. Look for unanswered questions in the slack_reader logs since your last run, or check global.log to see what other tasks have done. Answer a question, DM someone with an offer to help, or post a relevant insight. Do at least ONE visible action per heartbeat.",
   "type": "agent",
   "timezone": "UTC",
-  "delivery_mode": "channel"
+  "delivery_mode": "channel",
+  "delivery_channel": "C0AGNRMGALS"
 }
