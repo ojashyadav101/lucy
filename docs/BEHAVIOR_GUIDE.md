@@ -306,7 +306,7 @@ User request arrives
     │       - Anticipated failure modes
     │
     ├── 3. INVESTIGATE THOROUGHLY
-    │     1-2 queries are NEVER enough
+    │     At least 2-3 tool calls for data, 3+ sources for research
     │     Multiple tool calls to gather complete data
     │     Cross-reference findings
     │

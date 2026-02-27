@@ -104,7 +104,7 @@ Core behavioral instructions. Defines how Lucy thinks and acts.
 | **Formatting for Slack** | Headers (bold), dividers, bullets. No Markdown tables (use bulleted lists). Links with anchor text. Single asterisks for bold. TLDR-first rule. |
 | **Writing Style** | No em dashes, power words blacklist, avoid parallelism, be assertive not hedgy, vary sentence length, clean headers. |
 | **Tone and Personality** | Warm sharp colleague. Empathy first. Identity awareness (cross-reference Slack profiles). Match energy. Human openers. |
-| **Response Quality** | Internal checklist. MANDATORY proactive follow-up: always add brief follow-up after answering. |
+| **Response Quality** | Internal checklist. Proactive follow-up only when genuinely useful (skip for greetings, one-liners, or when nothing new to add). |
 | **Skills System** | Read-write discipline: check relevant skills before acting, read full content, read company/team knowledge. After completing, update skills if learned something new. |
 
 ---
@@ -127,7 +127,7 @@ if SYSTEM_CORE.md is missing.
 | `<skills_system>` | Read-write discipline, knowledge discovery |
 | `<tool_efficiency>` | Answer from knowledge when possible, parallelize, investigate depth (2-3+ calls), minimize round trips |
 | `<intelligence_rules>` | Check connections for integration queries, ask WHERE for data queries, flag contradictions, check silently for impossible requests |
-| `<response_quality>` | Internal checklist, mandatory proactive follow-up |
+| `<response_quality>` | Internal checklist, proactive follow-up when genuinely useful |
 | `<slack_history_awareness>` | MANDATORY: search Slack history for past events |
 | `<memory_discipline>` | Three layers: thread, session, knowledge. Persist facts. |
 | `<proactive_intelligence>` | Pattern recognition, follow-up awareness, contextual suggestions |

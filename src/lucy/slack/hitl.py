@@ -138,8 +138,20 @@ async def resolve_pending_action(
     if not action:
         # Try loading from disk (server may have restarted)
         logger.info("hitl_action_not_in_memory_trying_disk", action_id=action_id)
-        all_actions = _load_from_disk("")  # blank workspace_id — scan won't work
-        # Fall through to "not found"
+        root = Path(settings.workspace_root)
+        if root.is_dir():
+            for ws_dir in root.iterdir():
+                if ws_dir.is_dir():
+                    disk_actions = _load_from_disk(ws_dir.name)
+                    if action_id in disk_actions:
+                        action = disk_actions[action_id]
+                        _pending_actions[action_id] = action
+                        logger.info(
+                            "hitl_action_recovered_from_disk",
+                            action_id=action_id,
+                            workspace_id=ws_dir.name,
+                        )
+                        break
 
     if not action:
         logger.warning("hitl_action_not_found", action_id=action_id)

@@ -2152,10 +2152,13 @@ class LucyAgent:
             from lucy.integrations.composio_client import get_composio_client
 
             client = get_composio_client()
-            result = await client.execute_tool_call(
-                workspace_id=workspace_id,
-                tool_name=tool_name,
-                arguments=parameters,
+            result = await asyncio.wait_for(
+                client.execute_tool_call(
+                    workspace_id=workspace_id,
+                    tool_name=tool_name,
+                    arguments=parameters,
+                ),
+                timeout=timeout,
             )
 
             result_str = json.dumps(result)[:500] if isinstance(result, dict) else str(result)[:500]
@@ -2176,8 +2179,27 @@ class LucyAgent:
                 has_error=has_real_error,
                 result_preview=result_str[:200] if has_real_error else "",
             )
+            # Reset circuit breaker on success
+            LucyAgent._tool_failure_counts.pop(tool_name, None)
             return result
 
+        except asyncio.TimeoutError:
+            LucyAgent._tool_failure_counts[tool_name] = (
+                LucyAgent._tool_failure_counts.get(tool_name, 0) + 1
+            )
+            human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+            logger.warning(
+                "composio_tool_timeout",
+                tool=tool_name,
+                timeout=timeout,
+            )
+            return {
+                "error": (
+                    f"'{human_name}' timed out after {int(timeout)}s. "
+                    f"Try a lighter approach or break the task into smaller steps."
+                ),
+                "_timed_out": True,
+            }
         except Exception as e:
             LucyAgent._tool_failure_counts[tool_name] = (
                 LucyAgent._tool_failure_counts.get(tool_name, 0) + 1
@@ -2702,6 +2724,9 @@ class LucyAgent:
         if not task:
             return {"error": "No task description provided"}
 
+        # Store task hint for progress messages
+        self._current_task_hint = task[:80] if task else None
+
         # Post delegation start message so user isn't left in silence
         _DELEGATION_LABELS = {
             "research": "Doing a deep dive on this",
@@ -2710,7 +2735,7 @@ class LucyAgent:
             "document": "Putting the document together",
         }
         start_label = _DELEGATION_LABELS.get(agent_type, "Working on this")
-        task_hint = getattr(self, "_current_task_hint", None)
+        task_hint = self._current_task_hint
         start_msg = (
             f"{start_label} — {task_hint[:60]}..." if task_hint
             else f"{start_label}..."
@@ -2738,6 +2763,7 @@ class LucyAgent:
                 timeout=SUB_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
+            self._current_task_hint = None
             logger.warning(
                 "subagent_timeout",
                 agent=agent_type,
@@ -2763,6 +2789,7 @@ class LucyAgent:
             except Exception as e:
                 logger.warning("subagent_memory_persist_error", error=str(e))
 
+        self._current_task_hint = None
         return {"result": result}
 
     async def _on_subagent_progress(self, name: str, turn: int) -> None:
