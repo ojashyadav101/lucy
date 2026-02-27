@@ -228,12 +228,3 @@ async def resolve_channel_middleware(
         context["channel_id"] = channel.id
     
     await next()
-
-
-def get_all_middleware() -> list:
-    """Return all middleware functions in correct order."""
-    return [
-        resolve_workspace_middleware,
-        resolve_user_middleware,
-        resolve_channel_middleware,
-    ]

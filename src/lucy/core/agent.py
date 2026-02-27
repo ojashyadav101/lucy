@@ -32,7 +32,7 @@ from lucy.core.openclaw import (
     OpenClawResponse,
     get_openclaw_client,
 )
-from lucy.core.trace import Trace
+from lucy.infra.trace import Trace
 
 logger = structlog.get_logger()
 
@@ -203,7 +203,7 @@ class LucyAgent:
         trace.user_message = message
 
         # 1. Classify intent and select model
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         thread_depth = 0
         prev_had_tool_calls = False
@@ -247,7 +247,7 @@ class LucyAgent:
             ws = await ensure_workspace(ctx.workspace_id, slack_client)
 
         # 3. Fetch connected services + meta-tools in parallel
-        from lucy.core.prompt import build_system_prompt
+        from lucy.pipeline.prompt import build_system_prompt
 
         connected_services: list[str] = []
         tools: list[dict[str, Any]] = []
@@ -925,7 +925,7 @@ class LucyAgent:
                     intent=route.intent,
                     retry_depth=_retry_depth,
                 )
-                from lucy.core.router import MODEL_TIERS
+                from lucy.pipeline.router import MODEL_TIERS
                 escalated_model = MODEL_TIERS.get("code", model)
                 try:
                     retried = await self.run(
@@ -1123,7 +1123,7 @@ class LucyAgent:
                         messages_before=len(all_messages),
                     )
                     all_messages = await _trim_tool_results(all_messages)
-                    from lucy.core.router import MODEL_TIERS
+                    from lucy.pipeline.router import MODEL_TIERS
                     frontier = MODEL_TIERS.get("frontier", current_model)
                     if frontier != current_model:
                         current_model = frontier
@@ -1151,7 +1151,7 @@ class LucyAgent:
                     self._empty_retries = empty_retries + 1
 
                     if empty_retries == 1:
-                        from lucy.core.router import MODEL_TIERS
+                        from lucy.pipeline.router import MODEL_TIERS
                         stronger = MODEL_TIERS.get("frontier", current_model)
                         if stronger != current_model:
                             current_model = stronger
@@ -1454,7 +1454,7 @@ class LucyAgent:
                     "content": stuck["intervention"],
                 })
                 if stuck.get("escalate_model"):
-                    from lucy.core.router import MODEL_TIERS
+                    from lucy.pipeline.router import MODEL_TIERS
                     _ESCALATION_ORDER = ["default", "code", "research", "frontier"]
                     current_tier_idx = -1
                     for i, tier in enumerate(_ESCALATION_ORDER):
@@ -1546,7 +1546,7 @@ class LucyAgent:
                             )
 
                     elif sv_result.decision == SupervisorDecision.ESCALATE:
-                        from lucy.core.router import MODEL_TIERS
+                        from lucy.pipeline.router import MODEL_TIERS
                         _ESC_ORDER = ["fast", "default", "code", "research", "frontier"]
                         cur_idx = -1
                         for i, tier in enumerate(_ESC_ORDER):
@@ -1609,7 +1609,7 @@ class LucyAgent:
                 and route.intent in ("code", "code_reasoning")
                 and getattr(self, "_edit_attempts", 0) < 2
             ):
-                from lucy.core.router import MODEL_TIERS
+                from lucy.pipeline.router import MODEL_TIERS
                 code_model = MODEL_TIERS.get("code", current_model)
                 if code_model != current_model:
                     logger.info(
@@ -1626,7 +1626,7 @@ class LucyAgent:
                 edit_attempts = getattr(self, "_edit_attempts", 0) + 1
                 self._edit_attempts = edit_attempts
                 if edit_attempts >= 2:
-                    from lucy.core.router import MODEL_TIERS
+                    from lucy.pipeline.router import MODEL_TIERS
                     frontier_model = MODEL_TIERS.get(
                         "frontier", current_model,
                     )
@@ -1648,7 +1648,7 @@ class LucyAgent:
             if partial:
                 response_text = partial
             else:
-                from lucy.core.humanize import humanize
+                from lucy.pipeline.humanize import humanize
                 response_text = await humanize(
                     "You couldn't find the answer. Ask the user "
                     "to clarify or rephrase what they need. Be "
@@ -1812,7 +1812,7 @@ class LucyAgent:
                 })
 
             # ── Duplicate mutating call protection ────────────────────
-            from lucy.core.edge_cases import should_deduplicate_tool_call
+            from lucy.pipeline.edge_cases import should_deduplicate_tool_call
             if should_deduplicate_tool_call(
                 name, params, self._recent_tool_calls
             ):
@@ -1834,7 +1834,7 @@ class LucyAgent:
             ]
 
             # ── External API rate limiting ────────────────────────────
-            from lucy.core.rate_limiter import get_rate_limiter
+            from lucy.infra.rate_limiter import get_rate_limiter
             limiter = get_rate_limiter()
             api_name = limiter.classify_api_from_tool(name, params)
             if api_name:
@@ -2618,7 +2618,7 @@ class LucyAgent:
         if not slack_client or not channel_id or not thread_ts:
             return
 
-        from lucy.core.humanize import pick
+        from lucy.pipeline.humanize import pick
         try:
             desc = pick("progress_mid")
             await slack_client.chat_postMessage(
@@ -2641,7 +2641,7 @@ class LucyAgent:
         Single LLM call (~$0.003) — only triggered when heuristics detect
         a likely error. Returns corrected text, or None if original is fine.
         """
-        from lucy.core.router import MODEL_TIERS
+        from lucy.pipeline.router import MODEL_TIERS
 
         correction_prompt = (
             f"A user sent this message:\n\"{user_message}\"\n\n"
@@ -3292,7 +3292,7 @@ def _describe_progress(
     Responses come from LLM-generated pools (pre-warmed at startup).
     Never expose tool names or internal machinery.
     """
-    from lucy.core.humanize import pick
+    from lucy.pipeline.humanize import pick
 
     if turn <= 2:
         base = pick("progress_early")

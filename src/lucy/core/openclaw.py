@@ -237,7 +237,7 @@ class OpenClawClient:
         )
         async def _do_request() -> OpenClawResponse:
             # ── Rate limit check before LLM call ─────────────────────
-            from lucy.core.rate_limiter import get_rate_limiter
+            from lucy.infra.rate_limiter import get_rate_limiter
             limiter = get_rate_limiter()
             acquired = await limiter.acquire_model(model, timeout=30.0)
             if not acquired:
@@ -364,7 +364,7 @@ def load_soul() -> str:
 
         soul_path = (
             pathlib.Path(__file__).parent.parent.parent.parent
-            / "assets"
+            / "prompts"
             / "SOUL.md"
         )
         if soul_path.exists():

@@ -30,7 +30,7 @@ from lucy.core.openclaw import (
 
 logger = structlog.get_logger()
 
-ASSETS = Path(__file__).parent.parent.parent.parent / "assets"
+PROMPTS = Path(__file__).parent.parent.parent.parent / "prompts"
 SUB_MAX_TURNS = 10
 SUB_MAX_PAYLOAD_CHARS = 80_000
 SUB_TOOL_RESULT_MAX_CHARS = 8_000
@@ -106,7 +106,7 @@ REGISTRY: dict[str, SubAgentSpec] = {
 
 def _load_soul_lite() -> str:
     """Load SOUL_LITE.md for sub-agent system prompts."""
-    path = ASSETS / "SOUL_LITE.md"
+    path = PROMPTS / "SOUL_LITE.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
     return (
@@ -118,7 +118,7 @@ def _load_soul_lite() -> str:
 def _build_sub_system_prompt(spec: SubAgentSpec) -> str:
     """Build the system prompt for a sub-agent: SOUL_LITE + task-specific."""
     soul_lite = _load_soul_lite()
-    task_path = ASSETS / spec.system_prompt_file
+    task_path = PROMPTS / spec.system_prompt_file
     task_prompt = ""
     if task_path.exists():
         task_prompt = task_path.read_text(encoding="utf-8")

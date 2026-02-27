@@ -77,12 +77,6 @@ async def resolve_pending_action(
     return None
 
 
-def get_pending_action(action_id: str) -> dict[str, Any] | None:
-    """Retrieve a pending action without resolving it."""
-    _cleanup_expired()
-    return _pending_actions.get(action_id)
-
-
 def _cleanup_expired() -> None:
     """Remove expired pending actions."""
     now = time.monotonic()

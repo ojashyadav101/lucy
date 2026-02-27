@@ -255,7 +255,7 @@ class TestEdgeCaseHandlers:
     # --- Test P: status query detection ---
     def test_p_status_query_detection(self):
         """is_status_query detects various status patterns."""
-        from lucy.core.edge_cases import is_status_query
+        from lucy.pipeline.edge_cases import is_status_query
 
         assert is_status_query("what are you working on?")
         assert is_status_query("are you busy?")
@@ -268,7 +268,7 @@ class TestEdgeCaseHandlers:
     # --- Test Q: task cancellation detection ---
     def test_q_cancellation_detection(self):
         """is_task_cancellation detects cancellation patterns."""
-        from lucy.core.edge_cases import is_task_cancellation
+        from lucy.pipeline.edge_cases import is_task_cancellation
 
         assert is_task_cancellation("cancel that")
         assert is_task_cancellation("never mind")
@@ -280,7 +280,7 @@ class TestEdgeCaseHandlers:
     # --- Test R: tool idempotency classification ---
     def test_r_tool_idempotency(self):
         """classify_tool_idempotency correctly labels tools."""
-        from lucy.core.edge_cases import classify_tool_idempotency
+        from lucy.pipeline.edge_cases import classify_tool_idempotency
 
         assert classify_tool_idempotency("GITHUB_GET_REPO") == "idempotent"
         assert classify_tool_idempotency("LINEAR_LIST_ISSUES") == "idempotent"
@@ -291,7 +291,7 @@ class TestEdgeCaseHandlers:
     # --- Test S: duplicate mutating call blocked ---
     def test_s_duplicate_dedup(self):
         """should_deduplicate_tool_call blocks identical mutating calls."""
-        from lucy.core.edge_cases import should_deduplicate_tool_call
+        from lucy.pipeline.edge_cases import should_deduplicate_tool_call
 
         now = time.monotonic()
         recent = [("GITHUB_CREATE_ISSUE", {"title": "Bug"}, now)]
@@ -315,7 +315,7 @@ class TestEdgeCaseHandlers:
     # --- Test T: graceful degradation messages ---
     def test_t_degradation_messages(self):
         """get_degradation_message returns warm messages for each type."""
-        from lucy.core.edge_cases import (
+        from lucy.pipeline.edge_cases import (
             classify_error_for_degradation,
             get_degradation_message,
         )
@@ -346,7 +346,7 @@ class TestRound3Regression:
     # --- Regression 1: fast path still works ---
     def test_regression_fast_path(self):
         """Fast path still handles greetings."""
-        from lucy.core.fast_path import evaluate_fast_path
+        from lucy.pipeline.fast_path import evaluate_fast_path
 
         result = evaluate_fast_path("hello!", thread_depth=0)
         assert result.is_fast
@@ -354,7 +354,7 @@ class TestRound3Regression:
     # --- Regression 2: rate limiter still works ---
     def test_regression_rate_limiter(self):
         """Rate limiter still classifies APIs."""
-        from lucy.core.rate_limiter import get_rate_limiter
+        from lucy.infra.rate_limiter import get_rate_limiter
 
         limiter = get_rate_limiter()
         assert limiter.classify_api_from_tool("GOOGLECALENDAR_LIST_EVENTS", {}) == "google_calendar"
@@ -362,7 +362,7 @@ class TestRound3Regression:
     # --- Regression 3: request queue metrics ---
     def test_regression_request_queue(self):
         """Request queue metrics still accessible."""
-        from lucy.core.request_queue import get_request_queue
+        from lucy.infra.request_queue import get_request_queue
 
         q = get_request_queue()
         metrics = q.metrics
@@ -371,7 +371,7 @@ class TestRound3Regression:
     # --- Regression 4: router classification ---
     def test_regression_router(self):
         """Router still classifies intents."""
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         route = classify_and_route("help me write a Python script")
         assert route.tier in ("fast", "default", "code", "frontier")

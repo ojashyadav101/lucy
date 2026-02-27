@@ -153,19 +153,6 @@ async def list_categories(ws: WorkspaceFS) -> list[str]:
     return [e.rstrip("/") for e in entries if e.endswith("/")]
 
 
-async def list_snapshots(
-    ws: WorkspaceFS,
-    category: str,
-    limit: int = 30,
-) -> list[str]:
-    """List available snapshot dates for a category (newest first)."""
-    entries = await ws.list_dir(f"data/{category}")
-    json_files = sorted(
-        [e for e in entries if e.endswith(".json")], reverse=True
-    )
-    return json_files[:limit]
-
-
 def _extract_numeric(data: Any, key: str) -> float | None:
     """Extract a numeric value from nested data using dot notation.
 

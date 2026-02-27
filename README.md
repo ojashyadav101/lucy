@@ -9,24 +9,31 @@ Lucy doesn't just answer questions — she monitors channels, discovers workflow
 ```
 Slack ←→ Slack Bolt (Socket Mode)
               ↓
+         Pipeline (pipeline/)
+         ├── fast_path.py    — shortcircuit greetings / status checks
+         ├── router.py       — classify intent, select model tier
+         ├── prompt.py       — build system prompt (SOUL + skills)
+         ├── output.py       — sanitize & format LLM output
+         └── humanize.py     — warm user-facing messages
+              ↓
          LucyAgent (core/agent.py)
-         ├── System Prompt (SOUL.md + SYSTEM_PROMPT.md + live skills)
-         ├── OpenClaw LLM Gateway (core/openclaw.py)
-         ├── Workspace Filesystem (workspace/)
-         │   ├── skills/    — SKILL.md knowledge files
-         │   ├── crons/     — proactive task definitions + LEARNINGS.md
-         │   ├── logs/      — daily activity logs
-         │   ├── data/      — JSON snapshots for trend detection
-         │   ├── scripts/   — Python scripts for execution
+         ├── supervisor.py   — monitor progress, replan, escalate
+         ├── sub_agents.py   — delegate to specialized sub-agents
+         ├── task_manager.py  — background task lifecycle
+         └── openclaw.py     — LLM API client (OpenRouter-compatible)
+              ↓
+         Workspace (workspace/)
+         │   ├── skills/     — SKILL.md knowledge files
+         │   ├── crons/      — proactive task definitions + LEARNINGS.md
+         │   ├── logs/       — daily activity logs
+         │   ├── data/       — JSON snapshots for trend detection
          │   └── team/ company/ — organizational context
-         ├── Composio Meta-Tools (integrations/)
-         │   └── 5 tools → 10,000+ actions (Gmail, Calendar, GitHub, ...)
-         ├── Code Executor (workspace/executor.py)
-         │   └── Composio sandbox → local fallback
-         └── Cron Scheduler (crons/scheduler.py)
-             ├── Heartbeat (4x/day weekdays)
-             ├── Workflow Discovery (Mon & Thu)
-             └── Channel Introductions (first 3 days)
+              ↓
+         Tools & Integrations
+         ├── tools/          — file generation, web search, email, spaces
+         ├── integrations/   — Composio SDK, 10,000+ actions
+         ├── spaces/         — web app builder (Vercel + Convex)
+         └── crons/          — APScheduler + heartbeat monitoring
 ```
 
 ## Project Structure
@@ -34,55 +41,89 @@ Slack ←→ Slack Bolt (Socket Mode)
 ```
 lucy/
 ├── src/lucy/
-│   ├── app.py               # FastAPI + Slack Bolt + cron startup
-│   ├── config.py             # Pydantic Settings (env vars + keys.json)
+│   ├── app.py               — FastAPI + Slack Bolt entry point
+│   ├── config.py             — Pydantic Settings (env vars)
 │   │
-│   ├── core/                 # Agent + LLM
-│   │   ├── agent.py          # LucyAgent — single run() entry point
-│   │   ├── openclaw.py       # OpenClaw HTTP client (OpenAI-compatible)
-│   │   ├── prompt.py         # System prompt builder (SOUL + skills)
-│   │   └── types.py          # Shared dataclasses
+│   ├── core/                 — Agent orchestration (5 files)
+│   │   ├── agent.py          — LucyAgent, main run() entry point
+│   │   ├── supervisor.py     — progress monitoring and replanning
+│   │   ├── task_manager.py   — background task lifecycle
+│   │   ├── sub_agents.py     — sub-agent dispatch
+│   │   └── openclaw.py       — LLM API client
 │   │
-│   ├── slack/                # Slack interface
-│   │   ├── handlers.py       # Event/command handlers → agent.run()
-│   │   └── middleware.py     # Workspace/user/channel resolution
+│   ├── pipeline/             — Message routing & processing (6 files)
+│   │   ├── router.py         — intent classification, model tier selection
+│   │   ├── fast_path.py      — quick-response shortcircuit (<500ms)
+│   │   ├── edge_cases.py     — concurrency & interrupt handling
+│   │   ├── prompt.py         — system prompt builder
+│   │   ├── output.py         — output sanitization & formatting
+│   │   └── humanize.py       — warm user-facing message generation
 │   │
-│   ├── workspace/            # Filesystem knowledge layer
-│   │   ├── filesystem.py     # WorkspaceFS (read/write/search/copy)
-│   │   ├── skills.py         # SKILL.md parser and manager
-│   │   ├── onboarding.py     # Day 1 workspace setup
-│   │   ├── activity_log.py   # Daily activity logs for crons
-│   │   ├── slack_reader.py   # Slack message fetcher for crons
-│   │   ├── executor.py       # Code execution (Composio sandbox + local)
-│   │   └── snapshots.py      # JSON data persistence for trends
+│   ├── infra/                — Infrastructure utilities (3 files)
+│   │   ├── rate_limiter.py   — token bucket rate limiting
+│   │   ├── request_queue.py  — priority request queuing
+│   │   └── trace.py          — request-scoped tracing
 │   │
-│   ├── crons/                # Proactivity engine
-│   │   └── scheduler.py      # APScheduler: load task.json, fire agent
+│   ├── slack/                — Slack API & Block Kit (7 files)
+│   │   ├── handlers.py       — event/command handlers → agent.run()
+│   │   ├── middleware.py     — workspace/user/channel resolution
+│   │   ├── blockkit.py       — Block Kit message builder
+│   │   ├── rich_output.py    — enhanced formatting
+│   │   ├── hitl.py           — human-in-the-loop approvals
+│   │   └── reactions.py      — emoji reaction management
 │   │
-│   ├── integrations/         # Composio SDK
-│   │   └── composio_client.py # 5 meta-tools + OAuth + execution
+│   ├── workspace/            — Filesystem memory & skills (12 files)
+│   │   ├── filesystem.py     — WorkspaceFS (read/write/search)
+│   │   ├── skills.py         — SKILL.md parser and manager
+│   │   ├── memory.py         — session memory management
+│   │   ├── onboarding.py     — workspace setup
+│   │   ├── executor.py       — code execution (sandbox + local)
+│   │   ├── snapshots.py      — JSON data persistence for trends
+│   │   └── ...               — activity_log, slack_reader, timezone, etc.
 │   │
-│   └── db/                   # Database
-│       ├── models.py         # SQLAlchemy ORM models
-│       └── session.py        # Async session management
+│   ├── crons/                — Scheduled tasks & heartbeat (3 files)
+│   │   ├── scheduler.py      — APScheduler cron management
+│   │   └── heartbeat.py      — condition-based monitoring
+│   │
+│   ├── integrations/         — External service clients (16 files)
+│   │   ├── composio_client.py — Composio SDK (10,000+ actions)
+│   │   ├── custom_wrappers/  — Clerk, Polar.sh, etc.
+│   │   └── ...               — email, search, MCP, OpenAPI, gateway
+│   │
+│   ├── tools/                — Agent tool implementations (5 files)
+│   │   ├── file_generator.py — PDF, Excel, CSV generation
+│   │   ├── web_search.py     — grounded web search
+│   │   ├── spaces.py         — Spaces app tools
+│   │   └── email_tools.py    — email send/read tools
+│   │
+│   ├── spaces/               — Web app platform (6 files)
+│   │   ├── platform.py       — init, deploy, manage apps
+│   │   ├── vercel_api.py     — Vercel deployment API
+│   │   └── convex_api.py     — Convex backend API
+│   │
+│   └── db/                   — Database (3 files)
+│       ├── models.py         — SQLAlchemy ORM models
+│       └── session.py        — async session management
 │
-├── assets/
-│   ├── SOUL.md               # Personality and tone
-│   └── SYSTEM_PROMPT.md      # Structured system prompt template
+├── prompts/                  — LLM prompt templates
+│   ├── SOUL.md               — personality and operating principles
+│   ├── SYSTEM_CORE.md        — core system instructions
+│   ├── SYSTEM_PROMPT.md      — structured prompt template
+│   ├── modules/              — intent-specific prompt sections
+│   └── sub_agents/           — sub-agent system prompts
 │
-├── workspace_seeds/          # Templates seeded into new workspaces
-│   ├── skills/               # 16 platform skill SKILL.md files
-│   └── crons/                # Default cron task.json (heartbeat, etc.)
+├── workspace_seeds/          — Templates seeded into new workspaces
+│   ├── skills/               — 17 platform skill files
+│   └── crons/                — default cron task.json configs
 │
-├── reference/viktor/         # Viktor workspace export (read-only)
-├── docs/                     # Planning documents
-├── scripts/                  # Utilities (run.py, init_db.py)
-├── tests/                    # Test suite
-├── migrations/               # Alembic database migrations
-├── .cursor/rules/            # IDE rules for consistent development
-├── docker-compose.yml        # PostgreSQL
-├── pyproject.toml            # Dependencies and tooling
-└── .env.example              # Environment variable template
+├── docs/                     — Planning and reference documents
+├── scripts/                  — run.py, init_db.py
+├── tests/                    — test suite
+├── migrations/               — Alembic database migrations
+├── templates/                — app starter templates
+├── docker-compose.yml        — PostgreSQL
+├── pyproject.toml            — dependencies and tooling
+└── .env.example              — environment variable template
 ```
 
 ## Quick Start

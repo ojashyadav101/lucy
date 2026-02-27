@@ -1,12 +1,6 @@
-"""Filesystem-based workspace: skills, memory, activity logs, execution, snapshots, timezone, Slack sync."""
+"""Filesystem-based workspace: skills, memory, activity logs, snapshots, timezone, Slack sync."""
 
 from lucy.workspace.activity_log import get_recent_activity, log_activity
-from lucy.workspace.executor import (
-    ExecutionResult,
-    execute_bash,
-    execute_python,
-    execute_workspace_script,
-)
 from lucy.workspace.filesystem import WorkspaceFS, get_workspace
 from lucy.workspace.onboarding import ensure_workspace, onboard_workspace
 from lucy.workspace.skills import (
@@ -43,10 +37,6 @@ __all__ = [
     "write_skill",
     "get_recent_activity",
     "log_activity",
-    "ExecutionResult",
-    "execute_python",
-    "execute_bash",
-    "execute_workspace_script",
     "save_snapshot",
     "load_latest",
     "compute_delta",

@@ -109,21 +109,21 @@ class TestNoHardcodedErrors:
 
 class TestOutputSanitizer:
     def test_strips_internal_paths(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "I created /home/user/company/SKILL.md for you."
         result = process_output_sync(text)
         assert "/home/user/" not in result
 
     def test_strips_workspace_paths(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "Updated /workspace/test/skills/SKILL.md"
         result = process_output_sync(text)
         assert "/workspace/" not in result
 
     def test_strips_composio_tool_names(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "I used COMPOSIO_SEARCH_TOOLS to find that."
         result = process_output_sync(text)
@@ -131,7 +131,7 @@ class TestOutputSanitizer:
         assert "COMPOSIO" not in result
 
     def test_strips_composio_brand(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "Connect via Composio to authorize."
         result = process_output_sync(text)
@@ -139,28 +139,28 @@ class TestOutputSanitizer:
         assert "composio" not in result.lower()
 
     def test_strips_openrouter(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "Using OpenRouter for model access."
         result = process_output_sync(text)
         assert "OpenRouter" not in result
 
     def test_strips_allcaps_tool_names(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "GOOGLECALENDAR_CREATE_EVENT was called."
         result = process_output_sync(text)
         assert "GOOGLECALENDAR_CREATE_EVENT" not in result
 
     def test_humanizes_known_tools(self) -> None:
-        from lucy.core.output import _sanitize
+        from lucy.pipeline.output import _sanitize
 
         text = "I used GOOGLECALENDAR_CREATE_EVENT to help."
         result = _sanitize(text)
         assert "schedule a meeting" in result
 
     def test_strips_skill_filenames(self) -> None:
-        from lucy.core.output import process_output_sync
+        from lucy.pipeline.output import process_output_sync
 
         text = "I saved it to SKILL.md and LEARNINGS.md"
         result = process_output_sync(text)
@@ -174,25 +174,25 @@ class TestOutputSanitizer:
 
 class TestMarkdownToSlack:
     def test_bold_conversion(self) -> None:
-        from lucy.core.output import _convert_markdown_to_slack
+        from lucy.pipeline.output import _convert_markdown_to_slack
 
         assert _convert_markdown_to_slack("**bold**") == "*bold*"
 
     def test_heading_conversion(self) -> None:
-        from lucy.core.output import _convert_markdown_to_slack
+        from lucy.pipeline.output import _convert_markdown_to_slack
 
         result = _convert_markdown_to_slack("### My Heading")
         assert "*My Heading*" in result
         assert "###" not in result
 
     def test_link_conversion(self) -> None:
-        from lucy.core.output import _convert_markdown_to_slack
+        from lucy.pipeline.output import _convert_markdown_to_slack
 
         result = _convert_markdown_to_slack("[Click here](https://example.com)")
         assert "<https://example.com|Click here>" in result
 
     def test_table_conversion(self) -> None:
-        from lucy.core.output import _convert_markdown_to_slack
+        from lucy.pipeline.output import _convert_markdown_to_slack
 
         table = (
             "| Name | Status |\n"
@@ -211,35 +211,35 @@ class TestMarkdownToSlack:
 
 class TestToneValidator:
     def test_replaces_wasnt_able(self) -> None:
-        from lucy.core.output import _validate_tone
+        from lucy.pipeline.output import _validate_tone
 
         text = "I wasn't able to complete your request."
         result = _validate_tone(text)
         assert "wasn't able to" not in result
 
     def test_replaces_try_rephrasing(self) -> None:
-        from lucy.core.output import _validate_tone
+        from lucy.pipeline.output import _validate_tone
 
         text = "Could you try rephrasing your question?"
         result = _validate_tone(text)
         assert "try rephrasing" not in result
 
     def test_replaces_hit_a_snag(self) -> None:
-        from lucy.core.output import _validate_tone
+        from lucy.pipeline.output import _validate_tone
 
         text = "I hit a snag trying to do that."
         result = _validate_tone(text)
         assert "hit a snag" not in result
 
     def test_replaces_something_went_wrong(self) -> None:
-        from lucy.core.output import _validate_tone
+        from lucy.pipeline.output import _validate_tone
 
         text = "Something went wrong with the request."
         result = _validate_tone(text)
         assert "Something went wrong" not in result
 
     def test_clean_text_passes_through(self) -> None:
-        from lucy.core.output import _validate_tone
+        from lucy.pipeline.output import _validate_tone
 
         text = "Your meeting is scheduled for 3pm."
         result = _validate_tone(text)
@@ -256,7 +256,7 @@ class TestDynamicEnvInjection:
         from pathlib import Path
         from unittest.mock import AsyncMock, PropertyMock
 
-        from lucy.core.prompt import build_system_prompt
+        from lucy.pipeline.prompt import build_system_prompt
         from lucy.workspace.filesystem import WorkspaceFS
 
         ws = AsyncMock(spec=WorkspaceFS)
@@ -278,7 +278,7 @@ class TestDynamicEnvInjection:
         from pathlib import Path
         from unittest.mock import AsyncMock, PropertyMock
 
-        from lucy.core.prompt import build_system_prompt
+        from lucy.pipeline.prompt import build_system_prompt
         from lucy.workspace.filesystem import WorkspaceFS
 
         ws = AsyncMock(spec=WorkspaceFS)
@@ -342,19 +342,19 @@ class TestToolPreFiltering:
 
 class TestModelRouting:
     def test_greeting_routes_to_fast(self) -> None:
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         result = classify_and_route("Hi")
         assert result.tier == "fast"
 
     def test_code_routes_to_code(self) -> None:
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         result = classify_and_route("Build me a calculator script")
         assert result.tier == "code"
 
     def test_research_routes_to_frontier(self) -> None:
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         result = classify_and_route(
             "Research the top 10 competitors in the AI agent space and "
@@ -363,7 +363,7 @@ class TestModelRouting:
         assert result.tier == "frontier"
 
     def test_general_routes_to_default(self) -> None:
-        from lucy.core.router import classify_and_route
+        from lucy.pipeline.router import classify_and_route
 
         result = classify_and_route("Send an email to John about the meeting")
         assert result.tier == "default"

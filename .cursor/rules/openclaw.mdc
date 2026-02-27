@@ -25,7 +25,7 @@ alwaysApply: false
 - NOT in the critical LLM chat path.
 
 ## System Prompt Assembly
-- System prompt is built in `src/lucy/core/prompt.py` by combining:
+- System prompt is built in `src/lucy/pipeline/prompt.py` by combining:
   1. `assets/SOUL.md` — personality and tone
   2. `assets/SYSTEM_PROMPT.md` — structured instructions (skills, rules, approach)
   3. Dynamic skill descriptions from the workspace

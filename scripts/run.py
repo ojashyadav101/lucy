@@ -116,7 +116,7 @@ def run_socket_mode() -> None:
         logger.info("bolt_app_created", middlewares=3)
 
         # Pre-warm LLM message pools (non-blocking background task)
-        from lucy.core.humanize import initialize_pools
+        from lucy.pipeline.humanize import initialize_pools
         asyncio.create_task(initialize_pools())
 
         # Start cron scheduler — discovers and schedules all workspace crons

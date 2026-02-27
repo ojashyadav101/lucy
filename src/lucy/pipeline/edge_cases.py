@@ -268,7 +268,7 @@ def get_degradation_message(error_type: str) -> str:
     Draws from LLM-generated message pools (pre-warmed at startup).
     Never exposes internal details — just warm, actionable framing.
     """
-    from lucy.core.humanize import pick
+    from lucy.pipeline.humanize import pick
 
     category = _ERROR_TYPE_TO_POOL.get(error_type, "error_generic")
     return pick(category)

@@ -185,7 +185,7 @@ class TaskManager:
 
         if slack_client:
             try:
-                from lucy.core.humanize import pick
+                from lucy.pipeline.humanize import pick
                 ack_result = await slack_client.chat_postMessage(
                     channel=channel_id,
                     thread_ts=thread_ts,
@@ -269,7 +269,7 @@ class TaskManager:
                 task.completed_at = time.monotonic()
                 if slack_client:
                     try:
-                        from lucy.core.humanize import pick
+                        from lucy.pipeline.humanize import pick
                         await slack_client.chat_postMessage(
                             channel=channel_id,
                             thread_ts=thread_ts,

@@ -45,16 +45,3 @@ async def get_recent_activity(ws: WorkspaceFS, days: int = 1) -> str:
             lines.append(content)
 
     return "\n".join(lines) if lines else "(No recent activity)"
-
-
-async def get_last_heartbeat_time(ws: WorkspaceFS) -> str | None:
-    """Read the last heartbeat timestamp from state."""
-    state = await ws.read_state()
-    return state.get("last_heartbeat_at")
-
-
-async def set_last_heartbeat_time(ws: WorkspaceFS) -> None:
-    """Record that a heartbeat just ran."""
-    await ws.update_state({
-        "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
-    })

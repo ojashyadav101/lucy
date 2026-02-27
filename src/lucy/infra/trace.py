@@ -8,7 +8,7 @@ per-thread JSONL file for later analysis.
 
 Usage::
 
-    from lucy.core.trace import Trace
+    from lucy.infra.trace import Trace
 
     trace = Trace.start("abc123")
     async with trace.span("llm_call", model="minimax"):

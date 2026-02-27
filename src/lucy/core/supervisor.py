@@ -113,7 +113,7 @@ async def create_plan(
         return None
 
     from lucy.core.openclaw import ChatConfig, get_openclaw_client
-    from lucy.core.router import MODEL_TIERS
+    from lucy.pipeline.router import MODEL_TIERS
 
     model = MODEL_TIERS.get("fast", settings.model_tier_fast)
     client = await get_openclaw_client()
@@ -228,7 +228,7 @@ async def evaluate_progress(
     The prompt is kept under 500 tokens for minimal cost.
     """
     from lucy.core.openclaw import ChatConfig, get_openclaw_client
-    from lucy.core.router import MODEL_TIERS
+    from lucy.pipeline.router import MODEL_TIERS
 
     model = MODEL_TIERS.get("fast", settings.model_tier_fast)
 

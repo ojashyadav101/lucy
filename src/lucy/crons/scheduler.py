@@ -535,7 +535,7 @@ class CronScheduler:
     async def _run_humanize_refresh(self) -> None:
         """Regenerate LLM message pools."""
         try:
-            from lucy.core.humanize import refresh_pools
+            from lucy.pipeline.humanize import refresh_pools
             await refresh_pools()
         except Exception as e:
             logger.error("humanize_pool_refresh_failed", error=str(e))
@@ -1090,7 +1090,7 @@ class CronScheduler:
                 except json.JSONDecodeError:
                     pass  # Fallback to plain text processing if invalid JSON
 
-            from lucy.core.output import process_output
+            from lucy.pipeline.output import process_output
             from lucy.slack.blockkit import text_to_blocks
             from lucy.slack.rich_output import enhance_blocks, format_links
 

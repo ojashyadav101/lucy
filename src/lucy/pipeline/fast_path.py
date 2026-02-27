@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from lucy.core.humanize import pick
+from lucy.pipeline.humanize import pick
 
 logger = structlog.get_logger()
 

@@ -28,11 +28,11 @@ from lucy.workspace.skills import (
 
 logger = structlog.get_logger()
 
-_ASSETS_DIR = Path(__file__).parent.parent.parent.parent / "assets"
-_SOUL_PATH = _ASSETS_DIR / "SOUL.md"
-_PROMPT_TEMPLATE_PATH = _ASSETS_DIR / "SYSTEM_PROMPT.md"
-_SYSTEM_CORE_PATH = _ASSETS_DIR / "SYSTEM_CORE.md"
-_PROMPT_MODULES_DIR = _ASSETS_DIR / "prompt_modules"
+_PROMPTS_DIR = Path(__file__).parent.parent.parent.parent / "prompts"
+_SOUL_PATH = _PROMPTS_DIR / "SOUL.md"
+_PROMPT_TEMPLATE_PATH = _PROMPTS_DIR / "SYSTEM_PROMPT.md"
+_SYSTEM_CORE_PATH = _PROMPTS_DIR / "SYSTEM_CORE.md"
+_PROMPT_MODULES_DIR = _PROMPTS_DIR / "modules"
 
 # Separator used between prompt sections
 _SECTION_SEP = "\n\n---\n\n"
@@ -259,7 +259,3 @@ async def build_system_prompt(
         prompt_modules=prompt_modules or [],
     )
     return full_prompt
-
-
-def reset_caches() -> None:
-    """No-op. Prompt files are re-read on every call now."""
