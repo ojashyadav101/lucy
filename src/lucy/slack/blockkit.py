@@ -59,7 +59,7 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
         header_match = _HEADER_RE.match(stripped)
         if header_match and len(stripped) < 120 and not _BULLET_RE.match(stripped):
             heading = header_match.group(1).strip()
-            if not any(c in heading for c in ["—", "•", ":"]):
+            if heading and not any(c in heading for c in ["—", "•", ":"]):
                 _flush_section()
                 blocks.append({
                     "type": "header",

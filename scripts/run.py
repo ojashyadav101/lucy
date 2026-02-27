@@ -119,6 +119,11 @@ def run_socket_mode() -> None:
         from lucy.core.humanize import initialize_pools
         asyncio.create_task(initialize_pools())
 
+        # Start cron scheduler — discovers and schedules all workspace crons
+        from lucy.crons.scheduler import get_scheduler
+        scheduler = get_scheduler(slack_client=web_client)
+        await scheduler.start()
+
         handler = AsyncSocketModeHandler(bolt, settings.slack_app_token)
         await handler.start_async()
     

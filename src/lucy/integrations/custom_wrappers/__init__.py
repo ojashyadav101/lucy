@@ -87,7 +87,8 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
                 continue
 
             prefixed_name = f"lucy_custom_{original_name}"
-            description = tool.get("description", f"{original_name} from {meta.get('service_name', slug)}")
+            raw_desc = tool.get("description", f"{original_name} from {meta.get('service_name', slug)}")
+            description = f"{raw_desc} (Call this tool directly — do NOT use COMPOSIO_MULTI_EXECUTE_TOOL for this.)"
             parameters = tool.get("parameters", {"type": "object", "properties": {}})
 
             tool_defs.append({

@@ -136,6 +136,9 @@ class CronScheduler:
         self._schedule_humanize_pool_refresh()
         total_jobs += 1
 
+        self._schedule_heartbeat_loop()
+        total_jobs += 1
+
         self.scheduler.start()
         self._running = True
         logger.info("cron_scheduler_started", total_jobs=total_jobs)
@@ -537,6 +540,33 @@ class CronScheduler:
         except Exception as e:
             logger.error("humanize_pool_refresh_failed", error=str(e))
 
+    def _schedule_heartbeat_loop(self) -> None:
+        """Run heartbeat condition evaluations every 30 seconds."""
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        job_id = "_global:heartbeat_eval"
+        try:
+            self.scheduler.add_job(
+                self._run_heartbeat_eval,
+                trigger=IntervalTrigger(seconds=30),
+                id=job_id,
+                name="Heartbeat evaluation loop",
+                replace_existing=True,
+            )
+            logger.info("heartbeat_eval_loop_scheduled")
+        except Exception as e:
+            logger.error("heartbeat_eval_schedule_failed", error=str(e))
+
+    async def _run_heartbeat_eval(self) -> None:
+        """Evaluate all due heartbeat monitors."""
+        try:
+            from lucy.crons.heartbeat import evaluate_due_heartbeats
+            evaluated = await evaluate_due_heartbeats(self.slack_client)
+            if evaluated > 0:
+                logger.debug("heartbeat_eval_complete", evaluated=evaluated)
+        except Exception as e:
+            logger.warning("heartbeat_eval_failed", error=str(e))
+
     def _schedule_slack_sync(self, workspace_id: str) -> None:
         """Register the lightweight Slack message sync cron for a workspace."""
         job_id = f"{workspace_id}:_slack_sync"
@@ -686,6 +716,8 @@ class CronScheduler:
             "- If the task requires data, use your tools to fetch it\n"
             "- If the task has nothing to report, return SKIP (literally "
             "the word SKIP and nothing else)\n"
+            "- For heartbeat check-ins specifically, return HEARTBEAT_OK "
+            "if everything looks fine and nothing needs action\n"
             "- Keep your response concise and actionable"
         )
 
@@ -788,8 +820,15 @@ class CronScheduler:
                     logger.info("cron_dependency_not_met_no_log", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
                     return
                     
-                from datetime import datetime, timezone
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                from datetime import datetime, timezone as _tz
+                import zoneinfo as _zi
+                cron_tz = _tz.utc
+                if cron.timezone:
+                    try:
+                        cron_tz = _zi.ZoneInfo(cron.timezone)
+                    except Exception:
+                        pass
+                today = datetime.now(cron_tz).strftime("%Y-%m-%d")
                 
                 ran_today = False
                 for line in reversed(dep_log.splitlines()):
@@ -866,13 +905,27 @@ class CronScheduler:
                     if not target_script.exists():
                         raise RuntimeError(f"Script file not found: {target_script}")
                     
+                    _SCRIPT_TIMEOUT_SECONDS = 600
                     process = await asyncio.create_subprocess_exec(
                         "python3", str(target_script),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
-                        env={**os.environ, "WORKSPACE_ID": workspace_id}
+                        env={
+                            **os.environ,
+                            "WORKSPACE_ID": workspace_id,
+                            "WORKSPACE_ROOT": str(ws.root),
+                        },
                     )
-                    stdout, stderr = await process.communicate()
+                    try:
+                        stdout, stderr = await asyncio.wait_for(
+                            process.communicate(),
+                            timeout=_SCRIPT_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        raise RuntimeError(
+                            f"Script timed out after {_SCRIPT_TIMEOUT_SECONDS}s"
+                        )
                     if process.returncode != 0:
                         raise RuntimeError(f"Script failed (exit {process.returncode}): {stderr.decode()}")
                     
@@ -884,6 +937,7 @@ class CronScheduler:
                         workspace_id=workspace_id,
                         channel_id=delivery_target,
                         user_slack_id=cron.requesting_user_id or None,
+                        is_cron_execution=True,
                     )
                     response = await agent.run(
                         message=instruction,
@@ -892,7 +946,13 @@ class CronScheduler:
                     )
 
                 elapsed_ms = round((_time.monotonic() - t0) * 1000)
-                skip = (response.strip().upper() == "SKIP" if response else True)
+                _upper = response.strip().upper() if response else ""
+                skip = (
+                    not response
+                    or _upper == "SKIP"
+                    or _upper == "HEARTBEAT_OK"
+                    or _upper.startswith("HEARTBEAT_OK")
+                )
 
                 if not skip and response and response.strip() and delivery_target and self.slack_client:
                     await self._deliver_to_slack(delivery_target, response)
@@ -923,7 +983,10 @@ class CronScheduler:
                 # --- Phase 1.3: Max Runs / Self-deleting ---
                 if cron.max_runs > 0:
                     log_content = await ws.read_file(f"crons/{cron_dir_name}/execution.log")
-                    run_count = sum(1 for line in log_content.splitlines() if line.startswith("## "))
+                    run_count = sum(
+                        1 for line in log_content.splitlines()
+                        if line.startswith("## ") and "FAILED" not in line
+                    )
                     if run_count >= cron.max_runs:
                         logger.info("cron_max_runs_reached", workspace_id=workspace_id, cron_path=cron.path)
                         await self.delete_cron(workspace_id, cron.path)
@@ -1028,19 +1091,31 @@ class CronScheduler:
                     pass  # Fallback to plain text processing if invalid JSON
 
             from lucy.core.output import process_output
-            from lucy.slack.rich_output import format_links
+            from lucy.slack.blockkit import text_to_blocks
+            from lucy.slack.rich_output import enhance_blocks, format_links
 
             formatted = await process_output(text)
             formatted = format_links(formatted)
 
-            await self.slack_client.chat_postMessage(
-                channel=channel,
-                text=formatted,
-            )
+            blocks = text_to_blocks(formatted)
+            blocks = enhance_blocks(blocks) if blocks else blocks
+
+            if blocks:
+                await self.slack_client.chat_postMessage(
+                    channel=channel,
+                    blocks=blocks,
+                    text=formatted[:200],
+                )
+            else:
+                await self.slack_client.chat_postMessage(
+                    channel=channel,
+                    text=formatted,
+                )
             logger.info(
                 "cron_result_delivered",
                 channel=channel,
                 text_length=len(formatted),
+                blocks=len(blocks) if blocks else 0,
             )
         except Exception as e:
             logger.warning(

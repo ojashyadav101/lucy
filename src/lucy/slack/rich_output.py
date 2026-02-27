@@ -117,8 +117,15 @@ def format_links(text: str) -> str:
 
         return f"<{url}|{domain}>"
 
-    return _RAW_URL_RE.sub(_replace_url, text)
+    text = _RAW_URL_RE.sub(_replace_url, text)
 
+    text = re.sub(
+        r"<(https?://[^|>]*composio\.dev[^|>]*)>",
+        r"<\1|Connect here>",
+        text,
+    )
+
+    return text
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ENHANCED BLOCK KIT
@@ -161,8 +168,18 @@ def should_split_response(text: str) -> bool:
     return len(text) > MAX_SINGLE_MESSAGE_CHARS
 
 
+def _is_inside_code_block(text: str, position: int) -> bool:
+    """Check if a position is inside an unclosed ``` code block."""
+    count = text[:position].count("```")
+    return count % 2 == 1
+
+
 def split_response(text: str) -> list[str]:
-    """Split a long response into chunks at natural break points."""
+    """Split a long response into chunks at natural break points.
+
+    Avoids splitting inside code blocks (``` ... ```) to preserve
+    formatting integrity.
+    """
     if len(text) <= MAX_SINGLE_MESSAGE_CHARS:
         return [text]
 
@@ -173,32 +190,26 @@ def split_response(text: str) -> list[str]:
         limit = MAX_SINGLE_MESSAGE_CHARS
         search_text = remaining[:limit]
 
-        split_idx = search_text.rfind("\n*")
-        if split_idx > limit * 0.3:
+        def _try_split(pattern: str, min_ratio: float) -> int:
+            idx = search_text.rfind(pattern)
+            if idx > limit * min_ratio and not _is_inside_code_block(remaining, idx):
+                return idx
+            return -1
+
+        split_idx = _try_split("\n*", 0.3)
+        if split_idx < 0:
+            split_idx = _try_split("\n---", 0.3)
+        if split_idx < 0:
+            split_idx = _try_split("\n\n", 0.3)
+        if split_idx < 0:
+            split_idx = _try_split("\n", 0.2)
+
+        if split_idx >= 0:
             chunks.append(remaining[:split_idx].rstrip())
             remaining = remaining[split_idx:].lstrip("\n")
-            continue
-
-        split_idx = search_text.rfind("\n---")
-        if split_idx > limit * 0.3:
-            chunks.append(remaining[:split_idx].rstrip())
-            remaining = remaining[split_idx:].lstrip("\n")
-            continue
-
-        split_idx = search_text.rfind("\n\n")
-        if split_idx > limit * 0.3:
-            chunks.append(remaining[:split_idx].rstrip())
-            remaining = remaining[split_idx:].lstrip("\n")
-            continue
-
-        split_idx = search_text.rfind("\n")
-        if split_idx > limit * 0.2:
-            chunks.append(remaining[:split_idx].rstrip())
-            remaining = remaining[split_idx:].lstrip("\n")
-            continue
-
-        chunks.append(remaining[:limit])
-        remaining = remaining[limit:]
+        else:
+            chunks.append(remaining[:limit])
+            remaining = remaining[limit:]
 
     if remaining.strip():
         chunks.append(remaining.strip())

@@ -162,7 +162,11 @@ async def generate_excel(
             ws = wb.create_sheet(title=sheet_name)
 
         for row_idx, row in enumerate(rows):
+            if not isinstance(row, (list, tuple)):
+                row = [row]
             for col_idx, value in enumerate(row):
+                if isinstance(value, (list, tuple, dict)):
+                    value = str(value)
                 cell = ws.cell(
                     row=row_idx + 1, column=col_idx + 1, value=value,
                 )
@@ -504,6 +508,48 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
+def _resolve_mangled_path(raw_path: str, ws_root: str) -> Path | None:
+    """Recover a valid workspace path when the LLM mangles it.
+
+    Common LLM mistakes:
+      - /home/user/src/App.tsx
+      - ...worktrees/lucy/rdj/[workspace]/src/App.tsx
+      - ...worktrees/lucy/rdj/workspace/src/App.tsx
+    """
+    import re
+
+    # Extract the relative filename from the path (e.g. "src/App.tsx")
+    rel_match = re.search(r"(src/.+\.tsx?)$", raw_path)
+    if not rel_match:
+        return None
+    relative = rel_match.group(1)
+
+    # workspace_root is already the top-level workspaces dir
+    spaces_root = Path(ws_root)
+    if not spaces_root.exists():
+        return None
+
+    newest: Path | None = None
+    newest_mtime = 0.0
+    for ws_dir in spaces_root.iterdir():
+        sp = ws_dir / "spaces"
+        if not sp.is_dir():
+            continue
+        for proj in sp.iterdir():
+            if not proj.is_dir():
+                continue
+            config = proj / "project.json"
+            if config.exists():
+                mtime = config.stat().st_mtime
+                if mtime > newest_mtime:
+                    newest_mtime = mtime
+                    newest = proj
+
+    if newest is None:
+        return None
+    return newest / relative
+
+
 async def execute_file_tool(
     tool_name: str,
     parameters: dict[str, Any],
@@ -523,13 +569,50 @@ async def execute_file_tool(
             content = parameters.get("content")
             if not path_str or content is None:
                 return {"error": "Missing required parameters: path, content"}
-            
+
             p = Path(path_str)
+
+            from lucy.config import settings
+            ws_root = str(settings.workspace_root)
+            resolved = str(p.resolve())
+
+            if not resolved.startswith(ws_root):
+                p = _resolve_mangled_path(path_str, ws_root)
+                if p is None:
+                    logger.warning(
+                        "file_write_rejected",
+                        original_path=path_str,
+                        reason="outside workspace, could not auto-correct",
+                    )
+                    return {
+                        "error": (
+                            f"Cannot write to {path_str} — path is invalid. "
+                            f"Use the exact app_tsx_path returned by "
+                            f"lucy_spaces_init."
+                        ),
+                    }
+                logger.info(
+                    "file_write_path_corrected",
+                    original=path_str,
+                    corrected=str(p),
+                )
+
+            logger.info(
+                "file_write_attempt",
+                path=str(p),
+                content_length=len(content) if content else 0,
+            )
+
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+            logger.info(
+                "file_write_success",
+                path=str(p),
+                chars=len(content),
+            )
             return {
-                "result": f"Successfully wrote {len(content)} characters to {path_str}",
-                "file_path": str(path_str),
+                "result": f"Successfully wrote {len(content)} characters to {p}",
+                "file_path": str(p),
             }
 
         elif tool_name == "lucy_edit_file":
@@ -589,6 +672,16 @@ async def execute_file_tool(
             sheets = parameters.get("sheets", {})
             if isinstance(sheets, str):
                 sheets = json.loads(sheets)
+            if isinstance(sheets, list):
+                converted: dict[str, list[list[Any]]] = {}
+                for i, item in enumerate(sheets):
+                    if isinstance(item, dict):
+                        name = item.get("name", item.get("sheet_name", f"Sheet{i+1}"))
+                        rows = item.get("rows", item.get("data", []))
+                        converted[name] = rows
+                    elif isinstance(item, list):
+                        converted[f"Sheet{i+1}"] = item
+                sheets = converted
             path = await generate_excel(
                 title=parameters["title"],
                 sheets=sheets,

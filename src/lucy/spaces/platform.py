@@ -55,7 +55,7 @@ async def init_app_project(
     1. Validate + slugify name
     2. Copy template to workspace
     3. Create Convex project + deployment
-    4. Create Vercel project + domain
+    4. Create Vercel project + domain + protection bypass
     5. Generate secrets + write .env.local
     6. Save project.json
     """
@@ -73,6 +73,7 @@ async def init_app_project(
     short_hash = secrets.token_hex(3)
     subdomain = f"{slug}-{short_hash}.{settings.spaces_domain}"
     project_secret = secrets.token_hex(32)
+    vercel_project_name = f"lucy-{slug}-{short_hash}"
 
     try:
         shutil.copytree(
@@ -101,8 +102,10 @@ async def init_app_project(
         deploy_key = deploy_key_result.get("deployKey", "")
 
         vercel = get_vercel_api()
-        vercel_result = await vercel.create_project(f"lucy-{slug}-{short_hash}")
+        vercel_result = await vercel.create_project(vercel_project_name)
         vercel_project_id = vercel_result["id"]
+
+        bypass_secret = await vercel.generate_protection_bypass(vercel_project_id)
 
         await vercel.add_domain(vercel_project_id, subdomain)
 
@@ -127,6 +130,8 @@ async def init_app_project(
             vercel_project_id=vercel_project_id,
             subdomain=subdomain,
             project_secret=project_secret,
+            vercel_project_name=vercel_project_name,
+            vercel_bypass_secret=bypass_secret,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         config.save(_project_config_path(workspace_id, slug))
@@ -153,16 +158,12 @@ async def deploy_app(
     workspace_id: str,
     environment: str = "preview",
 ) -> dict[str, Any]:
-    """Build and deploy a Lucy Spaces project.
-
-    Automatically runs bun install + vite build before uploading.
-    No manual build step required.
-    """
+    """Build, deploy, wait for readiness, and validate a Lucy Spaces project."""
     slug = _slugify(project_name)
     config_path = _project_config_path(workspace_id, slug)
 
     if not config_path.exists():
-        return {"success": False, "error": f"Project '{slug}' not found"}
+        return {"success": False, "error": f"Project \'{slug}\' not found"}
 
     config = SpaceProject.load(config_path)
     project_dir = _project_dir(workspace_id, slug)
@@ -178,33 +179,97 @@ async def deploy_app(
 
         vercel = get_vercel_api()
         target = "production" if environment == "production" else "preview"
+        deploy_name = config.vercel_project_name or f"lucy-{slug}"
         result = await vercel.deploy_directory(
             project_id=config.vercel_project_id,
             dist_dir=str(dist_dir),
-            project_name=f"lucy-{slug}",
+            project_name=deploy_name,
             target=target,
         )
 
+        deployment_id = result.get("id", "")
+        deploy_url = result.get("url", "")
+
+        ready_state = await _wait_for_deployment(vercel, deployment_id)
+        if ready_state != "READY":
+            error_msg = f"Deployment failed with state: {ready_state}"
+            logger.error("deployment_not_ready", state=ready_state, id=deployment_id)
+            return {"success": False, "error": error_msg}
+
         config.last_deployed_at = datetime.now(timezone.utc).isoformat()
-        config.vercel_deployment_url = result.get("url")
+        config.vercel_deployment_url = deploy_url
         config.save(config_path)
 
-        custom_url = f"https://{config.subdomain}"
-        vercel_url = result.get("url", "")
-        if vercel_url and not vercel_url.startswith("http"):
-            vercel_url = f"https://{vercel_url}"
+        public_url = config.public_url()
+
+        validation = await _validate_deployment(public_url)
+        if not validation["ok"]:
+            logger.warning(
+                "deployment_validation_failed",
+                url=public_url,
+                reason=validation.get("reason"),
+            )
+            return {
+                "success": True,
+                "url": public_url,
+                "deployment_id": deployment_id,
+                "environment": environment,
+                "validation_warning": validation.get("reason", ""),
+            }
 
         return {
             "success": True,
-            "url": vercel_url or custom_url,
-            "custom_domain": custom_url,
-            "deployment_id": result.get("id"),
+            "url": public_url,
+            "deployment_id": deployment_id,
             "environment": environment,
+            "validated": True,
         }
 
     except Exception as e:
         logger.error("spaces_deploy_failed", slug=slug, error=str(e))
         return {"success": False, "error": str(e)}
+
+
+async def _wait_for_deployment(
+    vercel: Any, deployment_id: str, max_wait: int = 60,
+) -> str:
+    """Poll Vercel until deployment reaches a terminal state."""
+    import asyncio
+
+    for _ in range(max_wait // 3):
+        try:
+            dep = await vercel.get_deployment(deployment_id)
+            state = dep.get("readyState", "UNKNOWN")
+            if state in ("READY", "ERROR", "CANCELED"):
+                return state
+        except Exception:
+            pass
+        await asyncio.sleep(3)
+
+    return "TIMEOUT"
+
+
+async def _validate_deployment(url: str) -> dict[str, Any]:
+    """Fetch the deployed URL and verify the app renders content."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                return {"ok": False, "reason": f"HTTP {resp.status_code}"}
+
+            body = resp.text
+            if len(body) < 100:
+                return {"ok": False, "reason": "Response too small"}
+
+            if "<script" not in body and "<div" not in body:
+                return {"ok": False, "reason": "No HTML content detected"}
+
+            return {"ok": True}
+
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
 
 
 async def _build_project(project_dir: Path) -> dict[str, Any]:
@@ -214,7 +279,8 @@ async def _build_project(project_dir: Path) -> dict[str, Any]:
     bun_path = Path.home() / ".bun" / "bin" / "bun"
     bun = str(bun_path) if bun_path.exists() else "bun"
 
-    env = {**os.environ, "PATH": f"{bun_path.parent}:{os.environ.get('PATH', '')}"}
+    path_env = os.environ.get("PATH", "")
+    env = {**os.environ, "PATH": f"{bun_path.parent}:{path_env}"}
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -268,12 +334,16 @@ async def list_apps(workspace_id: str) -> dict[str, Any]:
                 apps.append({
                     "name": config.name,
                     "slug": entry.name,
-                    "url": f"https://{config.subdomain}",
+                    "url": config.public_url(),
                     "created_at": config.created_at,
                     "last_deployed": config.last_deployed_at,
                 })
             except Exception:
-                apps.append({"name": entry.name, "slug": entry.name, "error": "corrupt config"})
+                apps.append({
+                    "name": entry.name,
+                    "slug": entry.name,
+                    "error": "corrupt config",
+                })
 
     return {"apps": apps, "count": len(apps)}
 
@@ -294,7 +364,7 @@ async def get_app_status(
         "name": config.name,
         "slug": slug,
         "description": config.description,
-        "url": f"https://{config.subdomain}",
+        "url": config.public_url(),
         "convex_url": config.convex_deployment_url,
         "created_at": config.created_at,
         "last_deployed": config.last_deployed_at,

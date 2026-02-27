@@ -1,6 +1,6 @@
 """Vercel REST API wrapper for Lucy Spaces.
 
-Handles git-less deployments: create project, upload files, deploy,
+Handles git-less deployments: create project, upload pre-built files,
 and manage custom domains on zeeya.app.
 """
 
@@ -39,16 +39,25 @@ class VercelAPI:
         return {}
 
     async def create_project(self, name: str) -> dict[str, Any]:
-        """Create a new Vercel project configured for Vite."""
+        """Create a Vercel project for pre-built static deployments."""
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
                 f"{_BASE}/v10/projects",
                 headers={**self._headers(), "Content-Type": "application/json"},
                 params=self._team_params(),
-                json={"name": name, "framework": "vite"},
+                json={
+                    "name": name,
+                    "framework": None,
+                    "buildCommand": "",
+                    "outputDirectory": ".",
+                },
             )
             if resp.status_code >= 400:
-                logger.error("vercel_api_error", status=resp.status_code, body=resp.text)
+                logger.error(
+                    "vercel_api_error",
+                    status=resp.status_code,
+                    body=resp.text,
+                )
             resp.raise_for_status()
             data = resp.json()
             logger.info(
@@ -57,6 +66,37 @@ class VercelAPI:
                 name=name,
             )
             return data
+
+    async def generate_protection_bypass(
+        self, project_id: str,
+    ) -> str:
+        """Generate a protection bypass secret for Standard Protection.
+
+        Returns the bypass secret string that can be appended to URLs
+        as ?x-vercel-protection-bypass=<secret> to make them publicly
+        accessible on Pro teams with Standard Protection enabled.
+        """
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.patch(
+                f"{_BASE}/v1/projects/{project_id}/protection-bypass",
+                headers={**self._headers(), "Content-Type": "application/json"},
+                params=self._team_params(),
+                json={"generate": {"note": "Lucy Spaces public access"}},
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "vercel_bypass_failed",
+                    status=resp.status_code,
+                    body=resp.text,
+                )
+                return ""
+            data = resp.json()
+            bypass_map = data.get("protectionBypass", {})
+            for secret, meta in bypass_map.items():
+                if meta.get("scope") == "automation-bypass":
+                    logger.info("vercel_bypass_created", project_id=project_id)
+                    return secret
+            return ""
 
     async def add_domain(
         self, project_id: str, domain: str,
@@ -70,7 +110,11 @@ class VercelAPI:
                 json={"name": domain},
             )
             if resp.status_code >= 400:
-                logger.error("vercel_api_error", status=resp.status_code, body=resp.text)
+                logger.error(
+                    "vercel_api_error",
+                    status=resp.status_code,
+                    body=resp.text,
+                )
             resp.raise_for_status()
             data = resp.json()
             logger.info(
@@ -87,7 +131,7 @@ class VercelAPI:
         project_name: str,
         target: str = "production",
     ) -> dict[str, Any]:
-        """Upload a built dist/ directory and create a deployment."""
+        """Upload pre-built dist/ files and create a static deployment."""
         dist_path = Path(dist_dir)
         if not dist_path.is_dir():
             raise FileNotFoundError(f"Build directory not found: {dist_dir}")
@@ -113,7 +157,11 @@ class VercelAPI:
                     content=content,
                 )
                 if resp.status_code not in (200, 409):
-                    logger.error("vercel_file_upload_error", status=resp.status_code, body=resp.text)
+                    logger.error(
+                        "vercel_file_upload_error",
+                        status=resp.status_code,
+                        body=resp.text,
+                    )
                     resp.raise_for_status()
 
                 file_entries.append({
@@ -130,8 +178,13 @@ class VercelAPI:
 
             deploy_body: dict[str, Any] = {
                 "name": project_name,
+                "project": project_id,
                 "files": file_entries,
-                "projectSettings": {"framework": "vite"},
+                "projectSettings": {
+                    "framework": None,
+                    "buildCommand": "",
+                    "outputDirectory": ".",
+                },
             }
             if target == "production":
                 deploy_body["target"] = "production"
@@ -146,7 +199,11 @@ class VercelAPI:
                 json=deploy_body,
             )
             if resp.status_code >= 400:
-                logger.error("vercel_deploy_error", status=resp.status_code, body=resp.text)
+                logger.error(
+                    "vercel_deploy_error",
+                    status=resp.status_code,
+                    body=resp.text,
+                )
             resp.raise_for_status()
             data = resp.json()
             logger.info(

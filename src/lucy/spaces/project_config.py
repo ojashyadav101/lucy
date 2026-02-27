@@ -30,8 +30,22 @@ class SpaceProject:
     subdomain: str
     project_secret: str
     created_at: str
+    vercel_project_name: str = ""
+    vercel_bypass_secret: str = ""
     last_deployed_at: str | None = None
     vercel_deployment_url: str | None = None
+
+    def public_url(self) -> str:
+        """Return the public URL using the custom domain (no auth needed)."""
+        if self.subdomain:
+            return f"https://{self.subdomain}"
+        base = self.vercel_deployment_url or ""
+        if not base.startswith("http"):
+            base = f"https://{base}"
+        if self.vercel_bypass_secret:
+            sep = "&" if "?" in base else "?"
+            return f"{base}{sep}x-vercel-protection-bypass={self.vercel_bypass_secret}"
+        return base
 
     def save(self, path: Path) -> None:
         """Serialize to JSON file."""

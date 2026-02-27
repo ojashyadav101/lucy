@@ -28,20 +28,26 @@ import structlog
 logger = structlog.get_logger()
 
 _REPHRASER_PROMPT = (
-    "You are Lucy, a warm, approachable AI coworker. "
-    "Rephrase the following message naturally. "
-    "Keep it to 1-2 sentences max. Sound like a helpful colleague, "
-    "not a chatbot or template. Never use emojis unless the user did. "
-    "Never use em dashes. "
+    "You are Lucy, an AI coworker who's sharp, warm, and direct. "
+    "Rephrase the following message in Lucy's voice. "
+    "Lucy's style: conversational but competent, like the best coworker you've had. "
+    "She leads with the answer, uses contractions naturally, and mixes short punchy "
+    "sentences with longer ones. She uses 1-2 emojis for warmth (not decoration). "
+    "She references specifics when she has them ('your sales dashboard' not 'the project'). "
+    "She never uses em dashes, 'delve', or corporate filler. "
+    "Keep it to 1-2 sentences. "
     "Your response IS the message, output nothing else."
 )
 
 _POOL_GENERATOR_PROMPT = (
-    "You are Lucy, a warm, approachable AI coworker. "
-    "For each category below, generate exactly 6 unique, natural "
-    "variations of the described message. Each variation should feel "
-    "like it was written by a real person, with slightly different tone, "
-    "phrasing, and word choice. No emojis. Never use em dashes. "
+    "You are Lucy, an AI coworker who's sharp, warm, and direct. "
+    "For each category below, generate exactly 6 variations. "
+    "CRITICAL: Each variation must have a DIFFERENT structure. "
+    "Vary these: sentence length (some short, some longer), "
+    "opening word (don't start them all the same way), "
+    "emoji placement (some at start, some in middle, some at end, some with none), "
+    "tone (some casual, some slightly more focused). "
+    "Never use em dashes. "
     "Return ONLY valid JSON: {\"category_name\": [\"variation1\", ...]}. "
     "No markdown, no explanation."
 )
@@ -92,10 +98,6 @@ POOL_CATEGORIES: dict[str, str] = {
         "Acknowledge you're starting a background task. Let them know "
         "you'll post updates and they can keep chatting. Max 2 sentences."
     ),
-    "error_timeout": (
-        "A request is taking longer than expected. Reassure them "
-        "you're still on it. Max 1 sentence."
-    ),
     "error_rate_limit": (
         "You're handling many requests. Ask for a brief moment. "
         "Max 1 sentence."
@@ -108,13 +110,18 @@ POOL_CATEGORIES: dict[str, str] = {
         "Something went wrong but you're handling it. "
         "Keep it vague and reassuring. Max 1 sentence."
     ),
-    "error_task_timeout": (
-        "A background task hit a time limit. Let them know "
-        "and offer to continue. Max 2 sentences."
-    ),
     "error_task_failed": (
         "A background task ran into an issue. Offer to try "
         "a different approach. Max 2 sentences."
+    ),
+    "supervisor_replan": (
+        "The approach you were taking needs adjusting. "
+        "Let the user know you're switching strategy. "
+        "Max 1 sentence."
+    ),
+    "supervisor_ask_user": (
+        "You need clarification from the user to continue. "
+        "Ask a specific, helpful question. Max 2 sentences."
     ),
     "hitl_approved": (
         "Confirm that a user approved an action and you're executing it. "
@@ -152,24 +159,38 @@ _FALLBACKS: dict[str, list[str]] = {
             "you don't have time for. Just let me know what you need!"
         ),
     ],
-    "progress_early": ["On it, pulling that together now."],
+    "progress_early": [
+        "\U0001f680 On it, pulling that together now.",
+        "Diving in. Give me a sec.",
+        "Started digging into this \U0001f50d",
+        "Got it, working on this now.",
+        "Looking into it \u26a1",
+    ],
     "progress_mid": [
-        "Still working through this, almost have what you need."
+        "\U0001f4ca Got the initial data, putting it all together now.",
+        "Making progress, halfway through.",
+        "\U0001f527 Found what I need, formatting it up.",
+        "This is coming together. Almost ready to share.",
+        "Data's in, crunching the numbers \U0001f4c8",
     ],
     "progress_late": [
-        "Taking a bit longer than usual, but I'm making good headway."
+        "\u23f3 Almost there, running a final check before I share.",
+        "Last step. Wrapping this up now.",
+        "\U0001f3c1 Just verifying everything looks right.",
+        "Finishing touches, should have this to you in a moment.",
+        "Nearly done. Double-checking the details \U0001f50d",
     ],
     "progress_final": [
-        "This is a thorough one, hang tight. Wrapping up now."
+        "\u2705 Finishing touches, wrapping this up for you now.",
+        "Last pass, want to make sure this is solid.",
+        "\U0001f3af Done with the heavy lifting, packaging it up.",
+        "Almost ready to share. Just one more check.",
+        "Putting the final pieces together \u2728",
     ],
     "task_cancelled": ["Got it, I've cancelled that."],
     "task_background_ack": [
         "Working on this in the background. I'll post updates here "
         "as I make progress. You can keep chatting in the meantime."
-    ],
-    "error_timeout": [
-        "Taking a bit longer than expected. "
-        "Still working on it and will follow up here shortly."
     ],
     "error_rate_limit": [
         "Getting a lot of requests right now, "
@@ -180,16 +201,23 @@ _FALLBACKS: dict[str, list[str]] = {
         "I need. Let me retry in a moment."
     ],
     "error_generic": [
-        "Working on getting that sorted. I'll follow up "
-        "right here in a moment."
-    ],
-    "error_task_timeout": [
-        "This research is taking longer than expected. "
-        "I've hit the time limit, want me to continue?"
+        "\U0001f527 Hit a bump. Let me try a different approach.",
+        "That didn't go as planned, trying something else.",
+        "Working around an issue. Give me just a moment \U0001f527",
     ],
     "error_task_failed": [
         "Ran into an issue with that. "
         "Let me try a different approach. What specifically are you looking for?"
+    ],
+    "supervisor_replan": [
+        "\U0001f504 Adjusting my approach based on what I've found so far.",
+        "Switching strategy — the first approach ran into some issues.",
+        "Pivoting to a different method. Bear with me \U0001f504",
+    ],
+    "supervisor_ask_user": [
+        "I need a bit more info to keep going. Could you clarify something for me?",
+        "Quick question before I continue \u2014 want to make sure I get this right.",
+        "Need your input on something before I proceed.",
     ],
     "hitl_approved": ["Approved by {user}. Executing now..."],
     "hitl_expired": ["That action has already been handled or expired."],
@@ -228,6 +256,8 @@ async def humanize(
     intent: str,
     *,
     context: str = "",
+    task_hint: str = "",
+    user_name: str = "",
     timeout: float = 2.0,
 ) -> str:
     """Route a one-off message through the cheapest LLM for natural phrasing.
@@ -235,15 +265,29 @@ async def humanize(
     For frequently used messages, prefer ``pick()`` with pre-generated pools.
     This function is for dynamic messages that need user/situation context.
 
+    Args:
+        intent: The raw message to rephrase.
+        context: Optional situational context (e.g. "user asked about Q4 sales").
+        task_hint: Optional short description of the current task.
+        user_name: Optional user's display name for personalization.
+        timeout: Max seconds to wait for the LLM response.
+
     Falls back to the original intent text if the LLM call fails or times out.
     """
     try:
         from lucy.core.openclaw import ChatConfig, get_openclaw_client
 
-        client = get_openclaw_client()
+        client = await get_openclaw_client()
         user_msg = intent
+        context_parts: list[str] = []
+        if task_hint:
+            context_parts.append(f"Task: {task_hint}")
+        if user_name:
+            context_parts.append(f"User: {user_name}")
         if context:
-            user_msg = f"{intent}\n\nSituation: {context}"
+            context_parts.append(f"Situation: {context}")
+        if context_parts:
+            user_msg = f"{intent}\n\n{chr(10).join(context_parts)}"
 
         response = await asyncio.wait_for(
             client.chat_completion(
@@ -302,7 +346,7 @@ async def initialize_pools() -> None:
     try:
         from lucy.core.openclaw import ChatConfig, get_openclaw_client
 
-        client = get_openclaw_client()
+        client = await get_openclaw_client()
 
         categories_block = "\n".join(
             f"- {name}: {desc}" for name, desc in POOL_CATEGORIES.items()

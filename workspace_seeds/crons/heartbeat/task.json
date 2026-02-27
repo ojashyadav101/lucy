@@ -1,8 +1,8 @@
 {
   "path": "/heartbeat",
-  "cron": "0 10,14,18 * * 1-5",
+  "cron": "*/30 8-22 * * *",
   "title": "Proactive Heartbeat Check-in",
-  "description": "Read and follow the `skills/async-workflows/SKILL.md` skill, particularly the proactive heartbeat section. Your goal is to be VISIBLY helpful. Look for unanswered questions in the slack_reader logs since your last run, or check global.log to see what other tasks have done. Answer a question, DM someone with an offer to help, or post a relevant insight. Do at least ONE visible action per heartbeat.",
+  "description": "Read `HEARTBEAT.md` in the workspace root — it is your checklist. Walk through each item: check for unanswered questions in slack_reader logs, review global.log for recent task outputs, scan for pending items or follow-ups. If you find something actionable, take ONE visible action (answer a question, DM someone, post an insight). If NOTHING needs attention, respond with exactly HEARTBEAT_OK and nothing else. Do NOT manufacture activity — silence is fine.",
   "type": "agent",
   "timezone": "UTC",
   "delivery_mode": "channel"

@@ -7,8 +7,14 @@ checkout flows, orders, and webhooks. It uses httpx for asynchronous HTTP
 requests and handles authentication via a Bearer token.
 """
 
+from __future__ import annotations
+
 import httpx
 import json
+import tempfile
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 
 API_BASE_URL = "https://api.polar.sh"
 
@@ -21,7 +27,7 @@ async def _make_request(
 ) -> dict:
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             response = await client.request(
                 method, url, headers=headers, params=params, json=json_data
             )
@@ -169,7 +175,7 @@ TOOLS = [
     },
     {
         "name": "polarsh_list_customers",
-        "description": "List customers. Supports filtering by organization ID, email, and query. Use `page` and `limit` for pagination.",
+        "description": "List Polar.sh customers. For Excel reports: pass export_excel=true to generate a formatted Excel file with ALL customers. Returns a file path you can upload to Slack. For quick lookups: use default pagination.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -178,6 +184,8 @@ TOOLS = [
                 "query": {"type": "string", "description": "Search query for customer names or emails."},
                 "page": {"type": "integer", "description": "Page number for pagination.", "default": 1},
                 "limit": {"type": "integer", "description": "Number of items per page.", "default": 10},
+                "export_excel": {"type": "string", "description": "Set to 'true' to generate a formatted Excel file with ALL customers.", "default": "false"},
+                "return_all": {"type": "string", "description": "Set to 'true' to return ALL customers as JSON.", "default": "false"},
             },
         },
     },
@@ -247,7 +255,7 @@ TOOLS = [
     },
     {
         "name": "polarsh_list_orders",
-        "description": "List orders. Supports filtering by organization ID, product ID, product billing type, discount ID, and customer ID. Use `page` and `limit` for pagination.",
+        "description": "List Polar.sh orders. For Excel reports: pass export_excel=true to generate a formatted Excel file with ALL orders. Returns a file path you can upload to Slack.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -258,6 +266,8 @@ TOOLS = [
                 "customer_id": {"type": "string", "description": "Customer ID to filter by."},
                 "page": {"type": "integer", "description": "Page number for pagination.", "default": 1},
                 "limit": {"type": "integer", "description": "Number of items per page.", "default": 10},
+                "export_excel": {"type": "string", "description": "Set to 'true' to generate a formatted Excel file with ALL orders.", "default": "false"},
+                "return_all": {"type": "string", "description": "Set to 'true' to return ALL orders as JSON.", "default": "false"},
             },
         },
     },
@@ -508,6 +518,122 @@ TOOLS = [
 ]
 
 
+async def _paginate_all(
+    endpoint: str, api_key: str, params: dict | None = None,
+    max_pages: int = 200,
+) -> list[dict]:
+    """Fetch all records from a paginated Polar.sh endpoint."""
+    params = dict(params or {})
+    params["limit"] = 100
+    params["page"] = 1
+    all_items: list[dict] = []
+    while params["page"] <= max_pages:
+        result = await _make_request("GET", endpoint, api_key, params=params)
+        if isinstance(result, dict) and result.get("error"):
+            if not all_items:
+                return result  # type: ignore[return-value]
+            break
+        if not isinstance(result, dict):
+            break
+        items = result.get("items", result.get("result", []))
+        if isinstance(items, list):
+            all_items.extend(items)
+        pagination = result.get("pagination", {})
+        max_page = pagination.get("max_page", 1)
+        if params["page"] >= max_page:
+            break
+        params["page"] += 1
+    return all_items
+
+
+def _build_customers_excel(customers: list[dict]) -> Path:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "All Customers"
+
+    headers = ["ID", "Email", "Name", "Created At", "Organization ID"]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for r, cust in enumerate(customers, 2):
+        ws.cell(row=r, column=1, value=cust.get("id", ""))
+        ws.cell(row=r, column=2, value=cust.get("email", ""))
+        ws.cell(row=r, column=3, value=cust.get("name", ""))
+        created = cust.get("created_at", "")
+        ws.cell(row=r, column=4, value=str(created)[:19] if created else "")
+        ws.cell(row=r, column=5, value=cust.get("organization_id", ""))
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col)].width = 25
+
+    summary = wb.create_sheet("Summary")
+    summary.cell(row=1, column=1, value="Total Customers").font = Font(bold=True)
+    summary.cell(row=1, column=2, value=len(customers))
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    file_path = tmp_dir / "Polarsh_Customers_Export.xlsx"
+    wb.save(str(file_path))
+    return file_path
+
+
+def _build_orders_excel(orders: list[dict]) -> Path:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "All Orders"
+
+    headers = ["ID", "Customer Email", "Product", "Amount", "Currency", "Status", "Created At"]
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for r, order in enumerate(orders, 2):
+        ws.cell(row=r, column=1, value=order.get("id", ""))
+        cust = order.get("customer", {}) or {}
+        ws.cell(row=r, column=2, value=cust.get("email", ""))
+        prod = order.get("product", {}) or {}
+        ws.cell(row=r, column=3, value=prod.get("name", ""))
+        ws.cell(row=r, column=4, value=order.get("amount", 0) / 100)
+        ws.cell(row=r, column=5, value=order.get("currency", "USD"))
+        ws.cell(row=r, column=6, value=order.get("status", ""))
+        created = order.get("created_at", "")
+        ws.cell(row=r, column=7, value=str(created)[:19] if created else "")
+
+    for col in range(1, len(headers) + 1):
+        ws.column_dimensions[chr(64 + col)].width = 22
+
+    summary = wb.create_sheet("Summary")
+    summary.cell(row=1, column=1, value="Total Orders").font = Font(bold=True)
+    summary.cell(row=1, column=2, value=len(orders))
+    total_revenue = sum((o.get("amount", 0) for o in orders), 0) / 100
+    summary.cell(row=2, column=1, value="Total Revenue").font = Font(bold=True)
+    summary.cell(row=2, column=2, value=f"${total_revenue:,.2f}")
+    status_counts = Counter(o.get("status", "unknown") for o in orders)
+    summary.cell(row=4, column=1, value="By Status").font = Font(bold=True)
+    for i, (status, count) in enumerate(status_counts.most_common(), 5):
+        summary.cell(row=i, column=1, value=status)
+        summary.cell(row=i, column=2, value=count)
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    file_path = tmp_dir / "Polarsh_Orders_Export.xlsx"
+    wb.save(str(file_path))
+    return file_path
+
+
 async def execute(tool_name: str, args: dict, api_key: str) -> dict:
     if tool_name == "polarsh_list_products":
         return await _make_request(
@@ -551,6 +677,21 @@ async def execute(tool_name: str, args: dict, api_key: str) -> dict:
             "DELETE", f"{API_BASE_URL}/v1/subscriptions/{subscription_id}", api_key
         )
     elif tool_name == "polarsh_list_customers":
+        export_excel = str(args.pop("export_excel", "false")).lower() == "true"
+        return_all = str(args.pop("return_all", "false")).lower() == "true"
+        if export_excel or return_all:
+            all_customers = await _paginate_all(
+                f"{API_BASE_URL}/v1/customers/", api_key, params=args,
+            )
+            if export_excel:
+                file_path = _build_customers_excel(all_customers)
+                return {
+                    "total_count": len(all_customers),
+                    "excel_file_path": str(file_path),
+                    "sheets": ["All Customers", "Summary"],
+                    "note": f"Excel created with ALL {len(all_customers)} customers. Upload it to Slack.",
+                }
+            return {"total_count": len(all_customers), "items": all_customers}
         return await _make_request(
             "GET", f"{API_BASE_URL}/v1/customers/", api_key, params=args
         )
@@ -579,6 +720,21 @@ async def execute(tool_name: str, args: dict, api_key: str) -> dict:
             "POST", f"{API_BASE_URL}/v1/checkout-links/", api_key, json_data=args
         )
     elif tool_name == "polarsh_list_orders":
+        export_excel = str(args.pop("export_excel", "false")).lower() == "true"
+        return_all = str(args.pop("return_all", "false")).lower() == "true"
+        if export_excel or return_all:
+            all_orders = await _paginate_all(
+                f"{API_BASE_URL}/v1/orders/", api_key, params=args,
+            )
+            if export_excel:
+                file_path = _build_orders_excel(all_orders)
+                return {
+                    "total_count": len(all_orders),
+                    "excel_file_path": str(file_path),
+                    "sheets": ["All Orders", "Summary"],
+                    "note": f"Excel created with ALL {len(all_orders)} orders. Upload it to Slack.",
+                }
+            return {"total_count": len(all_orders), "items": all_orders}
         return await _make_request(
             "GET", f"{API_BASE_URL}/v1/orders/", api_key, params=args
         )

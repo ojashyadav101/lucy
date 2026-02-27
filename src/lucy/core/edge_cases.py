@@ -256,7 +256,7 @@ def should_deduplicate_tool_call(
 
 _ERROR_TYPE_TO_POOL: dict[str, str] = {
     "rate_limited": "error_rate_limit",
-    "tool_timeout": "error_timeout",
+    "tool_timeout": "error_connection",
     "service_unavailable": "error_connection",
     "context_overflow": "error_generic",
 }

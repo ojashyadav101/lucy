@@ -68,6 +68,24 @@ _ACTION_VERBS = re.compile(
     re.IGNORECASE,
 )
 
+_MONITORING_KEYWORDS = re.compile(
+    r"(?:"
+    r"(?:inform|alert|notify|tell|ping|warn)\s+me\s+(?:when|if|as\s+soon\s+as|whenever)"
+    r"|(?:keep|start)\s+(?:monitoring|tracking|watching|checking)"
+    r"|long[- ]running\s+task"
+    r"|(?:monitor|watch|track)\s+(?:for\s+)?(?:changes?|drops?|spikes?|issues?|errors?|performance)"
+    r"|as\s+soon\s+as\s+(?:something|anything|it|there)"
+    r"|real[- ]?time\s+(?:alert|monitor|notification|tracking)"
+    r"|heartbeat\s+(?:for|on|to|check|monitor)"
+    r"|(?:set\s+up|create|configure|build)\s+(?:a\s+|an\s+)?(?:monitor|alert|watch|heartbeat|notification)"
+    r"|continuously\s+(?:monitor|check|track|watch)"
+    r"|(?:daily|weekly|hourly|every\s+\d+\s+(?:min|hour|day))\s+(?:report|check|update|summary)"
+    r"|(?:goes?\s+live|back\s+in\s+stock|becomes?\s+available)"
+    r"|(?:drops?\s+below|goes?\s+(?:above|over|under))"
+    r")",
+    re.IGNORECASE,
+)
+
 _CHECK_PATTERNS = re.compile(
     r"\b(check|verify|look|find|search|pull|get|fetch|show|list)\b",
     re.IGNORECASE,
@@ -87,6 +105,17 @@ _DOCUMENT_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+_DATA_TASK_KEYWORDS = re.compile(
+    r"\b(all (?:\w+ )?(?:users?|customers?|data|records?|subscribers?|members?)|"
+    r"export|bulk|every (?:user|customer|record|subscriber|member)|"
+    r"complete (?:list|report|export|data|breakdown)|"
+    r"raw data|user ?base|multi[- ]sheet|detailed analysis|"
+    r"full (?:report|list|export|breakdown|data)|"
+    r"conversion rate|signups? (?:by|per|over)|"
+    r"(?:pull|get|fetch) .*(?:clerk|polar|user|customer) .*data)\b",
+    re.IGNORECASE,
+)
+
 # Dynamic prompt modules loaded AFTER the static prefix (tool_use + memory
 # are already in the static prefix for all non-chat intents). Only truly
 # intent-specific modules are listed here.
@@ -96,10 +125,12 @@ INTENT_MODULES: dict[str, list[str]] = {
     "confirmation": [],
     "followup": [],
     "tool_use": [],
+    "monitoring": [],
     "command": ["integrations"],
     "code": ["coding"],
     "reasoning": ["research"],
-    "document": [],
+    "document": ["data_tasks"],
+    "data": ["data_tasks"],
 }
 
 
@@ -150,7 +181,18 @@ def classify_and_route(
             return _choice("command", "default")
         return _choice("followup", "fast")
 
-    # 3. Document creation — check BEFORE research so "create a report
+    # 3. Monitoring / alerting — must check BEFORE data tasks so
+    #    "monitor performance" doesn't misroute as a data export.
+    if _MONITORING_KEYWORDS.search(text):
+        return _choice("monitoring", "default")
+
+    # 3a. Data tasks — bulk data exports, "all users", complete reports
+    if _DATA_TASK_KEYWORDS.search(text):
+        if _DOCUMENT_KEYWORDS.search(text):
+            return _choice("data", "code")
+        return _choice("data", "code")
+
+    # 3b. Document creation — check BEFORE research so "create a report
     #    about competitors" routes to document, not research.
     if _DOCUMENT_KEYWORDS.search(text) and _ACTION_VERBS.search(text):
         return _choice("document", "document")

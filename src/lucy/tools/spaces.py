@@ -165,10 +165,14 @@ async def execute_spaces_tool(
                 workspace_id=workspace_id,
             )
             if result.get("success"):
+                app_tsx = f"{result['sandbox_path']}/src/App.tsx"
+                result["app_tsx_path"] = app_tsx
                 result["summary"] = (
                     f"Project '{result['project_name']}' created. "
-                    f"Write your app code to {result['sandbox_path']}/src/App.tsx, "
-                    f"then call lucy_spaces_deploy to publish it."
+                    f"IMPORTANT: Call lucy_write_file with path "
+                    f"EXACTLY set to: {app_tsx} "
+                    f"— copy this path verbatim, do NOT shorten or "
+                    f"modify it. Then call lucy_spaces_deploy."
                 )
             return result
 
@@ -179,9 +183,22 @@ async def execute_spaces_tool(
                 environment=parameters.get("environment", "production"),
             )
             if result.get("success"):
-                result["summary"] = (
-                    f"App deployed! Live at {result['url']}"
-                )
+                url = result["url"]
+                warning = result.get("validation_warning", "")
+                if warning:
+                    result["summary"] = (
+                        f"App deployed to {url} but validation detected "
+                        f"an issue: {warning}. The app may not render "
+                        f"correctly. Consider reviewing App.tsx for errors "
+                        f"and redeploying."
+                    )
+                else:
+                    result["summary"] = (
+                        f"App deployed and verified! "
+                        f"The live URL is: {url} "
+                        f"— share this EXACT link with the user, "
+                        f"including the full query string."
+                    )
             return result
 
         if tool_name == "lucy_spaces_list":

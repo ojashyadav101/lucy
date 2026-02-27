@@ -112,7 +112,7 @@ def should_run_as_background_task(
 # ═══════════════════════════════════════════════════════════════════════════
 
 MAX_BACKGROUND_TASKS = 5  # Per workspace
-MAX_TASK_DURATION = 600   # 10 minutes max
+MAX_TASK_DURATION = 14_400  # 4-hour safety net (supervisor governs real duration)
 
 
 class TaskManager:
@@ -232,22 +232,27 @@ class TaskManager:
 
             except asyncio.TimeoutError:
                 task.state = TaskState.FAILED
-                task.error = "Task timed out after 10 minutes"
+                elapsed_h = round(MAX_TASK_DURATION / 3600, 1)
+                task.error = f"Task hit {elapsed_h}h safety limit"
                 task.completed_at = time.monotonic()
                 if slack_client:
                     try:
-                        from lucy.core.humanize import pick
                         await slack_client.chat_postMessage(
                             channel=channel_id,
                             thread_ts=thread_ts,
-                            text=pick("error_task_timeout"),
+                            text=(
+                                "This task ran for an unusually long time "
+                                "and was stopped as a safety measure. "
+                                "Let me know if you'd like me to continue."
+                            ),
                         )
                     except Exception:
                         pass
-                logger.warning(
-                    "background_task_timeout",
+                logger.critical(
+                    "background_task_safety_net",
                     task_id=task_id,
                     workspace_id=workspace_id,
+                    duration_limit_s=MAX_TASK_DURATION,
                 )
 
             except asyncio.CancelledError:

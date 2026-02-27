@@ -561,8 +561,11 @@ async def _handle_message(
             split_response,
         )
 
+        response_text = response_text or ""
         slack_text = await process_output(response_text)
-        slack_text = format_links(slack_text)
+        slack_text = format_links(slack_text or "")
+        if not slack_text:
+            slack_text = response_text or "Done!"
 
         if should_split_response(slack_text):
             chunks = split_response(slack_text)
@@ -605,15 +608,44 @@ async def _handle_message(
             exc_info=True,
         )
         from lucy.core.humanize import pick
+
+        task_hint = ""
+        if text:
+            snippet = text.strip()[:80]
+            if len(snippet) > 60:
+                snippet = snippet[:57] + "..."
+            task_hint = f' while working on "{snippet}"'
+
         error_str = str(e).lower()
         if "timeout" in error_str or "timed out" in error_str:
-            fallback = pick("error_timeout")
+            fallback = (
+                f"A service I was reaching out to didn't respond in time{task_hint}. "
+                "Want me to give it another try?"
+            )
         elif "rate limit" in error_str or "429" in error_str:
-            fallback = pick("error_rate_limit")
+            pool_msg = pick("error_rate_limit")
+            fallback = (
+                f"Getting a lot of requests right now, "
+                f"I'll retry{task_hint} in a moment."
+                if task_hint
+                else pool_msg
+            )
         elif "connection" in error_str:
-            fallback = pick("error_connection")
+            pool_msg = pick("error_connection")
+            fallback = (
+                f"Had trouble reaching an external service{task_hint}. "
+                "Let me give it another shot."
+                if task_hint
+                else pool_msg
+            )
         else:
-            fallback = pick("error_generic")
+            pool_msg = pick("error_generic")
+            fallback = (
+                f"I hit an unexpected issue{task_hint}. "
+                "Let me try a different approach."
+                if task_hint
+                else pool_msg
+            )
         await say(text=fallback, thread_ts=thread_ts)
 
     finally:
@@ -634,65 +666,52 @@ async def _run_with_recovery(
     slack_client: Any,
     workspace_id: str,
 ) -> str:
-    """Run agent with silent retry cascade. Never surface raw errors."""
+    """Run agent with a single retry on exception.
+
+    The supervisor inside the agent loop handles re-planning and
+    course-correction during execution. This outer layer only catches
+    hard crashes (network errors, 5xx responses) and does ONE retry
+    with failure context so the agent can adapt.
+    """
     from lucy.core.openclaw import OpenClawError
 
-    # Attempt 1: normal run
+    # Attempt 1: normal run (router-selected model)
     try:
         return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
     except OpenClawError as e:
+        last_error = f"OpenClaw error (status {e.status_code}): {e}"
         logger.warning(
             "agent_attempt_1_failed",
             status_code=e.status_code,
             workspace_id=workspace_id,
         )
     except Exception as e:
+        last_error = str(e)
         logger.warning("agent_attempt_1_error", error=str(e), workspace_id=workspace_id)
 
-    # Attempt 2: wait briefly and retry
+    # Attempt 2: single retry with failure context
     await asyncio.sleep(2)
     try:
-        return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
-    except OpenClawError as e:
-        logger.warning(
-            "agent_attempt_2_failed",
-            status_code=e.status_code,
-            workspace_id=workspace_id,
+        return await agent.run(
+            message=text,
+            ctx=ctx,
+            slack_client=slack_client,
+            failure_context=f"Previous attempt failed: {last_error}",
         )
     except Exception as e:
         logger.warning("agent_attempt_2_error", error=str(e), workspace_id=workspace_id)
 
-    # Attempt 3: downgrade to fast model with simplified prompt
-    try:
-        from lucy.core.router import MODEL_TIERS
-        fast_model = MODEL_TIERS.get("fast", "google/gemini-2.5-flash")
-        ctx_simple = type(ctx)(
-            workspace_id=ctx.workspace_id,
-            channel_id=ctx.channel_id,
-            thread_ts=ctx.thread_ts,
-        )
-        return await agent.run(
-            message=text,
-            ctx=ctx_simple,
-            slack_client=slack_client,
-            model_override=fast_model,
-        )
-    except Exception as e:
-        logger.warning("agent_attempt_3_error", error=str(e), workspace_id=workspace_id)
-
-    # All 3 attempts failed — give user a warm degradation message
     from lucy.core.edge_cases import classify_error_for_degradation, get_degradation_message
-    # Use the last exception for classification
     import sys
     last_exc = sys.exc_info()[1]
     error_type = classify_error_for_degradation(last_exc) if last_exc else "unknown"
     degradation_msg = get_degradation_message(error_type)
     logger.error(
-        "all_recovery_attempts_exhausted",
+        "recovery_attempts_exhausted",
         workspace_id=workspace_id,
         error_type=error_type,
     )
-    raise RuntimeError(f"All recovery attempts exhausted: {degradation_msg}")
+    raise RuntimeError(f"Recovery attempts exhausted: {degradation_msg}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

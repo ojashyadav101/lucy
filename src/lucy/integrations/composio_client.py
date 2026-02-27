@@ -85,8 +85,17 @@ class ComposioClient:
 
         This ensures Composio connections persist across database resets
         by mapping workspace UUID → Slack team_id.
+
+        Also invalidates any cached session for this workspace so the
+        next call creates a session with the correct entity.
         """
-        self._entity_id_map[str(workspace_id)] = entity_id
+        ws_key = str(workspace_id)
+        old = self._entity_id_map.get(ws_key)
+        self._entity_id_map[ws_key] = entity_id
+        if old != entity_id:
+            self._session_cache.pop(ws_key, None)
+            self._session_id_cache.pop(ws_key, None)
+            self._tools_cache.pop(ws_key, None)
 
     def _get_session(
         self,

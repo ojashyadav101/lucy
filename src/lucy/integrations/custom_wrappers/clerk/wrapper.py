@@ -10,6 +10,11 @@ for an AI agent, and an `execute` function to dispatch calls to these functions.
 """
 
 import json
+import tempfile
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
 import httpx
 from typing import Dict, Any, List
 
@@ -30,7 +35,7 @@ async def _make_request(
     url = f"{BASE_URL}/{endpoint}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             if method == "GET":
                 response = await client.get(url, headers=headers, params=params)
             elif method == "POST":
@@ -86,6 +91,9 @@ async def clerk_list_users(api_key: str, query_params: Dict = None) -> Dict:
 
     first_page = await _make_request("GET", "users", api_key, params=params)
 
+    if isinstance(first_page, dict) and first_page.get("error"):
+        return first_page
+
     if isinstance(first_page, list) and len(first_page) >= limit and offset == 0:
         all_users = list(first_page)
         current_offset = limit
@@ -101,13 +109,45 @@ async def clerk_list_users(api_key: str, query_params: Dict = None) -> Dict:
             current_offset += 500
 
         total = len(all_users)
+        export_excel = str(params.get("export_excel", "false")).lower() == "true"
+        return_all = str(params.get("return_all", "false")).lower() == "true"
+
+        if export_excel:
+            file_path = _build_users_excel(all_users, has_date_filter)
+            return {
+                "total_count": total,
+                "excel_file_path": str(file_path),
+                "sheets": ["All Users", "Summary"],
+                "note": (
+                    f"Excel created with ALL {total} users"
+                    + (" in the specified time range" if has_date_filter else "")
+                    + f". File ready at {file_path}. "
+                    + "Upload it to Slack with the file upload tool, "
+                    + "or tell the user it's ready."
+                ),
+            }
+
+        if return_all:
+            return {
+                "total_count": total,
+                "users_shown": _clean_user_list(all_users),
+                "note": (
+                    f"Returning all {total} users"
+                    + (" in the specified time range" if has_date_filter else "")
+                    + "."
+                ),
+            }
+        sample_size = min(20, total)
         return {
             "total_count": total,
-            "users_shown": _clean_user_list(all_users[:20]),
+            "users_shown": _clean_user_list(all_users[:sample_size]),
             "note": (
                 f"Found {total} users"
                 + (" in the specified time range" if has_date_filter else "")
-                + f". Showing first 20. Ask for specific filters or pagination to see more."
+                + f". Showing a SAMPLE of {sample_size}. "
+                + "Pass export_excel=true to create an Excel file with ALL "
+                + f"{total} users (2 sheets: raw data + summary). "
+                + "Or pass return_all=true for raw JSON data."
             ),
         }
 
@@ -176,6 +216,123 @@ def _clean_user_list(users: list) -> list:
                 entry["auth"] = ", ".join(p for p in providers if p)
         compact.append(entry)
     return compact
+
+def _build_users_excel(users: list, has_date_filter: bool) -> Path:
+    """Create a formatted Excel file with all users and a summary sheet."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    except ImportError:
+        raise RuntimeError("openpyxl required for Excel export")
+
+    wb = Workbook()
+
+    header_font = Font(bold=True, size=11)
+    header_fill = PatternFill(
+        start_color="1E3A5F", end_color="1E3A5F", fill_type="solid",
+    )
+    header_font_white = Font(bold=True, size=11, color="FFFFFF")
+    thin_border = Border(
+        bottom=Side(style="thin", color="DDDDDD"),
+    )
+
+    ws_users = wb.active
+    ws_users.title = "All Users"
+    headers = ["#", "Name", "Email", "Signup Date", "Auth Method"]
+    for col_idx, header in enumerate(headers, 1):
+        cell = ws_users.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font_white
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    auth_counter: Counter = Counter()
+    month_counter: Counter = Counter()
+
+    for row_idx, user in enumerate(users, 2):
+        if not isinstance(user, dict):
+            continue
+        first = (user.get("first_name") or "").strip()
+        last = (user.get("last_name") or "").strip()
+        name = f"{first} {last}".strip() or "Unknown"
+        primary_email = ""
+        emails = user.get("email_addresses", [])
+        if emails and isinstance(emails, list):
+            e = emails[0]
+            if isinstance(e, dict):
+                primary_email = e.get("email_address", "")
+
+        created_raw = user.get("created_at")
+        signup_date = ""
+        if isinstance(created_raw, (int, float)):
+            ts = created_raw / 1000 if created_raw > 1e12 else created_raw
+            try:
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                signup_date = dt.strftime("%Y-%m-%d %H:%M")
+                month_counter[dt.strftime("%Y-%m")] += 1
+            except Exception:
+                signup_date = str(created_raw)
+
+        ext_accts = user.get("external_accounts", [])
+        auth_method = "email/password"
+        if ext_accts and isinstance(ext_accts, list):
+            providers = [
+                a.get("provider", "") for a in ext_accts if isinstance(a, dict)
+            ]
+            if providers:
+                auth_method = ", ".join(p for p in providers if p) or "email/password"
+        auth_counter[auth_method] += 1
+
+        ws_users.cell(row=row_idx, column=1, value=row_idx - 1)
+        ws_users.cell(row=row_idx, column=2, value=name)
+        ws_users.cell(row=row_idx, column=3, value=primary_email)
+        ws_users.cell(row=row_idx, column=4, value=signup_date)
+        ws_users.cell(row=row_idx, column=5, value=auth_method)
+        for col in range(1, 6):
+            ws_users.cell(row=row_idx, column=col).border = thin_border
+
+    ws_users.column_dimensions["A"].width = 6
+    ws_users.column_dimensions["B"].width = 25
+    ws_users.column_dimensions["C"].width = 35
+    ws_users.column_dimensions["D"].width = 18
+    ws_users.column_dimensions["E"].width = 20
+
+    ws_summary = wb.create_sheet("Summary", 0)
+    summary_headers = ["Metric", "Value"]
+    for col_idx, h in enumerate(summary_headers, 1):
+        cell = ws_summary.cell(row=1, column=col_idx, value=h)
+        cell.font = header_font_white
+        cell.fill = header_fill
+
+    ws_summary.cell(row=2, column=1, value="Total Users")
+    ws_summary.cell(row=2, column=2, value=len(users))
+    ws_summary.cell(row=2, column=2).font = Font(bold=True, size=14)
+
+    row = 4
+    ws_summary.cell(row=row, column=1, value="Auth Method Breakdown")
+    ws_summary.cell(row=row, column=1).font = Font(bold=True, size=11)
+    row += 1
+    for method, count in auth_counter.most_common():
+        ws_summary.cell(row=row, column=1, value=method)
+        ws_summary.cell(row=row, column=2, value=count)
+        row += 1
+
+    row += 1
+    ws_summary.cell(row=row, column=1, value="Monthly Signups")
+    ws_summary.cell(row=row, column=1).font = Font(bold=True, size=11)
+    row += 1
+    for month in sorted(month_counter.keys()):
+        ws_summary.cell(row=row, column=1, value=month)
+        ws_summary.cell(row=row, column=2, value=month_counter[month])
+        row += 1
+
+    ws_summary.column_dimensions["A"].width = 25
+    ws_summary.column_dimensions["B"].width = 15
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    file_path = tmp_dir / "Clerk_Users_Full_Export.xlsx"
+    wb.save(str(file_path))
+    return file_path
+
 
 async def clerk_get_user_stats(api_key: str, query_params: Dict = None) -> Dict:
     """Compute aggregate stats across all users without returning full user data.
@@ -431,7 +588,7 @@ async def clerk_get_instance_settings(api_key: str) -> Dict:
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "clerk_list_users",
-        "description": "Lists users in Clerk. Auto-paginates to get total count. Use created_after_unix_ms to filter users created after a specific date (Unix timestamp in MILLISECONDS). Use order_by='-created_at' to get newest users first. This tool returns total_count and a sample of users.",
+        "description": "Lists users in Clerk. Auto-paginates to get total count. Returns a SAMPLE of 20 users by default. For Excel reports: pass export_excel=true to generate a formatted Excel file with ALL users (2 sheets: raw data + summary with auth breakdown and monthly signups). The file will be created server-side and you just need to upload it. Use created_after_unix_ms to filter by date (Unix ms). Use order_by='-created_at' for newest first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -448,6 +605,8 @@ TOOLS: List[Dict[str, Any]] = [
                         "limit": {"type": "integer", "description": "Number of records to return. Max 500. Use 100 for comprehensive listing.", "default": 100},
                         "offset": {"type": "integer", "description": "Number of records to skip.", "default": 0},
                         "order_by": {"type": "string", "description": "Order results by a specific field. Use '-created_at' for newest first, 'created_at' for oldest first."},
+                        "return_all": {"type": "string", "description": "Set to 'true' to return ALL users as JSON. May be large for 1000+ users.", "default": "false"},
+                        "export_excel": {"type": "string", "description": "Set to 'true' to generate a formatted Excel file with ALL users. Returns a file path you can upload to Slack. Preferred for reports and exports.", "default": "false"},
                     }
                 }
             }

@@ -3,11 +3,19 @@
 Layer 1: Sanitizer - strips paths, tool names, internal references
 Layer 2: Format converter - transforms Markdown to Slack mrkdwn
 Layer 3: Tone validator - catches robotic/error-dump patterns
-Layer 4: De-AI engine - detects and rewrites AI-generated tells
+Layer 4: De-AI engine - detects and strips AI-generated tells via regex
 
-The de-AI engine uses a two-tier approach:
+The de-AI engine has two tiers, but only Tier 1 is active:
   Tier 1 (instant): Regex detection + mechanical fixes for obvious patterns
-  Tier 2 (async):   LLM-based contextual rewrite when regex isn't enough
+                     — catches em dashes, power words, chatbot closers, etc.
+  Tier 2 (DISABLED): LLM-based contextual rewrite. Disabled because:
+                      (a) the rewriter has no access to SOUL.md personality,
+                      (b) its generic "smart colleague" prompt flattens Lucy's
+                          voice into bland corporate tone,
+                      (c) it can destroy formatting (numbered lists, structure),
+                      (d) Tier 1 regex already catches ~90% of AI tells.
+                      The code is kept as a safety net but the threshold is set
+                      to 999 so it never triggers in practice.
 
 Applied to every message before posting to Slack.
 """
@@ -46,6 +54,16 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"SKILL\.md|LEARNINGS\.md|state\.json"), "my notes"),
     (re.compile(r"\btool[_ ]?call[s]?\b", re.IGNORECASE), "request"),
     (re.compile(r"\bmeta[- ]?tool[s]?\b", re.IGNORECASE), ""),
+    (re.compile(r"sk_live_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk_test_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"Bearer\s+[A-Za-z0-9_-]{20,}"), "Bearer [REDACTED]"),
+    (re.compile(r"pol_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"['\"]Authorization['\"]:\s*['\"]Bearer\s+[^'\"]+['\"]"), '"Authorization": "Bearer [REDACTED]"'),
+    (re.compile(r"<:request>.*?</invoke>", re.DOTALL), ""),
+    (re.compile(r"<invoke\s+name=.*?>.*?</invoke>", re.DOTALL), ""),
+    (re.compile(r"(?i)the api key[^.]*(?:workbench|sandbox|available)[^.]*\.", re.DOTALL), ""),
+    (re.compile(r"(?i)(?:let me|i(?:'ll| will)) try a different (?:approach|strategy)[^.]*\.", re.DOTALL), ""),
+    (re.compile(r"(?i)(?:api key|credentials?) (?:isn't|aren't|is not|are not) available[^.]*\.", re.DOTALL), ""),
     (re.compile(r"\bfunction calling\b", re.IGNORECASE), ""),
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
     (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),
@@ -87,6 +105,7 @@ _HUMANIZE_MAP = {
 
 
 def _sanitize(text: str) -> str:
+    original = text
     for pattern, replacement in _REDACT_PATTERNS:
         text = pattern.sub(replacement, text)
 
@@ -96,6 +115,8 @@ def _sanitize(text: str) -> str:
 
     text = _ALLCAPS_TOOL_RE.sub(_humanize_or_strip, text)
     text = re.sub(r"  +", " ", text)
+    if not text.strip() and original.strip():
+        return original
     return text
 
 
@@ -381,8 +402,25 @@ _AI_TELL_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
     (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), 2, "label"),
 ]
 
-# Minimum score to trigger LLM rewrite (below this, regex fixes are enough)
-_LLM_REWRITE_THRESHOLD = 3
+# ── LLM rewrite threshold ──────────────────────────────────────────
+# DISABLED (was 3, now 999). The LLM rewrite (Tier 2) is intentionally
+# unreachable because:
+#
+#   1. The rewriter prompt says "sound like a smart colleague" — it has
+#      zero knowledge of Lucy's personality from SOUL.md, so it strips
+#      her voice and replaces it with generic corporate-speak.
+#   2. It rewrites the ENTIRE text on a cheap model (minimax-m2.5 at
+#      0.4 temperature), which can restructure numbered lists, merge
+#      bullet points, and lose Slack formatting.
+#   3. The regex pass (Tier 1) already handles ~90% of AI tells
+#      (em dashes, power words, chatbot closers) without any of these
+#      side effects.
+#
+# The code is preserved so it can be re-enabled as a safety net if we
+# ever need it (e.g. with a personality-aware prompt and better model).
+# To re-enable, lower this back to 3 (or whatever score makes sense).
+# ───────────────────────────────────────────────────────────────────
+_LLM_REWRITE_THRESHOLD = 999
 # Minimum text length to even consider LLM rewrite
 _LLM_REWRITE_MIN_CHARS = 120
 
@@ -579,7 +617,8 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
 
 
 async def _deai(text: str) -> str:
-    """Two-tier de-AI: detect tells, LLM rewrite if needed, regex fallback."""
+    """De-AI: detect tells and fix via regex. LLM rewrite path exists but is
+    disabled (threshold=999) — see comment on _LLM_REWRITE_THRESHOLD above."""
     tells = _detect_ai_tells(text)
 
     if not tells:
@@ -599,7 +638,7 @@ async def _deai(text: str) -> str:
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
-async def process_output(text: str) -> str:
+async def process_output(text: str | None) -> str:
     """Run all output layers on a message before posting to Slack.
 
     Now async: the de-AI engine may invoke a fast LLM call for contextual
@@ -607,7 +646,7 @@ async def process_output(text: str) -> str:
     regex if the LLM is unavailable or the text is clean.
     """
     if not text or not text.strip():
-        return text
+        return text or ""
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
