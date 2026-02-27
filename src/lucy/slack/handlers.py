@@ -502,6 +502,12 @@ async def _handle_message(
             except Exception:
                 pass
 
+        # ── Auto-register channel metadata (purpose / DM flag) ───────
+        if channel_id and workspace_id:
+            asyncio.create_task(
+                _register_channel_background(client, workspace_id, channel_id)
+            )
+
         # ── Check if this should run as a background task ───────────
         from lucy.pipeline.router import classify_and_route
         from lucy.core.task_manager import (
@@ -721,6 +727,49 @@ async def _run_with_recovery(
 def _clean_mention(text: str) -> str:
     """Remove @Lucy mention from text."""
     return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+
+
+async def _register_channel_background(
+    client: Any,
+    workspace_id: str,
+    channel_id: str,
+) -> None:
+    """Silently fetch and register channel metadata in the background.
+
+    Only fetches if the channel isn't already registered (cheap disk check).
+    """
+    try:
+        from lucy.workspace.filesystem import get_workspace
+        from lucy.workspace.channel_registry import (
+            get_channel_context,
+            register_channel,
+        )
+
+        ws = get_workspace(workspace_id)
+        existing = get_channel_context(ws, channel_id)
+
+        is_dm = channel_id.startswith("D")
+        if is_dm:
+            register_channel(ws, channel_id, is_dm=True)
+            return
+
+        # Skip re-fetching if already registered recently
+        if existing.get("name") and existing.get("last_seen"):
+            return
+
+        result = await client.conversations_info(channel=channel_id)
+        ch = result.get("channel", {})
+        register_channel(
+            ws,
+            channel_id=channel_id,
+            name=ch.get("name", ""),
+            purpose=ch.get("purpose", {}).get("value", ""),
+            topic=ch.get("topic", {}).get("value", ""),
+            is_private=ch.get("is_private", False),
+            is_dm=ch.get("is_im", False),
+        )
+    except Exception:
+        pass
 
 
 async def _add_reaction(

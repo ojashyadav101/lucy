@@ -278,6 +278,10 @@ class LucyAgent:
             from lucy.tools.web_search import get_web_search_tool_definitions
             tools.extend(get_web_search_tool_definitions())
 
+            from lucy.tools.services import get_services_tool_definitions
+            if settings.openclaw_base_url and settings.openclaw_api_key:
+                tools.extend(get_services_tool_definitions())
+
             tools.append({
                 "type": "function",
                 "function": {
@@ -765,6 +769,36 @@ class LucyAgent:
 
             system_prompt += time_block
 
+            # Inject user preferences if available
+            if ctx.user_slack_id:
+                try:
+                    from lucy.workspace.preferences import (
+                        extract_preferences_from_message,
+                        format_preferences_for_prompt,
+                        load_user_preferences,
+                    )
+                    extract_preferences_from_message(ctx.user_slack_id, message, ws)
+                    prefs = load_user_preferences(ws, ctx.user_slack_id)
+                    prefs_text = format_preferences_for_prompt(prefs)
+                    if prefs_text:
+                        system_prompt += f"\n\n<user_preferences>\n{prefs_text}\n</user_preferences>"
+                except Exception as e:
+                    logger.debug("preferences_inject_failed", error=str(e))
+
+            # Inject channel context (purpose, boundaries, DM flag)
+            if ctx.channel_id:
+                try:
+                    from lucy.workspace.channel_registry import (
+                        format_channel_context_for_prompt,
+                    )
+                    channel_ctx = format_channel_context_for_prompt(
+                        ws, ctx.channel_id,
+                    )
+                    if channel_ctx:
+                        system_prompt += f"\n\n{channel_ctx}"
+                except Exception as e:
+                    logger.debug("channel_context_inject_failed", error=str(e))
+
         # 5. Build conversation messages from Slack thread
         async with trace.span("build_thread_messages"):
             messages = await self._build_thread_messages(
@@ -951,6 +985,26 @@ class LucyAgent:
                         workspace_id=ctx.workspace_id,
                         error=str(e),
                     )
+
+        # 6b3. Self-critique gate: LLM reviews complex responses before delivery
+        _CRITIQUE_INTENTS = {"data", "research", "document", "code", "reasoning"}
+        if (
+            response_text
+            and route.intent in _CRITIQUE_INTENTS
+            and not failure_context
+            and _retry_depth == 0
+            and len(response_text) > 200
+        ):
+            try:
+                response_text = await self._self_critique(
+                    message, response_text, route.intent, model, ctx,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "self_critique_failed",
+                    workspace_id=ctx.workspace_id,
+                    error=str(exc) or type(exc).__name__,
+                )
 
         # 6c. Post-response: persist memorable facts to memory
         try:
@@ -1675,6 +1729,10 @@ class LucyAgent:
         "lucy_delete_cron": "removing a scheduled task",
         "lucy_modify_cron": "updating a scheduled task",
         "lucy_trigger_cron": "triggering a scheduled task",
+        "lucy_start_service": "starting a background service",
+        "lucy_stop_service": "stopping a background service",
+        "lucy_list_services": "listing background services",
+        "lucy_service_logs": "fetching service logs",
     }
 
     @staticmethod
@@ -1999,6 +2057,26 @@ class LucyAgent:
             logger.warning("connected_services_fetch_failed", error=str(e))
             return []
 
+    # Per-tool timeout config (seconds). Longer for heavy operations.
+    _TOOL_TIMEOUTS: dict[str, float] = {
+        "lucy_start_service": 30.0,
+        "lucy_stop_service": 15.0,
+        "lucy_service_logs": 20.0,
+        "lucy_create_cron": 15.0,
+        "lucy_generate_excel": 120.0,
+        "lucy_generate_csv": 120.0,
+        "lucy_spaces_init": 60.0,
+        "lucy_spaces_deploy": 180.0,
+        "lucy_create_heartbeat": 20.0,
+        "COMPOSIO_REMOTE_WORKBENCH": 300.0,
+        "COMPOSIO_REMOTE_BASH_TOOL": 180.0,
+    }
+    _DEFAULT_TOOL_TIMEOUT = 60.0
+
+    # Simple in-memory circuit breaker: tool -> consecutive failure count
+    _tool_failure_counts: dict[str, int] = {}
+    _CIRCUIT_OPEN_THRESHOLD = 3
+
     async def _execute_tool(
         self,
         tool_name: str,
@@ -2006,16 +2084,62 @@ class LucyAgent:
         workspace_id: str,
         ctx: AgentContext | None = None,
     ) -> dict[str, Any]:
-        """Execute a single tool call.
+        """Execute a single tool call with per-tool timeout and circuit breaker.
 
         Internal tools (lucy_*) are handled locally.
         Everything else routes through Composio.
         """
+        # ── Circuit breaker: skip tools that have repeatedly failed ──
+        failure_count = LucyAgent._tool_failure_counts.get(tool_name, 0)
+        if failure_count >= LucyAgent._CIRCUIT_OPEN_THRESHOLD:
+            logger.warning(
+                "tool_circuit_open",
+                tool=tool_name,
+                failures=failure_count,
+            )
+            # Reset after reporting so we don't block forever
+            LucyAgent._tool_failure_counts[tool_name] = 0
+            human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+            return {
+                "error": (
+                    f"The tool for '{human_name}' has failed {failure_count} times "
+                    f"in a row and has been temporarily paused. Try a different "
+                    f"approach or ask the user if they want to retry."
+                ),
+                "_circuit_breaker": True,
+            }
+
+        timeout = LucyAgent._TOOL_TIMEOUTS.get(tool_name, LucyAgent._DEFAULT_TOOL_TIMEOUT)
+
         # ── Internal tools (no external API needed) ──────────────────
         if tool_name.startswith("lucy_"):
-            return await self._execute_internal_tool(
-                tool_name, parameters, workspace_id, ctx=ctx,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_internal_tool(
+                        tool_name, parameters, workspace_id, ctx=ctx,
+                    ),
+                    timeout=timeout,
+                )
+                LucyAgent._tool_failure_counts.pop(tool_name, None)
+                return result
+            except asyncio.TimeoutError:
+                LucyAgent._tool_failure_counts[tool_name] = (
+                    LucyAgent._tool_failure_counts.get(tool_name, 0) + 1
+                )
+                human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+                logger.warning(
+                    "tool_timeout",
+                    tool=tool_name,
+                    timeout=timeout,
+                    workspace_id=workspace_id if ctx else "unknown",
+                )
+                return {
+                    "error": (
+                        f"'{human_name}' timed out after {int(timeout)}s. "
+                        f"Try a lighter approach or break the task into smaller steps."
+                    ),
+                    "_timed_out": True,
+                }
 
         # ── Delegation to sub-agents ─────────────────────────────────
         if tool_name.startswith("delegate_to_") and tool_name.endswith("_agent"):
@@ -2055,6 +2179,9 @@ class LucyAgent:
             return result
 
         except Exception as e:
+            LucyAgent._tool_failure_counts[tool_name] = (
+                LucyAgent._tool_failure_counts.get(tool_name, 0) + 1
+            )
             logger.error(
                 "tool_execution_failed",
                 tool=tool_name,
@@ -2321,6 +2448,11 @@ class LucyAgent:
                 from lucy.tools.web_search import execute_web_search
                 return await execute_web_search(parameters)
 
+            from lucy.tools.services import is_service_tool
+            if is_service_tool(tool_name):
+                from lucy.tools.services import execute_service_tool
+                return await execute_service_tool(tool_name, parameters)
+
             if tool_name.startswith("lucy_custom_"):
                 return await self._execute_custom_wrapper_tool(
                     tool_name, parameters, workspace_id,
@@ -2570,6 +2702,30 @@ class LucyAgent:
         if not task:
             return {"error": "No task description provided"}
 
+        # Post delegation start message so user isn't left in silence
+        _DELEGATION_LABELS = {
+            "research": "Doing a deep dive on this",
+            "code": "Writing and testing the code",
+            "integrations": "Setting up the integration",
+            "document": "Putting the document together",
+        }
+        start_label = _DELEGATION_LABELS.get(agent_type, "Working on this")
+        task_hint = getattr(self, "_current_task_hint", None)
+        start_msg = (
+            f"{start_label} — {task_hint[:60]}..." if task_hint
+            else f"{start_label}..."
+        )
+        slack_client = getattr(self, "_current_slack_client", None)
+        channel_id = getattr(self, "_current_channel_id", None)
+        thread_ts = getattr(self, "_current_thread_ts", None)
+        if slack_client and channel_id and thread_ts:
+            try:
+                await slack_client.chat_postMessage(
+                    channel=channel_id, thread_ts=thread_ts, text=start_msg,
+                )
+            except Exception:
+                pass
+
         try:
             result = await asyncio.wait_for(
                 run_subagent(
@@ -2610,7 +2766,7 @@ class LucyAgent:
         return {"result": result}
 
     async def _on_subagent_progress(self, name: str, turn: int) -> None:
-        """Progress callback for sub-agents — posts a new Slack message."""
+        """Progress callback for sub-agents — posts a context-aware Slack message."""
         slack_client = getattr(self, "_current_slack_client", None)
         channel_id = getattr(self, "_current_channel_id", None)
         thread_ts = getattr(self, "_current_thread_ts", None)
@@ -2618,9 +2774,20 @@ class LucyAgent:
         if not slack_client or not channel_id or not thread_ts:
             return
 
-        from lucy.pipeline.humanize import pick
+        _SUBAGENT_LABELS = {
+            "research": "doing deep research",
+            "code": "writing and testing code",
+            "integrations": "setting up the integration",
+            "document": "putting the document together",
+        }
+        label = _SUBAGENT_LABELS.get(name, "working on this")
+        task_hint = getattr(self, "_current_task_hint", None)
+        if task_hint:
+            desc = f"Still {label} — {task_hint[:60]}..."
+        else:
+            desc = f"Still {label}..."
+
         try:
-            desc = pick("progress_mid")
             await slack_client.chat_postMessage(
                 channel=channel_id, thread_ts=thread_ts, text=desc,
             )
@@ -2695,6 +2862,107 @@ class LucyAgent:
                 error=str(exc) or type(exc).__name__,
             )
             return None
+
+    # ── Self-critique gate ──────────────────────────────────────────────
+
+    async def _self_critique(
+        self,
+        user_message: str,
+        response_text: str,
+        intent: str,
+        model: str,
+        ctx: "AgentContext",
+    ) -> str:
+        """Cheap LLM self-review for complex responses before delivery.
+
+        Uses the fast model to check completeness and value-first framing.
+        Returns the improved response if changes are warranted, or the
+        original if it passes. Never blocks delivery on failure.
+        """
+        from lucy.pipeline.router import MODEL_TIERS
+
+        critique_prompt = (
+            f"A user asked:\n\"{user_message[:400]}\"\n\n"
+            f"Here is the response that was generated (intent: {intent}):\n"
+            f"\"\"\"\n{response_text[:1500]}\n\"\"\"\n\n"
+            f"Quickly review this response. Check:\n"
+            f"1. Does it answer EVERY part of the user's question?\n"
+            f"2. Does it lead with the most important information (not preamble)?\n"
+            f"3. Is anything obviously missing or incomplete?\n"
+            f"4. Does it give actual data/results, not just say what was done?\n\n"
+            f"If the response is solid, reply with exactly: RESPONSE_OK\n"
+            f"If there's a clear, specific issue, reply with: ISSUE: [one sentence "
+            f"describing what's missing or wrong, and how to fix it]\n\n"
+            f"Be strict but fair. Don't flag minor style issues. Only flag substantive "
+            f"completeness or accuracy problems."
+        )
+
+        try:
+            client = await get_openclaw_client()
+            result = await asyncio.wait_for(
+                client.chat_completion(
+                    messages=[{"role": "user", "content": critique_prompt}],
+                    config=ChatConfig(
+                        model=MODEL_TIERS.get("fast", model),
+                        system_prompt=(
+                            "You are a strict quality reviewer for AI responses. "
+                            "Your job: catch substantive failures (incomplete answers, "
+                            "missing deliverables, preamble without results). "
+                            "Ignore minor style issues. Be decisive and concise."
+                        ),
+                        max_tokens=200,
+                        temperature=0.1,
+                    ),
+                ),
+                timeout=12.0,
+            )
+
+            critique = (result.content or "").strip()
+
+            if "RESPONSE_OK" in critique or not critique.startswith("ISSUE:"):
+                logger.debug(
+                    "self_critique_passed",
+                    workspace_id=ctx.workspace_id,
+                    intent=intent,
+                )
+                return response_text
+
+            issue = critique.replace("ISSUE:", "").strip()
+            logger.info(
+                "self_critique_issue_detected",
+                workspace_id=ctx.workspace_id,
+                issue=issue[:200],
+                intent=intent,
+            )
+
+            # One retry pass with the critique injected
+            from lucy.pipeline.router import MODEL_TIERS
+            retried = await self.run(
+                message=user_message,
+                ctx=ctx,
+                slack_client=getattr(self, "_current_slack_client", None),
+                model_override=MODEL_TIERS.get("code", model),
+                failure_context=(
+                    f"Self-review found an issue with the previous response: {issue}. "
+                    f"Fix this specific problem and deliver a complete answer."
+                ),
+                _retry_depth=1,
+            )
+            if retried and len(retried) > len(response_text) * 0.5:
+                logger.info(
+                    "self_critique_retry_succeeded",
+                    workspace_id=ctx.workspace_id,
+                )
+                return retried
+
+        except Exception as exc:
+            logger.warning(
+                "self_critique_error",
+                workspace_id=ctx.workspace_id,
+                error=str(exc) or type(exc).__name__,
+            )
+
+        return response_text
 
     # ── Slack thread history ────────────────────────────────────────────
 
@@ -3518,6 +3786,36 @@ def _verify_output(
         issues.append(
             "Complex multi-step request received a very short response. "
             "Break the task into steps and execute each one."
+        )
+
+    # High-agency check: detect surrender patterns when the user expected action
+    low_agency_patterns = [
+        "i can't access",
+        "i'm unable to",
+        "unfortunately i cannot",
+        "i don't have access to",
+        "i'm not able to",
+        "i cannot access",
+        "i am unable to",
+        "that's outside my",
+        "falls outside my",
+        "i don't have the ability",
+        "i'm afraid i can't",
+    ]
+    action_words = [
+        "get", "show", "pull", "fetch", "create", "build", "generate",
+        "send", "connect", "set up", "check", "find", "run", "analyze",
+    ]
+    has_action_intent = any(w in user_lower for w in action_words)
+    has_low_agency = any(p in resp_lower for p in low_agency_patterns)
+    if has_low_agency and has_action_intent:
+        issues.append(
+            "Response contains a 'can't do' statement but the user expected action. "
+            "Rewrite to: offer the closest thing you CAN do, explain what you'd need "
+            "to do the full thing, or provide an alternative path. Never leave the "
+            "user with a dead end. Example: instead of 'I can't access Figma directly' "
+            "say 'I can't pull from Figma directly — if you drop the file here I can "
+            "work with it, or I can try to build a custom Figma connection. Want me to?'"
         )
 
     return {

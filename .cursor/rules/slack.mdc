@@ -28,7 +28,7 @@ alwaysApply: false
 ## Proactive Messaging
 - Cron-driven messages (heartbeat, issue alerts, workflow suggestions) are posted to relevant channels.
 - Destructive or high-impact actions require approval via an interactive message before execution.
-- Use `chat.update` to modify existing messages rather than posting new ones for status updates.
+- Always use `chat_postMessage` for progress and status updates. NEVER use `chat.update` to edit existing messages. Lucy never edits her own messages — this maintains trust and gives users a visible thread of work.
 
 ## Rate Limiting
 - Respect Slack's rate limits: 1 message per second per channel.

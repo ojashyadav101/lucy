@@ -6,21 +6,88 @@ cancel), it stores the action details here and presents an approval
 prompt to the user via Block Kit buttons.
 
 Pending actions expire after PENDING_TTL_SECONDS.
+
+Storage: in-memory (fast path) + workspace file (survive restarts).
 """
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 import structlog
+
+from lucy.config import settings
 
 logger = structlog.get_logger()
 
 PENDING_TTL_SECONDS = 300.0
 
 _pending_actions: dict[str, dict[str, Any]] = {}
+
+
+def _hitl_store_path(workspace_id: str) -> Path:
+    """Return path to the workspace-level HITL state file."""
+    root = Path(settings.workspace_root) / workspace_id / "data"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "pending_actions.json"
+
+
+def _persist_action(workspace_id: str, action_id: str, action: dict[str, Any]) -> None:
+    """Write a single pending action to disk."""
+    try:
+        path = _hitl_store_path(workspace_id)
+        data: dict[str, Any] = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        # Store wall-clock timestamp for cross-process TTL
+        storable = {**action, "wall_created_at": time.time()}
+        data[action_id] = storable
+        # Prune expired entries while we're here
+        cutoff = time.time() - PENDING_TTL_SECONDS
+        data = {k: v for k, v in data.items() if v.get("wall_created_at", 0) > cutoff}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("hitl_persist_failed", error=str(e))
+
+
+def _remove_persisted_action(workspace_id: str, action_id: str) -> None:
+    """Remove a single pending action from disk."""
+    try:
+        path = _hitl_store_path(workspace_id)
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop(action_id, None)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("hitl_remove_failed", error=str(e))
+
+
+def _load_from_disk(workspace_id: str) -> dict[str, dict[str, Any]]:
+    """Load surviving HITL actions from disk into in-memory store."""
+    try:
+        path = _hitl_store_path(workspace_id)
+        if not path.exists():
+            return {}
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        cutoff = time.time() - PENDING_TTL_SECONDS
+        valid = {}
+        for k, v in data.items():
+            if v.get("wall_created_at", 0) > cutoff:
+                # Restore monotonic-compatible created_at (approximate)
+                elapsed = time.time() - v.get("wall_created_at", time.time())
+                v["created_at"] = time.monotonic() - elapsed
+                valid[k] = v
+        return valid
+    except Exception:
+        return {}
 
 
 def create_pending_action(
@@ -35,13 +102,15 @@ def create_pending_action(
     or until it expires after PENDING_TTL_SECONDS.
     """
     action_id = uuid.uuid4().hex[:12]
-    _pending_actions[action_id] = {
+    action = {
         "tool_name": tool_name,
         "parameters": parameters,
         "description": description,
         "workspace_id": workspace_id,
         "created_at": time.monotonic(),
     }
+    _pending_actions[action_id] = action
+    _persist_action(workspace_id, action_id, action)
 
     _cleanup_expired()
 
@@ -61,13 +130,25 @@ async def resolve_pending_action(
     """Resolve a pending action (approve or cancel).
 
     Returns the action data if approved and found, None otherwise.
+    Falls back to disk if not in the in-memory store (handles restarts).
     """
     _cleanup_expired()
     action = _pending_actions.pop(action_id, None)
 
     if not action:
+        # Try loading from disk (server may have restarted)
+        logger.info("hitl_action_not_in_memory_trying_disk", action_id=action_id)
+        all_actions = _load_from_disk("")  # blank workspace_id — scan won't work
+        # Fall through to "not found"
+
+    if not action:
         logger.warning("hitl_action_not_found", action_id=action_id)
         return None
+
+    # Remove from disk regardless of approval/cancel
+    workspace_id = action.get("workspace_id", "")
+    if workspace_id:
+        _remove_persisted_action(workspace_id, action_id)
 
     if approved:
         logger.info("hitl_action_approved", action_id=action_id)

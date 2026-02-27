@@ -1,8 +1,8 @@
 {
   "path": "/workflow-discovery",
-  "cron": "0 10 * * 2,4",
-  "title": "Workflow Discovery & Proactive Setup",
-  "description": "Read and strictly follow `skills/workflow-discovery/SKILL.md`. Investigate one team member's slack history, analyze their pain points, and brainstorm 3 possible integrations or automations. Reach out to them via DM with a personalized proposal. Log your progress in `crons/workflow-discovery/discovery.md` so you know who you have already investigated.",
+  "cron": "0 10 * * *",
+  "title": "Workflow Discovery & Proactive Automation",
+  "description": "Read and strictly follow `skills/workflow-discovery/SKILL.md`. Investigate one team member's Slack history who you have NOT investigated recently (check `crons/workflow-discovery/discovery.md`). Analyze their recurring manual tasks, repeated questions, and pain points. Identify at least 2-3 concrete automation opportunities that could save them real time. If an automation is clearly valuable, propose it via DM with a specific, personalized message — not a generic one. Examples of good proactive suggestions: 'I noticed you post Stripe revenue every Monday — want me to automate that?', 'You've asked about open PRs 4 times this week — want me to set up a daily summary?'. Only reach out if you have something genuinely useful to say. Log who you investigated and what you found in `crons/workflow-discovery/discovery.md`.",
   "type": "agent",
   "timezone": "UTC",
   "delivery_mode": "dm"

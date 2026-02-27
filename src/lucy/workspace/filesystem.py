@@ -101,10 +101,46 @@ class WorkspaceFS:
             await f.write(content)
         return path
 
+    async def backup_file(self, relative_path: str) -> str | None:
+        """Create a timestamped backup of a file before modifying it.
+
+        Backups are stored in data/backups/ with a timestamp suffix.
+        Returns the backup path (relative to workspace root), or None if
+        the source file doesn't exist.
+        """
+        path = self._resolve(relative_path)
+        if not path.is_file():
+            return None
+
+        from datetime import datetime as _dt, timezone as _tz
+        ts = _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
+        backup_dir = self.root / "data" / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_name = relative_path.replace("/", "_").replace("\\", "_")
+        backup_path = backup_dir / f"{safe_name}.{ts}.bak"
+        shutil.copy2(str(path), str(backup_path))
+
+        logger.info(
+            "workspace_file_backed_up",
+            source=relative_path,
+            backup=str(backup_path.relative_to(self.root)),
+        )
+        return str(backup_path.relative_to(self.root))
+
+    async def write_file_with_backup(
+        self, relative_path: str, content: str
+    ) -> Path:
+        """Back up the existing file (if any), then write new content atomically."""
+        await self.backup_file(relative_path)
+        return await self.write_file(relative_path, content)
+
     async def delete_file(self, relative_path: str) -> bool:
         """Delete a file. Returns True if deleted, False if not found."""
         path = self._resolve(relative_path)
         if path.is_file():
+            # Create a backup before deletion
+            await self.backup_file(relative_path)
             await aiofiles.os.remove(path)
             return True
         return False
