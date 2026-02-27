@@ -1,9 +1,0 @@
-[
-  {
-    "label": "multi_step",
-    "elapsed_s": 22.0,
-    "response": "Found *2 users* in your Clerk instance:  *User 1* \u2022 *Email:* <mailto:antoniou.asimina1@gmail.com|antoniou.asimina1@gmail.com> \u2022 *Name:* (not provided) \u2022 *Auth method:* Email/password \u2022 *Created:* March 25, 2026  *User 2* \u2022 *Email:* <mailto:ss4161993@gmail.com|ss4161993@gmail.com>  \u2022 *Name:* Samantha",
-    "thread_ts": "1771953562.681209",
-    "status": "ok"
-  }
-]
