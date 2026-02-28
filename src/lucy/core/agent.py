@@ -279,7 +279,7 @@ class LucyAgent:
                 system_prompt = await build_lightweight_prompt(ws)
 
             messages = await self._build_thread_messages(
-                message, ctx, slack_client,
+                ctx, message, slack_client,
             )
             client = await self._get_client()
             async with trace.span("llm_call_fast") as llm_span:
