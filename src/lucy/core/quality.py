@@ -272,7 +272,12 @@ def assess_response_quality(
             confidence -= 1
 
     # 4. Response is very short for a complex question
-    if len(user_message) > 60 and len(response_text) < 100:
+    # But: short confirmations are fine for commands (save, delete, create, etc.)
+    _COMMAND_WORDS = {"save", "delete", "remove", "create", "set", "update",
+                      "write", "store", "add", "send", "deploy", "start",
+                      "stop", "trigger", "schedule", "cancel"}
+    is_command = any(w in user_lower.split()[:5] for w in _COMMAND_WORDS)
+    if len(user_message) > 80 and len(response_text) < 80 and not is_command:
         issues.append("Suspiciously short response for complex question")
         confidence -= 4
 

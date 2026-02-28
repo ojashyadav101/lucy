@@ -1612,7 +1612,9 @@ class LucyAgent:
                 if name.startswith("lucy_custom_"):
                     if any(s in name for s in ("_list_", "_get_metrics", "_get_stats", "_get_user_stats")):
                         return True
-                if name in ("lucy_get_channel_history", "lucy_search_slack_history"):
+                if name in ("lucy_get_channel_history", "lucy_search_slack_history",
+                            "lucy_workspace_read", "lucy_workspace_search",
+                            "lucy_workspace_list"):
                     return True
                 return False
 
@@ -3372,11 +3374,14 @@ class LucyAgent:
 
         try:
             client = await get_openclaw_client()
+            # Use fast model (gemini-2.5-flash) instead of frontier
+            # (gemini-3.1-pro-preview) which times out frequently.
+            # The quality check is simple correction, not frontier-level reasoning.
             result = await asyncio.wait_for(
                 client.chat_completion(
                     messages=[{"role": "user", "content": correction_prompt}],
                     config=ChatConfig(
-                        model=MODEL_TIERS["frontier"],
+                        model=MODEL_TIERS["fast"],
                         system_prompt=(
                             "You are a quality auditor for an AI assistant "
                             "named Lucy. Your job is to catch and fix errors "
@@ -3389,7 +3394,7 @@ class LucyAgent:
                         max_tokens=4096,
                     ),
                 ),
-                timeout=15.0,
+                timeout=10.0,
             )
 
             corrected = (result.content or "").strip()
