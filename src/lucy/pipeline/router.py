@@ -90,7 +90,8 @@ _MONITORING_KEYWORDS = re.compile(
 )
 
 _CHECK_PATTERNS = re.compile(
-    r"\b(check|verify|look|find|search|pull|get|fetch|show|list)\b",
+    r"\b(check|verify|look|find|search|pull|get|fetch|show|list|"
+    r"how many|how much|count|total|number of)\b",
     re.IGNORECASE,
 )
 
@@ -98,7 +99,15 @@ _DATA_SOURCE_KEYWORDS = re.compile(
     r"\b(calendar|email|emails|gmail|inbox|unread|schedule|meeting|meetings|"
     r"slack|github|issues?|pull requests?|commits?|notion|sheets?|"
     r"spreadsheet|jira|linear|trello|drive|news|latest|"
-    r"integrations?|connected|connections?)\b",
+    r"integrations?|connected|connections?|"
+    # Connected services and their data entities
+    r"clerk|polar|polarsh|polar\.sh|"
+    r"users?|customers?|subscribers?|subscriptions?|"
+    r"orders?|products?|invoices?|payments?|"
+    r"organizations?|sessions?|webhooks?|benefits?|discounts?|"
+    r"analytics|metrics|stats|statistics|signups?|"
+    # Web data operations
+    r"website|web\s*search|google|bing|scrape|crawl)\b",
     re.IGNORECASE,
 )
 
