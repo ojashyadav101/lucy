@@ -130,12 +130,19 @@ def load_custom_wrapper_tools(
     return tool_defs
 
 
-def detect_relevant_wrappers(message: str) -> list[str] | None:
+def detect_relevant_wrappers(
+    message: str,
+    allow_load_all: bool = True,
+) -> list[str] | None:
     """Detect which custom wrappers are relevant to the user's message.
 
     Returns a list of wrapper slugs that should be loaded, or None if
     ALL wrappers should be loaded (when the message is ambiguous or
     explicitly mentions "integrations"/"tools"/"what can you do").
+
+    If *allow_load_all* is False (used for cron executions), the
+    broad "load everything" shortcut is skipped — only wrappers whose
+    keywords appear in the message are returned.
 
     This saves ~12K tokens per request by not loading 66 irrelevant
     tool definitions (e.g., 31 Clerk + 35 Polar.sh tools when the
@@ -146,12 +153,13 @@ def detect_relevant_wrappers(message: str) -> list[str] | None:
     msg = message.lower()
 
     # If the user is asking about tools/integrations broadly, load everything
-    _LOAD_ALL = re.compile(
-        r"\b(?:integrations?|tools?|what can you|capabilities|services?|connected)\b",
-        re.IGNORECASE,
-    )
-    if _LOAD_ALL.search(msg):
-        return None  # load all
+    if allow_load_all:
+        _LOAD_ALL = re.compile(
+            r"\b(?:integrations?|tools?|what can you|capabilities|services?|connected)\b",
+            re.IGNORECASE,
+        )
+        if _LOAD_ALL.search(msg):
+            return None  # load all
 
     # Map wrapper slugs to trigger keywords
     _WRAPPER_TRIGGERS: dict[str, list[str]] = {}

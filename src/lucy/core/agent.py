@@ -711,7 +711,14 @@ class LucyAgent:
                 detect_relevant_wrappers,
                 load_custom_wrapper_tools,
             )
-            relevant_slugs = detect_relevant_wrappers(message)
+            # For cron executions, only load wrappers explicitly
+            # mentioned in the message — never load all via _LOAD_ALL.
+            if ctx.is_cron_execution:
+                relevant_slugs = detect_relevant_wrappers(
+                    message, allow_load_all=False,
+                )
+            else:
+                relevant_slugs = detect_relevant_wrappers(message)
             wrapper_tools = load_custom_wrapper_tools(relevant_slugs)
             tools.extend(wrapper_tools)
             if relevant_slugs is not None:
