@@ -1,0 +1,9 @@
+{
+  "path": "/heartbeat",
+  "cron": "*/30 8-22 * * *",
+  "title": "Proactive Heartbeat Check-in",
+  "description": "Read `HEARTBEAT.md` in the workspace root — it is your checklist. Walk through each item: check for unanswered questions in slack_reader logs, review global.log for recent task outputs, scan for pending items or follow-ups. If you find something actionable, take ONE visible action (answer a question, DM someone, post an insight). If NOTHING needs attention, respond with exactly HEARTBEAT_OK and nothing else. Do NOT manufacture activity — silence is fine.",
+  "type": "agent",
+  "timezone": "UTC",
+  "delivery_mode": "channel"
+}

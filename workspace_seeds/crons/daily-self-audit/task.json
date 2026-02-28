@@ -1,0 +1,9 @@
+{
+  "path": "/daily-self-audit",
+  "cron": "0 7 * * *",
+  "title": "Daily Self-Audit",
+  "description": "Run your daily self-audit. Do ALL of the following:\n\n1. **Channel awareness:** List all channels you have access to. For any channel you haven't catalogued yet, fetch its purpose/topic from Slack. Note any channel where your last message was more than 3 days ago — you may be missing things.\n\n2. **Unanswered questions:** Search recent Slack history (last 24 hours) for questions directed at you that you may not have answered. If you find any, flag them.\n\n3. **Stale knowledge check:** Scan `company/SKILL.md` and `team/SKILL.md` for entries that mention specific dates, deadlines, or goals that are now in the past. Flag anything that needs updating.\n\n4. **Automation opportunity scan:** Review the last 24 hours of Slack messages across your channels. Look for: repeated manual tasks, recurring questions, processes that could be automated. If you spot a clear automation opportunity that is genuinely valuable, note it and DM the relevant team member with a specific suggestion.\n\n5. **Pending items:** Check `data/session_memory.json` for any facts marked as pending follow-up. If something needs action, take it.\n\n6. **Log summary:** Post a brief internal summary to yourself (no Slack message needed unless you found something urgent). Log findings to `crons/daily-self-audit/audit.md`.\n\nDo NOT post to the main channel unless you found something genuinely urgent that a human needs to know about right now. This is a background intelligence check, not a status update.",
+  "type": "agent",
+  "timezone": "UTC",
+  "delivery_mode": "dm"
+}

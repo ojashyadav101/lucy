@@ -1,0 +1,27 @@
+---
+description: Testing standards and conventions
+globs: ["tests/**/*.py"]
+alwaysApply: false
+---
+
+# Testing Standards
+
+## Structure
+- Tests in `tests/`, mirroring `src/lucy/` structure (e.g., `tests/core/test_agent.py`).
+- Shared fixtures in `tests/conftest.py`.
+
+## Requirements
+- Every new module MUST have a corresponding test file before it is considered complete.
+- Tests use `pytest` with `pytest-asyncio` for async test functions.
+- Test function names describe the behavior: `test_skill_parser_extracts_yaml_frontmatter`.
+
+## Mocking
+- Unit tests mock all external services (Slack API, OpenClaw, Composio).
+- Use `unittest.mock.AsyncMock` for async interfaces.
+- Never make real HTTP calls in unit tests.
+
+## Fixtures
+- `workspace_id` fixture: returns a deterministic test workspace ID.
+- `db_session` fixture: provides an async SQLAlchemy session against a test database.
+- `mock_slack_client` fixture: returns a pre-configured mock Slack WebClient.
+- `tmp_workspace` fixture: provides a temporary workspace directory for filesystem tests.

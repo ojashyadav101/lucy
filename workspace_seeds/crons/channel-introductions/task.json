@@ -1,0 +1,10 @@
+{
+  "path": "/channel-introductions",
+  "cron": "0 10 * * 1-5",
+  "title": "Introduce Lucy to public channels",
+  "description": "Scan recent public channel activity. Pick one active channel that Lucy has not introduced herself to yet. Send a short, friendly introduction with one concrete, contextual example of how you can help them based on what they are currently discussing. Log the channel name to `execution.log`.",
+  "type": "agent",
+  "timezone": "UTC",
+  "delivery_mode": "channel",
+  "max_runs": 3
+}

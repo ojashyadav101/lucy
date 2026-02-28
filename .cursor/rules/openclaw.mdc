@@ -1,0 +1,38 @@
+---
+description: LLM integration protocol (OpenRouter + OpenClaw)
+globs: ["src/lucy/core/**/*.py"]
+alwaysApply: false
+---
+
+# LLM Integration Protocol
+
+## Routing Architecture
+- All LLM calls route through `src/lucy/core/openclaw.py` — the `OpenClawClient` class.
+- Requests go to **OpenRouter** (`https://openrouter.ai/api/v1`), not directly to OpenClaw.
+- OpenClaw's `/v1/chat/completions` strips `tools`/`tool_choice` — do NOT use it for tool calling.
+- Primary model: `minimax/minimax-m2.5` (set via `settings.openclaw_model`).
+- API key: `settings.openrouter_api_key` (loaded from `keys.json` or `LUCY_OPENROUTER_API_KEY` env var).
+
+## Tool Calling
+- Composio meta-tools (6 tools) are passed as `tools` parameter to OpenRouter.
+- minimax-m2.5 has native interleaved thinking — reasons between tool calls.
+- `tool_choice="auto"` is always used; the model decides when to call tools.
+- Tool call responses are parsed via `_parse_tool_calls()` into `{id, name, parameters}` format.
+
+## OpenClaw (Secondary)
+- OpenClaw gateway remains available at `settings.openclaw_base_url`.
+- Use for future features: engram memory, code sandbox (`exec` tool), sub-agent orchestration.
+- NOT in the critical LLM chat path.
+
+## System Prompt Assembly
+- System prompt is built in `src/lucy/pipeline/prompt.py` by combining:
+  1. `assets/SOUL.md` — personality and tone
+  2. `assets/SYSTEM_PROMPT.md` — structured instructions (skills, rules, approach)
+  3. Dynamic skill descriptions from the workspace
+  4. Composio meta-tool definitions
+- The assembled prompt is passed as the system message.
+
+## Error Handling
+- 5xx errors: retry once after 2 seconds, then surface to user.
+- 4xx errors: log the full request/response, do not retry.
+- Never expose raw API error payloads to Slack users.

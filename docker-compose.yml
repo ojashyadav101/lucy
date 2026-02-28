@@ -1,0 +1,40 @@
+# Local development services for Lucy
+#
+# Usage:
+#     docker compose up -d
+#     docker compose down
+#     docker compose logs -f postgres
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lucy-postgres
+    environment:
+      POSTGRES_USER: lucy
+      POSTGRES_PASSWORD: lucy
+      POSTGRES_DB: lucy
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lucy -d lucy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  camofox:
+    image: ghcr.io/redf0x1/camofox-browser:latest
+    container_name: lucy-camofox
+    ports:
+      - "9377:9377"
+    environment:
+      - PORT=9377
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
