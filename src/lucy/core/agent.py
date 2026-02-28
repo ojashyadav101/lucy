@@ -685,8 +685,20 @@ class LucyAgent:
                 },
             })
 
-            from lucy.integrations.custom_wrappers import load_custom_wrapper_tools
-            tools.extend(load_custom_wrapper_tools())
+            from lucy.integrations.custom_wrappers import (
+                detect_relevant_wrappers,
+                load_custom_wrapper_tools,
+            )
+            relevant_slugs = detect_relevant_wrappers(message)
+            wrapper_tools = load_custom_wrapper_tools(relevant_slugs)
+            tools.extend(wrapper_tools)
+            if relevant_slugs is not None:
+                logger.info(
+                    "selective_tool_loading",
+                    relevant_slugs=relevant_slugs,
+                    loaded_count=len(wrapper_tools),
+                    message_preview=message[:80],
+                )
 
             tools.append({
                 "type": "function",
