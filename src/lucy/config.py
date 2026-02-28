@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import structlog
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger()
 
 
 def _load_keys_json() -> dict:
@@ -19,8 +22,8 @@ def _load_keys_json() -> dict:
         try:
             with open(keys_path) as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("keys_json_load_failed", error=str(e))
     return {}
 
 
@@ -40,10 +43,10 @@ class Settings(BaseSettings):
 
     # Model tiers for dynamic routing
     model_tier_fast: str = "google/gemini-2.5-flash"
-    model_tier_default: str = "moonshotai/kimi-k2.5"
+    model_tier_default: str = "minimax/minimax-m2.5"
     model_tier_code: str = "minimax/minimax-m2.5"
     model_tier_research: str = "google/gemini-3-flash-preview"
-    model_tier_document: str = "moonshotai/kimi-k2.5"
+    model_tier_document: str = "minimax/minimax-m2.5"
     model_tier_frontier: str = "google/gemini-3.1-pro-preview"
 
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)

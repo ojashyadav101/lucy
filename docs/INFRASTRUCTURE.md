@@ -222,7 +222,7 @@ class Trace:
 
 ```jsonl
 {"trace_id": "abc-123", "total_ms": 4523, "model": "google/gemini-2.5-flash", "intent": "code", "tool_calls": 5, "spans": [...]}
-{"trace_id": "def-456", "total_ms": 1200, "model": "moonshotai/kimi-k2.5", "intent": "lookup", "tool_calls": 2, "spans": [...]}
+{"trace_id": "def-456", "total_ms": 1200, "model": "minimax/minimax-m2.5", "intent": "lookup", "tool_calls": 2, "spans": [...]}
 ```
 
 ### Context Variable

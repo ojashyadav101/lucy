@@ -203,10 +203,10 @@ All environment variables are prefixed with `LUCY_`.
 | `LUCY_OPENCLAW_MODEL` | No | `google/gemini-2.5-flash` | Default model |
 | `LUCY_OPENCLAW_READ_TIMEOUT` | No | `120.0` | LLM read timeout (seconds) |
 | `LUCY_MODEL_TIER_FAST` | No | `google/gemini-2.5-flash` | Fast tier model |
-| `LUCY_MODEL_TIER_DEFAULT` | No | `moonshotai/kimi-k2.5` | Default tier model |
+| `LUCY_MODEL_TIER_DEFAULT` | No | `minimax/minimax-m2.5` | Default tier model |
 | `LUCY_MODEL_TIER_CODE` | No | `minimax/minimax-m2.5` | Code tier model |
 | `LUCY_MODEL_TIER_RESEARCH` | No | `google/gemini-3-flash-preview` | Research tier model |
-| `LUCY_MODEL_TIER_DOCUMENT` | No | `moonshotai/kimi-k2.5` | Document tier model |
+| `LUCY_MODEL_TIER_DOCUMENT` | No | `minimax/minimax-m2.5` | Document tier model |
 | `LUCY_MODEL_TIER_FRONTIER` | No | `google/gemini-3.1-pro-preview` | Frontier tier model |
 | `LUCY_OPENCLAW_BASE_URL` | No | `http://167.86.82.46:18791` | OpenClaw Gateway URL |
 | `LUCY_OPENCLAW_API_KEY` | No | — | OpenClaw Gateway token |

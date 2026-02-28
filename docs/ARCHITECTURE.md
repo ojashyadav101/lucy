@@ -194,10 +194,10 @@ Lucy uses six model tiers, each mapped to a specific model in `config.py`:
 | Tier | Default Model | Used For |
 |------|---------------|----------|
 | `fast` | `gemini-2.5-flash` | Greetings, simple lookups, supervisor checks, planning |
-| `default` | `kimi-k2.5` | Tool-use tasks, integrations, general requests |
+| `default` | `minimax-m2.5` | Tool-use tasks, integrations, general requests |
 | `code` | `minimax-m2.5` | Code writing, data analysis, document generation |
 | `research` | `gemini-3-flash-preview` | Research, competitive analysis, deep investigation |
-| `document` | `kimi-k2.5` | Report/PDF/Excel generation |
+| `document` | `minimax-m2.5` | Report/PDF/Excel generation |
 | `frontier` | `gemini-3.1-pro-preview` | Complex multi-step tasks, escalation fallback |
 
 **Escalation path:** `fast → default → code → research → frontier`

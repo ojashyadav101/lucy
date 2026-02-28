@@ -22,6 +22,8 @@ logger = structlog.get_logger()
 _processed_events: dict[str, float] = {}
 _dedup_lock: asyncio.Lock | None = None
 EVENT_DEDUP_TTL = 30.0
+HANDLER_EXECUTION_TIMEOUT = 14400
+APPROVED_ACTION_TIMEOUT = 300
 
 
 _agent_semaphore: asyncio.Semaphore | None = None
@@ -101,7 +103,7 @@ def register_handlers(app: AsyncApp) -> None:
 
         logger.info(
             "app_mention",
-            text=clean_text[:100],
+            text=clean_text[:300],
             channel=channel_id,
             workspace_id=context.get("workspace_id", "unknown"),
         )
@@ -152,7 +154,7 @@ def register_handlers(app: AsyncApp) -> None:
         if channel_type == "im":
             logger.info(
                 "direct_message",
-                text=text[:100],
+                text=text[:300],
                 workspace_id=context.get("workspace_id", "unknown"),
             )
             await _handle_message(
@@ -199,7 +201,8 @@ def register_handlers(app: AsyncApp) -> None:
                 return
 
             is_lucy_thread = await _is_lucy_in_thread(
-                client, channel_id, event.get("thread_ts")
+                client, channel_id, event.get("thread_ts"),
+                lucy_bot_id=bot_user_id or "",
             )
             if is_lucy_thread:
                 await _handle_message(
@@ -313,6 +316,98 @@ def register_handlers(app: AsyncApp) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# INITIAL ACKNOWLEDGMENT
+# ═══════════════════════════════════════════════════════════════════════
+
+_ACK_SYSTEM_PROMPT = """\
+You are Lucy, a sharp AI coworker. The user just sent a request that will \
+take you a while to complete. Write a 1-2 sentence acknowledgment that:
+
+1. References the SPECIFIC task they asked for (not generic)
+2. Shows genuine enthusiasm or curiosity about the request
+3. Gives a rough time hint ("give me a few minutes", "should have this shortly")
+4. Sounds like a real colleague on Slack, not a bot
+
+RULES:
+- NEVER start with "Got it" or "On it"
+- NEVER use phrases like "working on this now" or "I'll get right on that"
+- Be specific to what they asked. If they want an app, mention what kind. \
+If they want data, mention what data.
+- Use 1 emoji max, only if it fits naturally
+- Keep it under 40 words
+- Use contractions. Sound human.
+- Match the energy: if they're excited, match it. If it's routine, be chill.
+
+Examples of GOOD acknowledgments:
+- "Love this idea 🌙 Building you a lunar cycle tracker with a handcrafted feel. Give me a few minutes."
+- "Pulling your Stripe revenue data now, I'll have the breakdown with trends in a couple minutes."
+- "Interesting comparison. Let me dig into the latest pricing and features across all three."
+
+Examples of BAD acknowledgments (never do these):
+- "Got it, working on this now."
+- "On it — I'll build this for you."
+- "I'll get right on that!"
+- "Sure thing! Let me work on this."
+
+Output ONLY the acknowledgment text. Nothing else."""
+
+
+_SKIP_ACK_INTENTS = frozenset({"greeting", "conversational", "lookup"})
+
+_FAST_ACK_INTENTS = frozenset({
+    "code", "code_reasoning", "data", "document", "research",
+    "monitoring", "tool_use",
+})
+
+
+async def _build_acknowledgment(text: str, intent: str) -> str | None:
+    """Generate a context-aware acknowledgment via a fast LLM call.
+
+    Returns None for tasks that are likely <30s (no ack needed).
+    Falls back to a minimal static message if the LLM call fails.
+    """
+    if intent in _SKIP_ACK_INTENTS:
+        return None
+
+    word_count = len(text.split())
+    if word_count < 5 and intent == "tool_use":
+        return None
+
+    if intent not in _FAST_ACK_INTENTS:
+        return None
+
+    try:
+        from lucy.core.openclaw import ChatConfig, get_openclaw_client
+
+        client = await get_openclaw_client()
+        user_msg = (
+            f"User's request (intent: {intent}):\n"
+            f"{text[:300]}"
+        )
+
+        response = await asyncio.wait_for(
+            client.chat_completion(
+                messages=[{"role": "user", "content": user_msg}],
+                config=ChatConfig(
+                    model="google/gemini-2.5-flash",
+                    system_prompt=_ACK_SYSTEM_PROMPT,
+                    max_tokens=80,
+                    temperature=0.9,
+                ),
+            ),
+            timeout=3.0,
+        )
+
+        result = (response.content or "").strip()
+        if result and 10 < len(result) < 200:
+            return result
+    except Exception as exc:
+        logger.debug("ack_llm_failed", error=str(exc))
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # CORE MESSAGE HANDLER
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -371,8 +466,8 @@ async def _handle_message(
                     name=reaction.emoji,
                     timestamp=event_ts,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("slack_reaction_add_failed", error=str(e))
         return
 
     # ── Fast path: skip full agent loop for simple messages ─────────
@@ -425,9 +520,13 @@ async def _handle_message(
 
     # ── Thread lock: prevent concurrent agent runs in same thread ─────
     effective_thread = thread_ts or event_ts
+    acquired = False
+    tlock = None
     if effective_thread:
         tlock = await _get_thread_lock(effective_thread)
-        if tlock.locked():
+        try:
+            acquired = await asyncio.wait_for(tlock.acquire(), timeout=0.1)
+        except asyncio.TimeoutError:
             logger.info(
                 "thread_busy_skipped",
                 thread_ts=effective_thread,
@@ -445,9 +544,10 @@ async def _handle_message(
     # ── Full agent loop path ──────────────────────────────────────────
     working_emoji = get_working_emoji(text)
     if client and channel_id and event_ts:
-        asyncio.create_task(
+        reaction_task = asyncio.create_task(
             _add_reaction(client, channel_id, event_ts, emoji=working_emoji)
         )
+        reaction_task.add_done_callback(_log_task_exception)
 
     from lucy.infra.trace import Trace
     trace = Trace.current()
@@ -462,6 +562,16 @@ async def _handle_message(
 
     route = classify_and_route(text)
     priority = classify_priority(text, route.tier)
+
+    # ── Immediate acknowledgment for complex tasks ────────────────
+    if route.intent in _FAST_ACK_INTENTS and client and channel_id:
+        async def _send_ack() -> None:
+            ack_msg = await _build_acknowledgment(text, route.intent)
+            if ack_msg:
+                await say(text=ack_msg, thread_ts=thread_ts)
+
+        ack_task = asyncio.create_task(_send_ack())
+        ack_task.add_done_callback(_log_task_exception)
 
     # If queue is busy and this is a HIGH priority request, tell the user
     queue = get_request_queue()
@@ -478,8 +588,8 @@ async def _handle_message(
                     name="hourglass_flowing_sand",
                     timestamp=event_ts,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("slack_hourglass_reaction_add_failed", error=str(e))
 
     try:
         from lucy.core.agent import AgentContext, get_agent
@@ -499,23 +609,25 @@ async def _handle_message(
                 from lucy.integrations.composio_client import get_composio_client
                 composio = get_composio_client()
                 composio.set_entity_id(workspace_id, f"slack_{team_id}")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "composio_setup_failed",
+                    workspace_id=workspace_id,
+                    error=str(e),
+                )
 
         # ── Auto-register channel metadata (purpose / DM flag) ───────
         if channel_id and workspace_id:
-            asyncio.create_task(
+            registration_task = asyncio.create_task(
                 _register_channel_background(client, workspace_id, channel_id)
             )
+            registration_task.add_done_callback(_log_task_exception)
 
         # ── Check if this should run as a background task ───────────
-        from lucy.pipeline.router import classify_and_route
         from lucy.core.task_manager import (
             get_task_manager,
             should_run_as_background_task,
         )
-
-        route = classify_and_route(text)
 
         if should_run_as_background_task(text, route.tier):
             task_mgr = get_task_manager()
@@ -532,7 +644,7 @@ async def _handle_message(
                     workspace_id=workspace_id,
                     channel_id=channel_id or "",
                     thread_ts=thread_ts or "",
-                    description=text[:100],
+                    description=text[:300],
                     handler=_bg_handler,
                     slack_client=client,
                 )
@@ -551,12 +663,22 @@ async def _handle_message(
                     agent, text, ctx, client, workspace_id,
                 )
 
-        if effective_thread:
-            tlock = await _get_thread_lock(effective_thread)
-            async with tlock:
-                response_text = await _sync_run()
-        else:
-            response_text = await _sync_run()
+        try:
+            response_text = await asyncio.wait_for(
+                _sync_run(), timeout=HANDLER_EXECUTION_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "handler_execution_timeout",
+                workspace_id=workspace_id,
+                timeout=HANDLER_EXECUTION_TIMEOUT,
+            )
+            await say(
+                text="That request took too long to process. "
+                "Want me to give it another try?",
+                thread_ts=thread_ts,
+            )
+            return
 
         from lucy.pipeline.output import process_output
         from lucy.slack.blockkit import text_to_blocks
@@ -571,7 +693,16 @@ async def _handle_message(
         slack_text = await process_output(response_text)
         slack_text = format_links(slack_text or "")
         if not slack_text:
-            slack_text = response_text or "Done!"
+            if not response_text:
+                logger.error(
+                    "empty_agent_response",
+                    workspace_id=workspace_id,
+                    text=text[:300],
+                )
+            slack_text = response_text or (
+                "I processed your request but didn't generate a response. "
+                "Could you rephrase or provide more details?"
+            )
 
         if should_split_response(slack_text):
             chunks = split_response(slack_text)
@@ -581,7 +712,7 @@ async def _handle_message(
                 if blocks:
                     blocks = enhance_blocks(blocks)
                     chunk_kwargs["blocks"] = blocks
-                    chunk_kwargs["text"] = chunk[:300]
+                    chunk_kwargs["text"] = chunk[:500]
                 else:
                     chunk_kwargs["text"] = chunk
 
@@ -596,7 +727,7 @@ async def _handle_message(
             if blocks:
                 blocks = enhance_blocks(blocks)
                 post_kwargs["blocks"] = blocks
-                post_kwargs["text"] = slack_text[:300]
+                post_kwargs["text"] = slack_text[:500]
             else:
                 post_kwargs["text"] = slack_text
 
@@ -613,52 +744,32 @@ async def _handle_message(
             error=str(e),
             exc_info=True,
         )
-        from lucy.pipeline.humanize import pick
-
-        task_hint = ""
-        if text:
-            snippet = text.strip()[:80]
-            if len(snippet) > 60:
-                snippet = snippet[:57] + "..."
-            task_hint = f' while working on "{snippet}"'
-
         error_str = str(e).lower()
         if "timeout" in error_str or "timed out" in error_str:
             fallback = (
-                f"A service I was reaching out to didn't respond in time{task_hint}. "
+                "A service I was reaching out to was slow. "
                 "Want me to give it another try?"
             )
         elif "rate limit" in error_str or "429" in error_str:
-            pool_msg = pick("error_rate_limit")
             fallback = (
-                f"Getting a lot of requests right now, "
-                f"I'll retry{task_hint} in a moment."
-                if task_hint
-                else pool_msg
-            )
-        elif "connection" in error_str:
-            pool_msg = pick("error_connection")
-            fallback = (
-                f"Had trouble reaching an external service{task_hint}. "
-                "Let me give it another shot."
-                if task_hint
-                else pool_msg
+                "I'm getting rate limited right now. "
+                "I'll be ready again in a moment."
             )
         else:
-            pool_msg = pick("error_generic")
             fallback = (
-                f"I hit an unexpected issue{task_hint}. "
-                "Let me try a different approach."
-                if task_hint
-                else pool_msg
+                "I ran into an issue I couldn't work around. "
+                "Want me to try again?"
             )
         await say(text=fallback, thread_ts=thread_ts)
 
     finally:
+        if acquired and tlock is not None:
+            tlock.release()
         if client and channel_id and event_ts:
-            asyncio.create_task(
+            cleanup_task = asyncio.create_task(
                 _remove_reaction(client, channel_id, event_ts, emoji=working_emoji)
             )
+            cleanup_task.add_done_callback(_log_task_exception)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -681,22 +792,42 @@ async def _run_with_recovery(
     """
     from lucy.core.openclaw import OpenClawError
 
+    def _is_client_error(error_str: str) -> bool:
+        return any(
+            code in error_str for code in ("400", "401", "403", "404", "405", "422")
+        )
+
+    def _retry_delay(error_str: str) -> float:
+        lower = error_str.lower()
+        if "rate limit" in lower or "429" in lower:
+            return 15.0
+        if "timeout" in lower:
+            return 3.0
+        return 2.0
+
     # Attempt 1: normal run (router-selected model)
+    last_exc: Exception | None = None
     try:
         return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
     except OpenClawError as e:
         last_error = f"OpenClaw error (status {e.status_code}): {e}"
+        last_exc = e
         logger.warning(
             "agent_attempt_1_failed",
             status_code=e.status_code,
             workspace_id=workspace_id,
         )
+        if _is_client_error(str(e.status_code)):
+            raise
     except Exception as e:
         last_error = str(e)
+        last_exc = e
         logger.warning("agent_attempt_1_error", error=str(e), workspace_id=workspace_id)
+        if _is_client_error(last_error):
+            raise
 
-    # Attempt 2: single retry with failure context
-    await asyncio.sleep(2)
+    # Attempt 2: single retry with failure context (skip for client errors)
+    await asyncio.sleep(_retry_delay(last_error))
     try:
         return await agent.run(
             message=text,
@@ -705,11 +836,10 @@ async def _run_with_recovery(
             failure_context=f"Previous attempt failed: {last_error}",
         )
     except Exception as e:
+        last_exc = e
         logger.warning("agent_attempt_2_error", error=str(e), workspace_id=workspace_id)
 
     from lucy.pipeline.edge_cases import classify_error_for_degradation, get_degradation_message
-    import sys
-    last_exc = sys.exc_info()[1]
     error_type = classify_error_for_degradation(last_exc) if last_exc else "unknown"
     degradation_msg = get_degradation_message(error_type)
     logger.error(
@@ -723,6 +853,11 @@ async def _run_with_recovery(
 # ═══════════════════════════════════════════════════════════════════════
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════════
+
+def _log_task_exception(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+    if not task.cancelled() and task.exception():
+        logger.warning("background_task_failed", error=str(task.exception()))
+
 
 def _clean_mention(text: str) -> str:
     """Remove @Lucy mention from text."""
@@ -768,8 +903,13 @@ async def _register_channel_background(
             is_private=ch.get("is_private", False),
             is_dm=ch.get("is_im", False),
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "channel_registration_failed",
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            error=str(e),
+        )
 
 
 async def _add_reaction(
@@ -784,8 +924,8 @@ async def _add_reaction(
             name=emoji,
             timestamp=timestamp,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("slack_reaction_add_failed", emoji=emoji, error=str(e))
 
 
 async def _remove_reaction(
@@ -800,12 +940,15 @@ async def _remove_reaction(
             name=emoji,
             timestamp=timestamp,
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("slack_reaction_remove_failed", emoji=emoji, error=str(e))
 
 
 async def _is_lucy_in_thread(
-    client: Any, channel_id: str | None, thread_ts: str | None
+    client: Any,
+    channel_id: str | None,
+    thread_ts: str | None,
+    lucy_bot_id: str = "",
 ) -> bool:
     """Check if Lucy has previously replied in a thread."""
     if not channel_id or not thread_ts:
@@ -815,10 +958,15 @@ async def _is_lucy_in_thread(
             channel=channel_id, ts=thread_ts, limit=50
         )
         for msg in result.get("messages", []):
-            if msg.get("bot_id") or msg.get("app_id"):
+            if lucy_bot_id and (
+                msg.get("user") == lucy_bot_id
+                or msg.get("bot_id") == lucy_bot_id
+            ):
                 return True
-    except Exception:
-        pass
+            if not lucy_bot_id and (msg.get("bot_id") or msg.get("app_id")):
+                return True
+    except Exception as e:
+        logger.warning("thread_history_check_failed", error=str(e))
     return False
 
 
@@ -832,6 +980,7 @@ async def _execute_approved_action(
     context: AsyncBoltContext,
 ) -> None:
     """Execute a human-approved action through the agent."""
+    tool_name = action_data.get("tool_name", "unknown")
     try:
         from lucy.core.agent import AgentContext, get_agent
 
@@ -844,18 +993,44 @@ async def _execute_approved_action(
         instruction = (
             f"The user has approved the following action. Execute it now:\n"
             f"{action_data.get('description', '')}\n"
-            f"Tool: {action_data.get('tool_name', '')}\n"
+            f"Tool: {tool_name}\n"
             f"Parameters: {action_data.get('parameters', {})}"
         )
-        response = await agent.run(message=instruction, ctx=ctx, slack_client=client)
+        response = await asyncio.wait_for(
+            agent.run(message=instruction, ctx=ctx, slack_client=client),
+            timeout=APPROVED_ACTION_TIMEOUT,
+        )
 
         from lucy.pipeline.output import process_output
-        await say(text=await process_output(response), thread_ts=thread_ts)
+        output = await process_output(response)
+        if not output or not output.strip():
+            output = "The action completed but produced no visible output."
+        await say(text=output, thread_ts=thread_ts)
 
+    except asyncio.TimeoutError:
+        logger.error(
+            "approved_action_timeout",
+            tool=tool_name,
+            timeout=APPROVED_ACTION_TIMEOUT,
+            workspace_id=workspace_id,
+        )
+        await say(
+            text=f"The approved action '{tool_name}' timed out after "
+            f"{APPROVED_ACTION_TIMEOUT}s. Want me to try again?",
+            thread_ts=thread_ts,
+        )
     except Exception as e:
-        logger.error("approved_action_failed", error=str(e))
-        from lucy.pipeline.humanize import pick
-        await say(text=pick("error_generic"), thread_ts=thread_ts)
+        logger.error(
+            "approved_action_failed",
+            tool=tool_name,
+            error=str(e),
+            workspace_id=workspace_id,
+        )
+        await say(
+            text=f"The approved action '{tool_name}' failed: {e}. "
+            "Want me to try again?",
+            thread_ts=thread_ts,
+        )
 
 
 async def _handle_connect(
@@ -867,9 +1042,10 @@ async def _handle_connect(
         from lucy.integrations.composio_client import get_composio_client
 
         client = get_composio_client()
-        url = await client.authorize(
+        auth_result = await client.authorize(
             workspace_id=workspace_id, toolkit=provider
         )
+        url = auth_result.get("url")
         if url:
             from lucy.pipeline.humanize import humanize as _hz
             msg = await _hz(
@@ -878,11 +1054,13 @@ async def _handle_connect(
                 f"authorize, and let you know when done.",
             )
             await say(text=msg)
-            client.invalidate_cache(workspace_id)
+            await client.invalidate_cache(workspace_id)
         else:
+            auth_error = auth_result.get("error", "unknown error")
             from lucy.pipeline.humanize import humanize as _hz
             msg = await _hz(
-                f"You couldn't generate a connection link for {provider}. "
+                f"You couldn't generate a connection link for {provider} "
+                f"({auth_error}). "
                 f"Suggest the user ask you in a regular message instead "
                 f"so you can search for the right integration name.",
             )
