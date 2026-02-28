@@ -30,6 +30,7 @@ logger = structlog.get_logger()
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent.parent / "prompts"
 _SOUL_PATH = _PROMPTS_DIR / "SOUL.md"
+_SOUL_COMPACT_PATH = _PROMPTS_DIR / "SOUL_COMPACT.md"
 _PROMPT_TEMPLATE_PATH = _PROMPTS_DIR / "SYSTEM_PROMPT.md"
 _SYSTEM_CORE_PATH = _PROMPTS_DIR / "SYSTEM_CORE.md"
 _SYSTEM_CORE_COMPACT_PATH = _PROMPTS_DIR / "SYSTEM_CORE_COMPACT.md"
@@ -39,7 +40,9 @@ _PROMPT_MODULES_DIR = _PROMPTS_DIR / "modules"
 _SECTION_SEP = "\n\n---\n\n"
 
 
-def _load_soul() -> str:
+def _load_soul(*, compact: bool = False) -> str:
+    if compact and _SOUL_COMPACT_PATH.exists():
+        return _SOUL_COMPACT_PATH.read_text(encoding="utf-8")
     if _SOUL_PATH.exists():
         return _SOUL_PATH.read_text(encoding="utf-8")
     return (
@@ -174,7 +177,7 @@ async def build_system_prompt(
                  Default True. Set False for research/document intents
                  where the extra formatting guidance helps.
     """
-    soul = _load_soul()
+    soul = _load_soul(compact=compact)
     system_core = _load_system_core(compact=compact)
     skill_descriptions = await get_skill_descriptions_for_prompt(ws)
     key_content = await get_key_skill_content(ws)
