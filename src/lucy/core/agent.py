@@ -304,7 +304,11 @@ class LucyAgent:
             )
             from lucy.pipeline.prompt import build_lightweight_prompt
             async with trace.span("build_lightweight_prompt"):
-                system_prompt = await build_lightweight_prompt(ws)
+                system_prompt = await build_lightweight_prompt(
+                    ws,
+                    user_slack_id=ctx.user_slack_id,
+                    workspace_id=str(ctx.workspace_id),
+                )
 
             messages = await self._build_thread_messages(
                 ctx, message, slack_client,
@@ -714,9 +718,17 @@ class LucyAgent:
             # For cron executions, use strict mode: only match on
             # service names (clerk, polar), not generic keywords like
             # "user" or "product" that appear in cron boilerplate.
+            # Also strip [Connected Integrations] section from the
+            # message since it always contains service names that
+            # would cause ALL wrappers to load for every cron run.
             if ctx.is_cron_execution:
+                import re as _re
+                _cron_msg = _re.sub(
+                    r"\[Connected Integrations\][^\n]*\n[^\n]*",
+                    "", message,
+                )
                 relevant_slugs = detect_relevant_wrappers(
-                    message, allow_load_all=False, strict_mode=True,
+                    _cron_msg, allow_load_all=False, strict_mode=True,
                 )
             else:
                 relevant_slugs = detect_relevant_wrappers(message)
@@ -845,7 +857,7 @@ class LucyAgent:
             utc_now = datetime.now(timezone.utc)
             time_block = (
                 f"\n\n## Current Time\nUTC: "
-                f"{utc_now.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                f"{utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}\n"
             )
 
             if ctx.user_slack_id:
@@ -861,10 +873,12 @@ class LucyAgent:
                         ctx.workspace_id, ctx.user_slack_id,
                     )
                     if local_time and tz_name:
-                        local_str = local_time.strftime("%Y-%m-%d %H:%M")
+                        local_str = local_time.strftime(
+                            "%A, %B %d, %Y %H:%M",
+                        )
                         time_block = (
                             f"\n\n## Current Time\n"
-                            f"UTC: {utc_now.strftime('%Y-%m-%d %H:%M UTC')}\n"
+                            f"UTC: {utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}\n"
                             f"User's local time ({tz_name}): {local_str}\n"
                             f"IMPORTANT: Always respond with times in the "
                             f"user's timezone ({tz_name}) unless they "

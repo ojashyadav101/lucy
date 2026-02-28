@@ -105,7 +105,12 @@ _COMMON_MODULES = ["tool_use", "memory"]
 
 _SOUL_LITE_PATH = _PROMPTS_DIR / "SOUL_LITE.md"
 
-async def build_lightweight_prompt(ws: WorkspaceFS) -> str:
+async def build_lightweight_prompt(
+    ws: WorkspaceFS,
+    *,
+    user_slack_id: str | None = None,
+    workspace_id: str | None = None,
+) -> str:
     """Build a minimal prompt for simple conversational messages.
 
     This skips the full 85KB system prompt, tool documentation, and
@@ -114,6 +119,8 @@ async def build_lightweight_prompt(ws: WorkspaceFS) -> str:
 
     Typical size: ~2-4KB vs ~85KB for the full prompt.
     """
+    from datetime import datetime, timezone
+
     # Use SOUL_LITE if available, otherwise extract key personality from SOUL
     if _SOUL_LITE_PATH.exists():
         soul = _SOUL_LITE_PATH.read_text(encoding="utf-8")
@@ -132,10 +139,37 @@ async def build_lightweight_prompt(ws: WorkspaceFS) -> str:
         "them to elaborate so you can assist properly."
     )
 
+    # Current date/time — critical for "what day is it?" type questions
+    utc_now = datetime.now(timezone.utc)
+    time_block = (
+        f"\n\n## Current Time\n"
+        f"UTC: {utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}"
+    )
+
+    # Try to get user's local timezone
+    if user_slack_id and workspace_id:
+        try:
+            from lucy.workspace.timezone import (
+                get_user_local_time,
+                get_user_timezone_name,
+            )
+            tz_name = await get_user_timezone_name(workspace_id, user_slack_id)
+            local_time = await get_user_local_time(workspace_id, user_slack_id)
+            if local_time and tz_name:
+                time_block = (
+                    f"\n\n## Current Time\n"
+                    f"UTC: {utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}\n"
+                    f"User's local time ({tz_name}): "
+                    f"{local_time.strftime('%A, %B %d, %Y %H:%M')}\n"
+                    f"Respond with times in the user's timezone ({tz_name})."
+                )
+        except Exception:
+            pass  # Fall back to UTC only
+
     # Add basic workspace context if available
     key_content = await get_key_skill_content(ws)
 
-    parts = [soul, core]
+    parts = [soul, core + time_block]
     if key_content:
         parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
 
