@@ -56,7 +56,7 @@ _INTERNAL_PATH_RE = re.compile(r"/home/user/[^\s\"',}\]]+")
 _WORKSPACE_PATH_RE = re.compile(r"workspaces?/[^\s\"',}\]]+")
 _COMPOSIO_NAME_RE = re.compile(r"COMPOSIO_\w+")
 _AUTH_URL_RE = re.compile(
-    r"https?://(?:connect|auth|app)\.composio\.dev/[^\s\"',}\]]+",
+    r"https?://(?:connect|auth|app)\.composio\.(?:dev|io)/[^\s\"',}\]]+",
 )
 
 _DELEGATION_DESCRIPTIONS: dict[str, str] = {
@@ -117,10 +117,29 @@ _TOOL_CALL_BLOCK_RE = re.compile(
 )
 
 
+_COMPOSIO_LINK_RE = re.compile(
+    r"(?<!<)(https?://(?:connect|auth|app)\.composio\.(?:dev|io)/\S+)",
+)
+
+
+def _mask_composio_urls(text: str) -> str:
+    """Wrap raw Composio URLs in Slack mrkdwn link format.
+
+    Turns `https://app.composio.io/connect/googlecalendar`
+    into `<https://app.composio.io/connect/googlecalendar|🔗 Connect here>`
+    so users see a clean link instead of the backend URL.
+    """
+    def _replace(m: re.Match[str]) -> str:
+        url = m.group(1).rstrip(".,;:>)")
+        return f"<{url}|🔗 Connect here>"
+    return _COMPOSIO_LINK_RE.sub(_replace, text)
+
+
 def _strip_control_tokens(text: str) -> str:
     """Remove raw model control tokens that leaked into output."""
     text = _TOOL_CALL_BLOCK_RE.sub("", text)
     text = _CONTROL_TOKEN_RE.sub("", text)
+    text = _mask_composio_urls(text)
     return text.strip()
 
 
@@ -1291,6 +1310,8 @@ class LucyAgent:
         max_turns = MAX_TOOL_TURNS
 
         base_max_tokens = 16_384
+        _truncation_count = 0  # Track consecutive truncations
+        _stuck_count = 0  # Track consecutive stuck detections
 
         for turn in range(max_turns):
             try:
@@ -1414,18 +1435,20 @@ class LucyAgent:
                     )
                     all_messages = await _trim_tool_results(all_messages)
                     from lucy.pipeline.router import MODEL_TIERS
-                    frontier = MODEL_TIERS.get("frontier", current_model)
-                    if frontier != current_model:
-                        current_model = frontier
+                    # Try fast model first (reliable), avoid frontier
+                    fallback = MODEL_TIERS.get("fast", current_model)
+                    if fallback != current_model:
+                        current_model = fallback
                         logger.info(
                             "400_recovery_model_escalation",
-                            to_model=frontier,
+                            to_model=fallback,
                         )
                     continue
                 raise
 
             # Detect output truncation: if the model used nearly all
             # available tokens and returned no tool_calls, ask it to continue.
+            # Limit to 2 continuations to prevent infinite truncation loops.
             if (
                 response.content
                 and not response.tool_calls
@@ -1433,6 +1456,29 @@ class LucyAgent:
                 and response.usage.get("completion_tokens", 0)
                 >= base_max_tokens * 0.9
             ):
+                _truncation_count += 1
+                logger.info(
+                    "output_truncation_detected",
+                    turn=turn,
+                    tokens=response.usage.get("completion_tokens"),
+                    truncation_count=_truncation_count,
+                )
+                if _truncation_count >= 2:
+                    # Stop trying to continue — use what we have
+                    logger.warning(
+                        "truncation_limit_reached",
+                        turn=turn,
+                        total_truncations=_truncation_count,
+                    )
+                    # Collect all truncated text as the response
+                    _parts = [
+                        m.get("content", "")
+                        for m in all_messages
+                        if m.get("role") == "assistant" and m.get("content")
+                    ]
+                    _parts.append(response.content)
+                    response_text = "\n".join(_parts)
+                    break
                 all_messages.append(
                     {"role": "assistant", "content": response.content}
                 )
@@ -1440,14 +1486,10 @@ class LucyAgent:
                     "role": "system",
                     "content": (
                         "Your previous response was truncated. "
-                        "Continue from where you left off."
+                        "Wrap up concisely — give the key points "
+                        "and finish your response."
                     ),
                 })
-                logger.info(
-                    "output_truncation_detected",
-                    turn=turn,
-                    tokens=response.usage.get("completion_tokens"),
-                )
                 continue
 
             response_text = response.content or ""
@@ -1467,8 +1509,12 @@ class LucyAgent:
                     self._empty_retries = empty_retries + 1
 
                     if empty_retries == 1:
+                        # Escalate to fast model (reliable) rather than
+                        # frontier (unreliable, causes truncation loops)
                         from lucy.pipeline.router import MODEL_TIERS
-                        stronger = MODEL_TIERS.get("frontier", current_model)
+                        stronger = MODEL_TIERS.get("fast", current_model)
+                        if stronger == current_model:
+                            stronger = MODEL_TIERS.get("frontier", current_model)
                         if stronger != current_model:
                             current_model = stronger
                             logger.warning(
@@ -1612,9 +1658,7 @@ class LucyAgent:
                 if name.startswith("lucy_custom_"):
                     if any(s in name for s in ("_list_", "_get_metrics", "_get_stats", "_get_user_stats")):
                         return True
-                if name in ("lucy_get_channel_history", "lucy_search_slack_history",
-                            "lucy_workspace_read", "lucy_workspace_search",
-                            "lucy_workspace_list"):
+                if name in ("lucy_get_channel_history", "lucy_search_slack_history"):
                     return True
                 return False
 
@@ -1766,35 +1810,52 @@ class LucyAgent:
             # (kept as fast heuristic — feeds into supervisor context)
             stuck = _detect_stuck_state(all_messages, turn)
             if stuck["is_stuck"]:
+                _stuck_count += 1
                 logger.warning(
                     "stuck_state_detected",
                     turn=turn,
                     reason=stuck["reason"],
+                    stuck_count=_stuck_count,
                     workspace_id=ctx.workspace_id,
                 )
+
+                # After 2 stuck detections, force-break the loop
+                if _stuck_count >= 2:
+                    logger.warning(
+                        "stuck_force_break",
+                        turn=turn,
+                        total_stuck=_stuck_count,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    # Remove all tools to force a text response
+                    tools = None
+                    all_messages.append({
+                        "role": "system",
+                        "content": (
+                            "CRITICAL: You are stuck in a loop and must "
+                            "stop NOW. All tools have been disabled. "
+                            "Respond to the user with whatever information "
+                            "you have gathered so far. If you found nothing "
+                            "useful, apologize and suggest next steps."
+                        ),
+                    })
+                    continue
+
                 all_messages.append({
                     "role": "system",
                     "content": stuck["intervention"],
                 })
                 if stuck.get("escalate_model"):
+                    # Escalate to fast model (reliable) not frontier
                     from lucy.pipeline.router import MODEL_TIERS
-                    _ESCALATION_ORDER = ["default", "code", "research", "frontier"]
-                    current_tier_idx = -1
-                    for i, tier in enumerate(_ESCALATION_ORDER):
-                        if MODEL_TIERS.get(tier) == current_model:
-                            current_tier_idx = i
-                            break
-                    next_tier_idx = min(current_tier_idx + 1, len(_ESCALATION_ORDER) - 1)
-                    escalated = MODEL_TIERS.get(
-                        _ESCALATION_ORDER[next_tier_idx], current_model,
-                    )
-                    if escalated != current_model:
+                    fast_model = MODEL_TIERS.get("fast", current_model)
+                    if fast_model != current_model:
                         logger.info(
                             "stuck_model_escalation",
                             from_model=current_model,
-                            to_model=escalated,
+                            to_model=fast_model,
                         )
-                        current_model = escalated
+                        current_model = fast_model
 
             # ── Supervisor checkpoint ────────────────────────────────
             sv_elapsed = time.monotonic() - sv_start_time
@@ -1870,7 +1931,9 @@ class LucyAgent:
 
                     elif sv_result.decision == SupervisorDecision.ESCALATE:
                         from lucy.pipeline.router import MODEL_TIERS
-                        _ESC_ORDER = ["fast", "default", "code", "research", "frontier"]
+                        # Skip frontier — it's unreliable and causes
+                        # truncation loops. Cap at research tier.
+                        _ESC_ORDER = ["fast", "default", "code", "research"]
                         cur_idx = -1
                         for i, tier in enumerate(_ESC_ORDER):
                             if MODEL_TIERS.get(tier) == current_model:

@@ -44,10 +44,10 @@ class Settings(BaseSettings):
 
     # Model tiers for dynamic routing
     model_tier_fast: str = "google/gemini-2.5-flash"
-    model_tier_default: str = "minimax/minimax-m2.5"
-    model_tier_code: str = "minimax/minimax-m2.5"
+    model_tier_default: str = "google/gemini-2.5-flash"
+    model_tier_code: str = "google/gemini-2.5-flash"
     model_tier_research: str = "google/gemini-3-flash-preview"
-    model_tier_document: str = "minimax/minimax-m2.5"
+    model_tier_document: str = "google/gemini-2.5-flash"
     model_tier_frontier: str = "google/gemini-3.1-pro-preview"
 
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     spaces_enabled: bool = True
 
     # ── Agent limits ────────────────────────────────────────────
-    agent_max_tool_turns: int = 50
+    agent_max_tool_turns: int = 20
     agent_max_context_messages: int = 80
     agent_tool_result_max_chars: int = 50_000
     agent_tool_result_summary_threshold: int = 24_000
