@@ -20,6 +20,10 @@ from lucy.config import settings
 
 API_BASE_URL = "https://api.polar.sh"
 
+# Default organization ID (Mentions / Serprisingly).
+# Auto-injected so the model never has to guess the UUID.
+DEFAULT_ORG_ID = "1059ee97-a997-46e8-bba8-afd9305b2c02"
+
 async def _make_request(
     method: str,
     url: str,
@@ -53,7 +57,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "Product ID to filter by."},
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "query": {"type": "string", "description": "Search query for product names or descriptions."},
                 "is_archived": {"type": "boolean", "description": "Filter by archived status."},
                 "is_recurring": {"type": "boolean", "description": "Filter by recurring products."},
@@ -69,7 +73,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Name of the product.", "min_length": 1},
-                "organization_id": {"type": "string", "description": "ID of the organization that owns the product.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "type": {"type": "string", "description": "Type of the product (e.g., 'product', 'subscription').", "enum": ["product", "subscription"], "min_length": 1},
                 "description": {"type": "string", "description": "Description of the product."},
                 "prices": {
@@ -87,7 +91,7 @@ TOOLS = [
                     "description": "List of prices for the product.",
                 },
             },
-            "required": ["name", "organization_id", "type"],
+            "required": ["name", "type"],
         },
     },
     {
@@ -119,7 +123,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "product_id": {"type": "string", "description": "Product ID to filter by."},
                 "customer_id": {"type": "string", "description": "Customer ID to filter by."},
                 "external_customer_id": {"type": "string", "description": "External Customer ID to filter by."},
@@ -181,7 +185,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "email": {"type": "string", "description": "Customer email to filter by."},
                 "query": {"type": "string", "description": "Search query for customer names or emails."},
                 "page": {"type": "integer", "description": "Page number for pagination.", "default": 1},
@@ -197,12 +201,12 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization the customer belongs to.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "email": {"type": "string", "format": "email", "description": "Email address of the customer.", "min_length": 1},
                 "name": {"type": "string", "description": "Name of the customer."},
                 "external_id": {"type": "string", "description": "An optional external ID for the customer."},
             },
-            "required": ["organization_id", "email"],
+            "required": ["email"],
         },
     },
     {
@@ -245,14 +249,14 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "product_id": {"type": "string", "description": "ID of the product for the checkout link.", "min_length": 1},
                 "price_id": {"type": "string", "description": "ID of the price to use for the checkout.", "min_length": 1},
                 "success_url": {"type": "string", "format": "uri", "description": "URL to redirect to after successful checkout."},
                 "cancel_url": {"type": "string", "format": "uri", "description": "URL to redirect to if checkout is cancelled."},
                 "customer_id": {"type": "string", "description": "Optional customer ID to pre-fill checkout."},
             },
-            "required": ["organization_id", "product_id", "price_id", "success_url", "cancel_url"],
+            "required": ["product_id", "price_id", "success_url", "cancel_url"],
         },
     },
     {
@@ -261,7 +265,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "product_id": {"type": "string", "description": "Product ID to filter by."},
                 "product_billing_type": {"type": "string", "description": "Billing type of the product (e.g., 'one_time', 'recurring')."},
                 "discount_id": {"type": "string", "description": "Discount ID to filter by."},
@@ -297,11 +301,11 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "page": {"type": "integer", "description": "Page number for pagination.", "default": 1},
                 "limit": {"type": "integer", "description": "Number of items per page.", "default": 10},
             },
-            "required": ["organization_id"],
+            "required": [],
         },
     },
     {
@@ -310,7 +314,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "url": {"type": "string", "format": "uri", "description": "The URL where webhook events will be sent.", "min_length": 1},
                 "secret": {"type": "string", "description": "Optional secret for signing webhook payloads."},
                 "enabled_events": {
@@ -319,7 +323,7 @@ TOOLS = [
                     "description": "List of event types to send to this endpoint (e.g., 'order.created', 'subscription.updated').",
                 },
             },
-            "required": ["organization_id", "url"],
+            "required": ["url"],
         },
     },
     {
@@ -364,7 +368,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "customer_id": {"type": "string", "description": "Customer ID to filter by."},
                 "external_customer_id": {"type": "string", "description": "External Customer ID to filter by."},
                 "is_granted": {"type": "boolean", "description": "Filter by whether the benefit is granted."},
@@ -378,7 +382,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "type": {"type": "string", "description": "Benefit type to filter by."},
                 "id": {"type": "string", "description": "Benefit ID to filter by."},
                 "exclude_id": {"type": "string", "description": "Benefit ID to exclude from results."},
@@ -394,14 +398,14 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "type": {"type": "string", "description": "Type of the benefit (e.g., 'ads', 'discord').", "min_length": 1},
                 "description": {"type": "string", "description": "Description of the benefit.", "min_length": 1},
                 "is_tax_applicable": {"type": "boolean", "description": "Whether the benefit is tax applicable."},
                 "selectable": {"type": "boolean", "description": "Whether the benefit is selectable by customers."},
                 "properties": {"type": "object", "description": "Additional properties for the benefit, depends on type."},
             },
-            "required": ["organization_id", "type", "description"],
+            "required": ["type", "description"],
         },
     },
     {
@@ -443,7 +447,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "Organization ID to filter by."},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit)."},
                 "query": {"type": "string", "description": "Search query for discount codes or names."},
                 "page": {"type": "integer", "description": "Page number for pagination.", "default": 1},
                 "limit": {"type": "integer", "description": "Number of items per page.", "default": 10},
@@ -457,7 +461,7 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "code": {"type": "string", "description": "The discount code.", "min_length": 1},
                 "type": {"type": "string", "description": "Type of discount (e.g., 'fixed_amount', 'percentage').", "enum": ["fixed_amount", "percentage"], "min_length": 1},
                 "value": {"type": "integer", "description": "The discount value (e.g., amount in cents for fixed, percentage for percentage).", "minimum": 0},
@@ -466,7 +470,7 @@ TOOLS = [
                 "expires_at": {"type": "string", "format": "date-time", "description": "Timestamp when the discount expires."},
                 "usage_limit": {"type": "integer", "description": "Maximum number of times the discount can be used."},
             },
-            "required": ["organization_id", "code", "type", "value"],
+            "required": ["code", "type", "value"],
         },
     },
     {
@@ -508,13 +512,13 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "organization_id": {"type": "string", "description": "ID of the organization to retrieve metrics for.", "min_length": 1},
+                "organization_id": {"type": "string", "description": "Organization ID (auto-injected, usually omit).", "min_length": 1},
                 "start_date": {"type": "string", "format": "date", "description": "Start date for the metrics (YYYY-MM-DD).", "min_length": 1},
                 "end_date": {"type": "string", "format": "date", "description": "End date for the metrics (YYYY-MM-DD).", "min_length": 1},
                 "interval": {"type": "string", "description": "Interval for the metrics (e.g., 'day', 'week', 'month').", "enum": ["day", "week", "month"], "min_length": 1},
                 "timezone": {"type": "string", "description": "Timezone for the metrics (e.g., 'UTC', 'America/New_York').", "default": "UTC"},
             },
-            "required": ["organization_id", "start_date", "end_date", "interval"],
+            "required": ["start_date", "end_date", "interval"],
         },
     },
 ]
@@ -637,6 +641,14 @@ def _build_orders_excel(orders: list[dict]) -> Path:
 
 
 async def execute(tool_name: str, args: dict, api_key: str) -> dict:
+    # Auto-inject default organization_id if not provided or invalid.
+    # The model often doesn't know the UUID and passes the org name or
+    # an array, causing 422 errors.
+    if "organization_id" not in args or not isinstance(args.get("organization_id"), str):
+        args["organization_id"] = DEFAULT_ORG_ID
+    elif len(args["organization_id"]) < 30:  # Not a UUID
+        args["organization_id"] = DEFAULT_ORG_ID
+
     if tool_name == "polarsh_list_products":
         return await _make_request(
             "GET", f"{API_BASE_URL}/v1/products/", api_key, params=args

@@ -94,7 +94,9 @@ _NARRATION_RE = re.compile(
     r"|I need to (?:first|check|look|search|get|find)"
     r"|I can (?:find|check|look|search|get|fetch)"
     r"|then I (?:can|will|'ll)\b"
-    r"|I'm going to (?:start|check|look|search|get|find|fetch))",
+    r"|I'm going to (?:start|check|look|search|get|find|fetch)"
+    r"|I've already (?:called|used|invoked|run)"
+    r"|I already (?:called|used|invoked|ran|checked|fetched|pulled))",
     re.IGNORECASE,
 )
 
@@ -1685,8 +1687,10 @@ class LucyAgent:
                     all_messages.append({
                         "role": "user",
                         "content": (
-                            "I need the actual data, not a plan. "
-                            "Please call the tools now and give me the results."
+                            "Don't narrate or describe what you're going to do. "
+                            "Just call the tools silently, then give me the final "
+                            "answer with the actual data. No preamble like "
+                            "'I'll check' or 'Let me look into'. Start with the result."
                         ),
                     })
                     continue
