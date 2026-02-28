@@ -337,6 +337,12 @@ If they want data, mention what data.
 - Keep it under 40 words
 - Use contractions. Sound human.
 - Match the energy: if they're excited, match it. If it's routine, be chill.
+- NEVER promise to "dive into" or "pull" data from a service unless that \
+service is listed in the CONNECTED INTEGRATIONS below. If the service isn't \
+listed, use hedging language like "Let me check if I have access to..." or \
+"Let me see what I can pull up..." instead of promising results.
+
+{connected_services_note}
 
 Examples of GOOD acknowledgments:
 - "Love this idea 🌙 Building you a lunar cycle tracker with a handcrafted feel. Give me a few minutes."
@@ -348,6 +354,7 @@ Examples of BAD acknowledgments (never do these):
 - "On it — I'll build this for you."
 - "I'll get right on that!"
 - "Sure thing! Let me work on this."
+- "Ooh, I love analyzing X data! I'll dive in." (then failing because the service isn't connected)
 
 Output ONLY the acknowledgment text. Nothing else."""
 
@@ -360,7 +367,11 @@ _FAST_ACK_INTENTS = frozenset({
 })
 
 
-async def _build_acknowledgment(text: str, intent: str) -> str | None:
+async def _build_acknowledgment(
+    text: str,
+    intent: str,
+    connected_services: list[str] | None = None,
+) -> str | None:
     """Generate a context-aware acknowledgment via a fast LLM call.
 
     Returns None for tasks that are likely <30s (no ack needed).
@@ -380,6 +391,23 @@ async def _build_acknowledgment(text: str, intent: str) -> str | None:
         from lucy.core.openclaw import ChatConfig, get_openclaw_client
 
         client = await get_openclaw_client()
+
+        if connected_services:
+            services_note = (
+                f"CONNECTED INTEGRATIONS: {', '.join(connected_services)}\n"
+                f"Only these services are available. If the user asks about a "
+                f"service NOT in this list, do NOT promise to pull its data."
+            )
+        else:
+            services_note = (
+                "CONNECTED INTEGRATIONS: unknown — use hedging language like "
+                "'Let me check what I can access...' instead of promising results."
+            )
+
+        system_prompt = _ACK_SYSTEM_PROMPT.format(
+            connected_services_note=services_note,
+        )
+
         user_msg = (
             f"User's request (intent: {intent}):\n"
             f"{text[:300]}"
@@ -390,7 +418,7 @@ async def _build_acknowledgment(text: str, intent: str) -> str | None:
                 messages=[{"role": "user", "content": user_msg}],
                 config=ChatConfig(
                     model="google/gemini-2.5-flash",
-                    system_prompt=_ACK_SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     max_tokens=80,
                     temperature=0.9,
                 ),
@@ -566,7 +594,26 @@ async def _handle_message(
     # ── Immediate acknowledgment for complex tasks ────────────────
     if route.intent in _FAST_ACK_INTENTS and client and channel_id:
         async def _send_ack() -> None:
-            ack_msg = await _build_acknowledgment(text, route.intent)
+            svc_names: list[str] | None = None
+            try:
+                from lucy.integrations.composio_client import get_composio_client
+                from lucy.integrations.wrapper_generator import (
+                    discover_saved_wrappers,
+                )
+                composio = get_composio_client()
+                svc_names = await asyncio.wait_for(
+                    composio.get_connected_app_names_reliable(workspace_id),
+                    timeout=2.0,
+                )
+                for w in discover_saved_wrappers():
+                    svc = w.get("service_name", "")
+                    if svc and svc_names and svc not in svc_names:
+                        svc_names.append(svc)
+            except Exception:
+                pass
+            ack_msg = await _build_acknowledgment(
+                text, route.intent, connected_services=svc_names,
+            )
             if ack_msg:
                 await say(text=ack_msg, thread_ts=thread_ts)
 
