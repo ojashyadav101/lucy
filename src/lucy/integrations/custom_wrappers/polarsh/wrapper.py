@@ -16,6 +16,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lucy.config import settings
+
 API_BASE_URL = "https://api.polar.sh"
 
 async def _make_request(
@@ -27,7 +29,7 @@ async def _make_request(
 ) -> dict:
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=settings.polar_api_timeout_s) as client:
             response = await client.request(
                 method, url, headers=headers, params=params, json=json_data
             )

@@ -80,6 +80,8 @@ _COMPILED_TRIGGERS: dict[str, list[re.Pattern[str]]] = {
 }
 
 _MAX_INJECTED_SKILLS = 3
+_MAX_SKILL_CONTENT_CHARS = 20_000
+_MIN_REMAINING_FOR_TRUNCATION = 500
 
 
 @dataclass
@@ -245,7 +247,7 @@ async def load_relevant_skill_content(
 
     sections: list[str] = []
     total_chars = 0
-    max_chars = 8000
+    max_chars = _MAX_SKILL_CONTENT_CHARS
 
     for name in skill_names:
         path = name_to_path.get(name)
@@ -262,7 +264,7 @@ async def load_relevant_skill_content(
 
         if total_chars + len(body) > max_chars:
             remaining = max_chars - total_chars
-            if remaining > 500:
+            if remaining > _MIN_REMAINING_FOR_TRUNCATION:
                 body = body[:remaining] + "\n\n[... truncated for brevity]"
             else:
                 break

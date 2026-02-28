@@ -17,7 +17,7 @@ from lucy.config import settings
 logger = structlog.get_logger()
 
 _INVOKE_PATH = "/tools/invoke"
-_DEFAULT_TIMEOUT = 120
+_DEFAULT_TIMEOUT = settings.openclaw_gateway_timeout_s
 
 
 class OpenClawGatewayClient:

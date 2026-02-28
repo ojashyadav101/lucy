@@ -13,11 +13,13 @@ from typing import Any
 
 import structlog
 
+from lucy.config import settings
+
 logger = structlog.get_logger()
 
-POLL_INTERVAL_SECONDS = 5
-MAX_POLL_DURATION_SECONDS = 600
-MAX_CONCURRENT_WATCHES = 20
+POLL_INTERVAL_SECONDS = settings.connection_poll_interval_s
+MAX_POLL_DURATION_SECONDS = settings.connection_poll_max_duration_s
+MAX_CONCURRENT_WATCHES = settings.connection_max_concurrent_watches
 
 
 @dataclass

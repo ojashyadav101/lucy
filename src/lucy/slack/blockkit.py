@@ -19,6 +19,14 @@ _LINK_RE = re.compile(r"<(https?://[^|>]+)\|([^>]+)>")
 _CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
 
 MIN_BLOCKS_THRESHOLD = 80
+MIN_NEWLINES_FOR_BLOCKS = 2
+MAX_SECTION_TEXT_CHARS = 3000
+MAX_HEADER_LENGTH = 120
+MAX_HEADING_DISPLAY_LENGTH = 150
+MAX_SECTION_FLUSH_CHARS = 2800
+MAX_BLOCKS_PER_MESSAGE = 50
+_TRUNCATION_BUFFER = 30
+_TRUNCATION_SPLIT_RATIO = 0.5
 
 
 def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
@@ -30,7 +38,7 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
     if not text or len(text) < MIN_BLOCKS_THRESHOLD:
         return None
 
-    if text.count("\n") < 2 and not _BULLET_RE.search(text):
+    if text.count("\n") < MIN_NEWLINES_FOR_BLOCKS and not _BULLET_RE.search(text):
         return None
 
     blocks: list[dict[str, Any]] = []
@@ -44,7 +52,7 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
         if section_text:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": _truncate(section_text, 3000)},
+                "text": {"type": "mrkdwn", "text": _truncate(section_text, MAX_SECTION_TEXT_CHARS)},
             })
         current_section.clear()
 
@@ -57,19 +65,19 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
             continue
 
         header_match = _HEADER_RE.match(stripped)
-        if header_match and len(stripped) < 120 and not _BULLET_RE.match(stripped):
+        if header_match and len(stripped) < MAX_HEADER_LENGTH and not _BULLET_RE.match(stripped):
             heading = header_match.group(1).strip()
             if heading and not any(c in heading for c in ["—", "•", ":"]):
                 _flush_section()
                 blocks.append({
                     "type": "header",
-                    "text": {"type": "plain_text", "text": heading[:150]},
+                    "text": {"type": "plain_text", "text": heading[:MAX_HEADING_DISPLAY_LENGTH]},
                 })
                 continue
 
         current_section.append(line)
 
-        if len("\n".join(current_section)) > 2800:
+        if len("\n".join(current_section)) > MAX_SECTION_FLUSH_CHARS:
             _flush_section()
 
     _flush_section()
@@ -77,8 +85,8 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
     if len(blocks) <= 1:
         return None
 
-    if len(blocks) > 50:
-        blocks = blocks[:49]
+    if len(blocks) > MAX_BLOCKS_PER_MESSAGE:
+        blocks = blocks[:MAX_BLOCKS_PER_MESSAGE - 1]
         blocks.append({
             "type": "section",
             "text": {"type": "mrkdwn", "text": "_...continued_"},
@@ -109,7 +117,7 @@ def approval_blocks(
     if details:
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": _truncate(details, 3000)},
+            "text": {"type": "mrkdwn", "text": _truncate(details, MAX_SECTION_TEXT_CHARS)},
         })
 
     blocks.append({
@@ -138,4 +146,11 @@ def approval_blocks(
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
-    return text[: max_len - 20] + "\n\n_...truncated_"
+    cutoff = max_len - _TRUNCATION_BUFFER
+    last_para = text.rfind("\n\n", 0, cutoff)
+    if last_para > cutoff * _TRUNCATION_SPLIT_RATIO:
+        return text[:last_para] + "\n\n_...continued in next message_"
+    last_newline = text.rfind("\n", 0, cutoff)
+    if last_newline > cutoff * _TRUNCATION_SPLIT_RATIO:
+        return text[:last_newline] + "\n\n_...continued in next message_"
+    return text[:cutoff] + "\n\n_...continued in next message_"

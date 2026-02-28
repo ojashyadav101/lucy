@@ -24,7 +24,7 @@ from typing import Any
 
 import structlog
 
-from lucy.config import settings
+from lucy.config import LLMPresets, settings
 from lucy.core.openclaw import (
     ChatConfig,
     OpenClawClient,
@@ -36,12 +36,12 @@ from lucy.infra.trace import Trace
 
 logger = structlog.get_logger()
 
-MAX_TOOL_TURNS = 50  # Soft limit — supervisor is the real governor
-MAX_CONTEXT_MESSAGES = 80
-TOOL_RESULT_MAX_CHARS = 50_000
-TOOL_RESULT_SUMMARY_THRESHOLD = 24_000
-ABSOLUTE_MAX_SECONDS = 14_400  # 4-hour catastrophic safety net (supervisor governs real duration)
-MAX_PAYLOAD_CHARS = 120_000
+MAX_TOOL_TURNS = settings.agent_max_tool_turns
+MAX_CONTEXT_MESSAGES = settings.agent_max_context_messages
+TOOL_RESULT_MAX_CHARS = settings.agent_tool_result_max_chars
+TOOL_RESULT_SUMMARY_THRESHOLD = settings.agent_tool_result_summary_threshold
+ABSOLUTE_MAX_SECONDS = settings.agent_absolute_max_seconds
+MAX_PAYLOAD_CHARS = settings.agent_max_payload_chars
 
 _INTERNAL_PATH_RE = re.compile(r"/home/user/[^\s\"',}\]]+")
 _WORKSPACE_PATH_RE = re.compile(r"workspaces?/[^\s\"',}\]]+")
@@ -1208,7 +1208,7 @@ class LucyAgent:
         self._504_frontier_retried = False
         _last_visible_msg_time = time.monotonic()
         _silence_update_sent = False
-        _SILENCE_THRESHOLD_S = 480.0  # 8 minutes
+        _SILENCE_THRESHOLD_S = settings.agent_silence_threshold_s
 
         # Supervisor state
         sv_turn_reports: list[TurnReport] = []
@@ -1269,7 +1269,7 @@ class LucyAgent:
                 tools=tools,
                 max_tokens=base_max_tokens,
                 stream=use_streaming,
-                wallclock_timeout=min(remaining, 1200.0),
+                wallclock_timeout=min(remaining, settings.agent_wallclock_timeout_s),
             )
 
             try:
@@ -3402,8 +3402,8 @@ class LucyAgent:
                             "missing deliverables, preamble without results). "
                             "Ignore minor style issues. Be decisive and concise."
                         ),
-                        max_tokens=500,
-                        temperature=0.1,
+                        max_tokens=LLMPresets.CLASSIFIER.max_tokens,
+                        temperature=LLMPresets.CLASSIFIER.temperature,
                     ),
                 ),
                 timeout=12.0,

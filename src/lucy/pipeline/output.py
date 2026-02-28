@@ -27,6 +27,8 @@ import re
 
 import structlog
 
+from lucy.config import LLMPresets, settings
+
 logger = structlog.get_logger()
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -59,13 +61,13 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"Bearer\s+[A-Za-z0-9_-]{20,}"), "Bearer [REDACTED]"),
     (re.compile(r"pol_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
     (re.compile(r"['\"]Authorization['\"]:\s*['\"]Bearer\s+[^'\"]+['\"]"), '"Authorization": "Bearer [REDACTED]"'),
-    (re.compile(r"<:request>.*?</invoke>", re.DOTALL), ""),
+    (re.compile(r"<(?:request|invoke)[^>]*>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"<invoke\s+name=.*?>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"(?i)the api key[^.]*(?:workbench|sandbox|available)[^.]*\.", re.DOTALL), ""),
     (re.compile(r"(?i)(?:let me|i(?:'ll| will)) try a different (?:approach|strategy)[^.]*\.", re.DOTALL), ""),
     (re.compile(r"(?i)(?:api key|credentials?) (?:isn't|aren't|is not|are not) available[^.]*\.", re.DOTALL), ""),
     (re.compile(r"\bfunction calling\b", re.IGNORECASE), ""),
-    (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
+    (re.compile(r"(?:workspace_id|trace_id|call_id|entity_id|session_id|deployment_id)[=:\s]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
     (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),
     (re.compile(r"task\.json\b"), ""),
     (re.compile(
@@ -116,7 +118,7 @@ def _sanitize(text: str) -> str:
     text = _ALLCAPS_TOOL_RE.sub(_humanize_or_strip, text)
     text = re.sub(r"  +", " ", text)
     if not text.strip() and original.strip():
-        return original
+        return "I've completed the task."
     return text
 
 
@@ -125,15 +127,36 @@ def _sanitize(text: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 def _convert_markdown_to_slack(text: str) -> str:
+    code_blocks: list[str] = []
+
+    def _stash_code(m: re.Match[str]) -> str:
+        code_blocks.append(m.group(0))
+        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+
+    text = re.sub(r"```.*?```", _stash_code, text, flags=re.DOTALL)
+    text = re.sub(r"`[^`]+`", _stash_code, text)
+
     text = _convert_tables_to_lists(text)
-    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
-    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+    # Convert markdown links FIRST (before bold conversion touches them)
     text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text,
     )
+    # Bold: **text** → *text*, but NOT when the content is a URL
+    def _bold_replace(m: re.Match[str]) -> str:
+        inner = m.group(1)
+        if inner.startswith("http://") or inner.startswith("https://"):
+            return inner
+        return f"*{inner}*"
+    text = re.sub(r"\*\*(.+?)\*\*", _bold_replace, text)
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*\*\*", "", text)
     text = re.sub(r"\*\*", "", text)
+    # Clean stray * attached to URLs (e.g. "*https://url*" → "https://url")
+    text = re.sub(r"\*(https?://[^\s*|>]+)\*", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
+
+    for i, block in enumerate(code_blocks):
+        text = text.replace(f"\x00CODEBLOCK{i}\x00", block)
     return text
 
 
@@ -163,7 +186,6 @@ def _table_to_bullets(table_lines: list[str]) -> list[str]:
     rows: list[list[str]] = []
     for line in table_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
-        cells = [c for c in cells if c]
         if cells and not all(
             c.replace("-", "").replace(":", "").strip() == "" for c in cells
         ):
@@ -421,8 +443,10 @@ _AI_TELL_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
 # To re-enable, lower this back to 3 (or whatever score makes sense).
 # ───────────────────────────────────────────────────────────────────
 _LLM_REWRITE_THRESHOLD = 999
-# Minimum text length to even consider LLM rewrite
 _LLM_REWRITE_MIN_CHARS = 120
+_DEAI_MAX_TOKENS_MULTIPLIER = 2
+_DEAI_MIN_LENGTH_RATIO = 0.3
+_DEAI_MAX_LENGTH_RATIO = 2.0
 
 
 def _detect_ai_tells(text: str) -> list[tuple[str, int, str]]:
@@ -566,10 +590,10 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
             client.chat_completion(
                 messages=[{"role": "user", "content": user_msg}],
                 config=ChatConfig(
-                    model="minimax/minimax-m2.5",
+                    model=settings.model_tier_default,
                     system_prompt=_DEAI_SYSTEM_PROMPT,
-                    max_tokens=min(len(text) * 2, 4096),
-                    temperature=0.4,
+                    max_tokens=min(len(text) * _DEAI_MAX_TOKENS_MULTIPLIER, LLMPresets.DEAI_REWRITE.max_tokens),
+                    temperature=LLMPresets.DEAI_REWRITE.temperature,
                 ),
             ),
             timeout=_DEAI_TIMEOUT,
@@ -582,11 +606,11 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
         if result.endswith("---"):
             result = result.rstrip("-").strip()
 
-        if not result or len(result) < len(text) * 0.3:
+        if not result or len(result) < len(text) * _DEAI_MIN_LENGTH_RATIO:
             logger.debug("deai_rewrite_too_short", original_len=len(text), result_len=len(result))
             return None
 
-        if len(result) > len(text) * 2.0:
+        if len(result) > len(text) * _DEAI_MAX_LENGTH_RATIO:
             logger.debug("deai_rewrite_too_long", original_len=len(text), result_len=len(result))
             return None
 
@@ -656,14 +680,14 @@ async def process_output(text: str | None) -> str:
     return text.strip()
 
 
-def process_output_sync(text: str) -> str:
+def process_output_sync(text: str | None) -> str:
     """Synchronous fallback for contexts where async isn't available.
 
     Runs the full pipeline except the LLM rewrite tier. Uses regex-only
     de-AI instead. Prefer the async version when possible.
     """
     if not text or not text.strip():
-        return text
+        return text or ""
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)

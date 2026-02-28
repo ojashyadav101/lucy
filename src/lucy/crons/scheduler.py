@@ -31,6 +31,11 @@ logger = structlog.get_logger()
 
 MAX_RETRIES = 2
 RETRY_DELAY_BASE = 30
+_MISFIRE_GRACE_TIME_S = 300
+_HIGH_FREQ_THRESHOLD = 24
+_MODERATE_FREQ_THRESHOLD = 6
+_SCRIPT_TIMEOUT_S = 1800
+_CONDITION_SCRIPT_TIMEOUT_S = 30
 
 
 def validate_cron_expression(expr: str) -> str | None:
@@ -94,15 +99,26 @@ class CronScheduler:
     """Discovers and schedules workspace crons via APScheduler."""
 
     def __init__(self, slack_client: Any = None) -> None:
+        from apscheduler.events import EVENT_JOB_MISSED
+
         self.scheduler = AsyncIOScheduler(
             job_defaults={
                 "coalesce": True,
                 "max_instances": 1,
-                "misfire_grace_time": 300,
+                "misfire_grace_time": _MISFIRE_GRACE_TIME_S,
             }
         )
+        self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self.slack_client = slack_client
         self._running = False
+
+    @staticmethod
+    def _on_job_missed(event: Any) -> None:
+        logger.warning(
+            "cron_job_missed",
+            job_id=event.job_id,
+            scheduled_run_time=str(event.scheduled_run_time),
+        )
 
     async def start(self) -> None:
         """Discover all workspaces and schedule their crons."""
@@ -145,7 +161,16 @@ class CronScheduler:
 
     async def stop(self) -> None:
         if self._running:
-            self.scheduler.shutdown(wait=False)
+            running_jobs = [
+                job.name for job in self.scheduler.get_jobs()
+                if job.next_run_time is not None
+            ]
+            if running_jobs:
+                logger.info(
+                    "cron_scheduler_stopping_with_jobs",
+                    pending_jobs=running_jobs[:20],
+                )
+            self.scheduler.shutdown(wait=True)
             self._running = False
             logger.info("cron_scheduler_stopped")
 
@@ -245,13 +270,13 @@ class CronScheduler:
 
         runs_per_day = _estimate_daily_runs(cron_expr)
         cost_warning = ""
-        if runs_per_day > 24 and type == "agent":
+        if runs_per_day > _HIGH_FREQ_THRESHOLD and type == "agent":
             cost_warning = (
                 f"This task will run ~{runs_per_day} times per day. "
                 f"Each run uses LLM tokens. Consider a longer interval "
                 f"if this is an agent-based task."
             )
-        elif runs_per_day > 6 and type == "agent":
+        elif runs_per_day > _MODERATE_FREQ_THRESHOLD and type == "agent":
             cost_warning = (
                 f"This task will run ~{runs_per_day} times per day. "
                 f"Keep in mind each run uses LLM tokens."
@@ -371,8 +396,8 @@ class CronScheduler:
         job_id = f"{workspace_id}:/{slug}"
         try:
             self.scheduler.remove_job(job_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("cron_job_remove_failed", job_id=job_id, error=str(e))
 
         shutil.rmtree(cron_dir, ignore_errors=True)
         logger.info("cron_deleted", workspace_id=workspace_id, cron_name=slug)
@@ -462,8 +487,8 @@ class CronScheduler:
                         f.name: str(f) for f in job.trigger.fields
                     }
                     entry["schedule_fields"] = fields
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("cron_schedule_fields_parse_failed", error=str(e))
             if job.args and len(job.args) >= 2:
                 cron_cfg = job.args[1]
                 if isinstance(cron_cfg, CronConfig):
@@ -820,14 +845,13 @@ class CronScheduler:
                     logger.info("cron_dependency_not_met_no_log", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
                     return
                     
-                from datetime import datetime, timezone as _tz
                 import zoneinfo as _zi
-                cron_tz = _tz.utc
+                cron_tz = timezone.utc
                 if cron.timezone:
                     try:
                         cron_tz = _zi.ZoneInfo(cron.timezone)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("cron_timezone_parse_failed", timezone=cron.timezone, error=str(e))
                 today = datetime.now(cron_tz).strftime("%Y-%m-%d")
                 
                 ran_today = False
@@ -853,7 +877,18 @@ class CronScheduler:
                     stderr=asyncio.subprocess.PIPE,
                     env={**os.environ, "WORKSPACE_ID": workspace_id}
                 )
-                await process.communicate()
+                try:
+                    await asyncio.wait_for(process.communicate(), timeout=_CONDITION_SCRIPT_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+                    logger.warning(
+                        "cron_condition_script_timeout",
+                        workspace_id=workspace_id,
+                        cron_path=cron.path,
+                        script=str(script_path),
+                    )
+                    return
                 if process.returncode != 0:
                     logger.info("cron_condition_unmet", workspace_id=workspace_id, cron_path=cron.path)
                     return
@@ -865,7 +900,6 @@ class CronScheduler:
         company_ctx = await ws.read_file("company/SKILL.md") or ""
         team_ctx = await ws.read_file("team/SKILL.md") or ""
         
-        from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         
         global_context_parts = [f"Current Time: {now_utc}"]
@@ -905,7 +939,7 @@ class CronScheduler:
                     if not target_script.exists():
                         raise RuntimeError(f"Script file not found: {target_script}")
                     
-                    _SCRIPT_TIMEOUT_SECONDS = 600
+                    _script_timeout = _SCRIPT_TIMEOUT_S
                     process = await asyncio.create_subprocess_exec(
                         "python3", str(target_script),
                         stdout=asyncio.subprocess.PIPE,
@@ -919,12 +953,13 @@ class CronScheduler:
                     try:
                         stdout, stderr = await asyncio.wait_for(
                             process.communicate(),
-                            timeout=_SCRIPT_TIMEOUT_SECONDS,
+                            timeout=_script_timeout,
                         )
                     except asyncio.TimeoutError:
                         process.kill()
+                        await process.wait()
                         raise RuntimeError(
-                            f"Script timed out after {_SCRIPT_TIMEOUT_SECONDS}s"
+                            f"Script timed out after {_script_timeout}s"
                         )
                     if process.returncode != 0:
                         raise RuntimeError(f"Script failed (exit {process.returncode}): {stderr.decode()}")
@@ -962,7 +997,7 @@ class CronScheduler:
                 log_entry = f"\n## {now} (elapsed: {elapsed_ms}ms, status: {status})"
                 if attempt > 1:
                     log_entry += f" [succeeded on attempt {attempt}]"
-                log_entry += f"\n{response[:500]}\n"
+                log_entry += f"\n{(response or '')[:500]}\n"
                 
                 await ws.append_file(f"crons/{cron_dir_name}/execution.log", log_entry)
 
@@ -1090,15 +1125,24 @@ class CronScheduler:
                 except json.JSONDecodeError:
                     pass  # Fallback to plain text processing if invalid JSON
 
-            from lucy.pipeline.output import process_output
-            from lucy.slack.blockkit import text_to_blocks
-            from lucy.slack.rich_output import enhance_blocks, format_links
+            try:
+                from lucy.pipeline.output import process_output
+                from lucy.slack.blockkit import text_to_blocks
+                from lucy.slack.rich_output import enhance_blocks, format_links
 
-            formatted = await process_output(text)
-            formatted = format_links(formatted)
+                formatted = await process_output(text)
+                formatted = format_links(formatted)
 
-            blocks = text_to_blocks(formatted)
-            blocks = enhance_blocks(blocks) if blocks else blocks
+                blocks = text_to_blocks(formatted)
+                blocks = enhance_blocks(blocks) if blocks else blocks
+            except Exception as fmt_exc:
+                logger.warning(
+                    "cron_delivery_formatting_failed",
+                    channel=channel,
+                    error=str(fmt_exc),
+                )
+                formatted = text
+                blocks = None
 
             if blocks:
                 await self.slack_client.chat_postMessage(
@@ -1175,7 +1219,8 @@ class CronScheduler:
                 )
                 row = result.fetchone()
                 return row[0] if row else None
-        except Exception:
+        except Exception as e:
+            logger.warning("workspace_owner_lookup_failed", error=str(e))
             return None
 
 

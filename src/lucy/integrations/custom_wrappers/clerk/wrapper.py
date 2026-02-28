@@ -16,7 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from typing import Dict, Any, List
+import structlog
+from typing import Any, Dict, List
+
+from lucy.config import settings
+
+logger = structlog.get_logger()
 
 BASE_URL = "https://api.clerk.com/v1"
 
@@ -35,7 +40,7 @@ async def _make_request(
     url = f"{BASE_URL}/{endpoint}"
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=settings.clerk_api_timeout_s) as client:
             if method == "GET":
                 response = await client.get(url, headers=headers, params=params)
             elif method == "POST":
@@ -197,8 +202,8 @@ def _clean_user_list(users: list) -> list:
                 created = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
                     "%Y-%m-%d %H:%M UTC"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("clerk_timestamp_format_failed", error=str(e))
 
         entry: dict = {
             "id": user.get("id", ""),
@@ -374,8 +379,8 @@ async def clerk_get_user_stats(api_key: str, query_params: Dict = None) -> Dict:
                         ts, tz=timezone.utc
                     ).strftime("%Y-%m")
                     monthly_signups[month_key] = monthly_signups.get(month_key, 0) + 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("clerk_stats_timestamp_parse_failed", error=str(e))
 
         if len(page) < int(params["limit"]):
             break

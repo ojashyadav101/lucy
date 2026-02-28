@@ -17,17 +17,19 @@ from typing import Any
 import structlog
 from slack_bolt.async_app import AsyncAck, AsyncApp, AsyncBoltContext, AsyncSay
 
+from lucy.config import LLMPresets, settings
+
 logger = structlog.get_logger()
 
 _processed_events: dict[str, float] = {}
 _dedup_lock: asyncio.Lock | None = None
-EVENT_DEDUP_TTL = 30.0
-HANDLER_EXECUTION_TIMEOUT = 14400
-APPROVED_ACTION_TIMEOUT = 300
+EVENT_DEDUP_TTL = settings.event_dedup_ttl
+HANDLER_EXECUTION_TIMEOUT = settings.handler_execution_timeout
+APPROVED_ACTION_TIMEOUT = settings.approved_action_timeout
 
 
 _agent_semaphore: asyncio.Semaphore | None = None
-MAX_CONCURRENT_AGENTS = 10
+MAX_CONCURRENT_AGENTS = settings.max_concurrent_agents
 
 _request_queue_started = False
 
@@ -417,10 +419,10 @@ async def _build_acknowledgment(
             client.chat_completion(
                 messages=[{"role": "user", "content": user_msg}],
                 config=ChatConfig(
-                    model="google/gemini-2.5-flash",
+                    model=settings.model_tier_fast,
                     system_prompt=system_prompt,
-                    max_tokens=80,
-                    temperature=0.9,
+                    max_tokens=LLMPresets.ACK.max_tokens,
+                    temperature=LLMPresets.ACK.temperature,
                 ),
             ),
             timeout=3.0,

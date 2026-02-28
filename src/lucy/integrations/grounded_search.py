@@ -16,11 +16,11 @@ from typing import Any
 import httpx
 import structlog
 
-from lucy.config import settings
+from lucy.config import LLMPresets, settings
 
 logger = structlog.get_logger()
 
-_SEARCH_MODEL = "google/gemini-2.5-flash"
+_SEARCH_MODEL = settings.model_tier_fast
 
 _CLASSIFICATION_PROMPT = """\
 You are an integration research assistant. Given a service name, determine how
@@ -602,7 +602,7 @@ async def _call_gemini(
     payload = {
         "model": _SEARCH_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
+        "temperature": LLMPresets.SEARCH.temperature,
         "max_tokens": max_tokens,
     }
 

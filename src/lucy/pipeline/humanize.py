@@ -25,6 +25,9 @@ from typing import Any
 
 import structlog
 
+from lucy.config import LLMPresets
+from lucy.pipeline.router import MODEL_TIERS
+
 logger = structlog.get_logger()
 
 _REPHRASER_PROMPT = (
@@ -107,8 +110,9 @@ POOL_CATEGORIES: dict[str, str] = {
         "Let them know you'll retry. Max 1 sentence."
     ),
     "error_generic": (
-        "Something went wrong but you're handling it. "
-        "Keep it vague and reassuring. Max 1 sentence."
+        "You're switching to a different approach to get this done. "
+        "Sound confident and in control. Max 1 sentence. "
+        "Never say 'something went wrong' — say what you're doing next."
     ),
     "error_task_failed": (
         "A background task ran into an issue. Offer to try "
@@ -139,87 +143,71 @@ POOL_CATEGORIES: dict[str, str] = {
 
 _FALLBACKS: dict[str, list[str]] = {
     "greeting": [
-        "Hey! Doing well, thanks for asking 👋 How are you doing?",
-        "Hi there! Good to see you. How's your day going?",
-        "Hey! I'm good, what's on your mind today?",
-        "Hi! Always nice to chat. How are things going?",
+        "Hey! What's on your mind today?",
+        "Hi there, what can I help with?",
+        "Hey! What are you working on?",
     ],
     "status": [
-        "I'm here, what's going on?",
+        "I'm here. What do you need?",
         "Online and ready. What's up?",
-        "Yep, I'm around! How can I help?",
     ],
     "help": [
         (
-            "I'm Lucy, I work alongside your team as an AI coworker. "
-            "I can help with research, manage your integrations "
-            "(calendar, email, GitHub, and more), create documents, "
-            "write and review code, and automate recurring tasks. "
-            "Think of me as the teammate who handles the things "
-            "you don't have time for. Just let me know what you need!"
+            "I'm Lucy, your AI coworker. I can pull data from your "
+            "connected services, create reports and documents, write "
+            "and run code, set up automations, and handle the things "
+            "you don't have time for. Just tell me what you need."
         ),
     ],
     "progress_early": [
-        "\U0001f680 On it, pulling that together now.",
-        "Diving in. Give me a sec.",
-        "Started digging into this \U0001f50d",
-        "Got it, working on this now.",
-        "Looking into it \u26a1",
+        "On it.",
+        "Working on this now.",
+        "Got it, give me a moment.",
     ],
     "progress_mid": [
-        "\U0001f4ca Got the initial data, putting it all together now.",
-        "Making progress, halfway through.",
-        "\U0001f527 Found what I need, formatting it up.",
-        "This is coming together. Almost ready to share.",
-        "Data's in, crunching the numbers \U0001f4c8",
+        "Making progress, will have something shortly.",
+        "Halfway through. Working on the details now.",
+        "Got the data, putting it together.",
     ],
     "progress_late": [
-        "\u23f3 Almost there, running a final check before I share.",
-        "Last step. Wrapping this up now.",
-        "\U0001f3c1 Just verifying everything looks right.",
-        "Finishing touches, should have this to you in a moment.",
-        "Nearly done. Double-checking the details \U0001f50d",
+        "Almost done, running a final check.",
+        "Wrapping this up now.",
+        "Nearly there, verifying everything.",
     ],
     "progress_final": [
-        "\u2705 Finishing touches, wrapping this up for you now.",
-        "Last pass, want to make sure this is solid.",
-        "\U0001f3af Done with the heavy lifting, packaging it up.",
-        "Almost ready to share. Just one more check.",
-        "Putting the final pieces together \u2728",
+        "Done with the heavy lifting, packaging it up.",
+        "Last check before I share this.",
+        "Just making sure everything looks right.",
     ],
-    "task_cancelled": ["Got it, I've cancelled that."],
+    "task_cancelled": ["Got it, cancelled."],
     "task_background_ack": [
-        "Working on this in the background. I'll post updates here "
-        "as I make progress. You can keep chatting in the meantime."
+        "Working on this in the background. "
+        "I'll update you here as I go."
     ],
     "error_rate_limit": [
-        "Getting a lot of requests right now, "
-        "give me a moment and I'll get back to you."
+        "I'm getting rate limited right now. "
+        "I'll be ready again in a moment."
     ],
     "error_connection": [
-        "Having a bit of trouble reaching one of the services "
-        "I need. Let me retry in a moment."
+        "Having trouble reaching a service I need. "
+        "Retrying now."
     ],
     "error_generic": [
-        "\U0001f527 Hit a bump. Let me try a different approach.",
-        "That didn't go as planned, trying something else.",
-        "Working around an issue. Give me just a moment \U0001f527",
+        "Trying a different approach.",
+        "Switching strategies on this.",
     ],
     "error_task_failed": [
-        "Ran into an issue with that. "
-        "Let me try a different approach. What specifically are you looking for?"
+        "Ran into an issue. Let me try a different approach."
     ],
     "supervisor_replan": [
-        "\U0001f504 Adjusting my approach based on what I've found so far.",
-        "Switching strategy — the first approach ran into some issues.",
-        "Pivoting to a different method. Bear with me \U0001f504",
+        "Adjusting my approach based on what I've found.",
+        "First approach hit a wall, trying another way.",
     ],
     "supervisor_ask_user": [
-        "I need a bit more info to keep going. Could you clarify something for me?",
-        "Quick question before I continue \u2014 want to make sure I get this right.",
-        "Need your input on something before I proceed.",
+        "Quick question before I continue.",
+        "Need your input on something.",
     ],
-    "hitl_approved": ["Approved by {user}. Executing now..."],
+    "hitl_approved": ["Approved by {user}. Executing now."],
     "hitl_expired": ["That action has already been handled or expired."],
     "hitl_cancelled": ["Cancelled by {user}."],
 }
@@ -258,7 +246,7 @@ async def humanize(
     context: str = "",
     task_hint: str = "",
     user_name: str = "",
-    timeout: float = 2.0,
+    timeout: float = 5.0,
 ) -> str:
     """Route a one-off message through the cheapest LLM for natural phrasing.
 
@@ -293,10 +281,10 @@ async def humanize(
             client.chat_completion(
                 messages=[{"role": "user", "content": user_msg}],
                 config=ChatConfig(
-                    model="minimax/minimax-m2.5",
+                    model=MODEL_TIERS["fast"],
                     system_prompt=_REPHRASER_PROMPT,
-                    max_tokens=120,
-                    temperature=0.9,
+                    max_tokens=LLMPresets.HUMANIZE.max_tokens,
+                    temperature=LLMPresets.HUMANIZE.temperature,
                 ),
             ),
             timeout=timeout,
@@ -319,7 +307,7 @@ def _humanize_fallback(intent: str) -> str:
     if "clarify" in lower or "rephrase" in lower:
         return "Could you give me a bit more detail on what you need?"
     if "workspace" in lower or "trouble" in lower:
-        return "Something went wrong on my end. Could you try again?"
+        return "Taking another approach on this."
     if "cancel" in lower:
         return "Got it, cancelled."
     if len(intent) > 80:
@@ -362,10 +350,10 @@ async def initialize_pools() -> None:
             client.chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 config=ChatConfig(
-                    model="minimax/minimax-m2.5",
+                    model=MODEL_TIERS["fast"],
                     system_prompt=_POOL_GENERATOR_PROMPT,
-                    max_tokens=4000,
-                    temperature=0.9,
+                    max_tokens=LLMPresets.HUMANIZE_POOL.max_tokens,
+                    temperature=LLMPresets.HUMANIZE_POOL.temperature,
                 ),
             ),
             timeout=30.0,
@@ -377,14 +365,16 @@ async def initialize_pools() -> None:
 
         parsed: dict[str, list[str]] = json.loads(raw)
 
+        new_pools: dict[str, list[str]] = {}
         loaded = 0
         for cat, variations in parsed.items():
             if isinstance(variations, list) and all(
                 isinstance(v, str) for v in variations
             ):
-                _pools[cat] = variations
+                new_pools[cat] = variations
                 loaded += 1
 
+        _pools = new_pools
         _pools_ready = loaded > 0
         logger.info(
             "humanize_pools_initialized",
@@ -402,5 +392,4 @@ async def refresh_pools() -> None:
     """Force-regenerate all pools. Call periodically (e.g. every 6 hours)."""
     global _pools_ready
     _pools_ready = False
-    _pools.clear()
     await initialize_pools()

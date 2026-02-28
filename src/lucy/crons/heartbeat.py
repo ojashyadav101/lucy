@@ -34,6 +34,13 @@ logger = structlog.get_logger()
 
 _EVAL_INTERVAL_SECONDS = 30
 _HTTP_TIMEOUT = 15.0
+_DEFAULT_CHECK_INTERVAL_S = 300
+_DEFAULT_ALERT_COOLDOWN_S = 3600
+_MIN_CHECK_INTERVAL_S = 30
+_DEFAULT_EXPECTED_STATUS = 200
+_SCRIPT_TIMEOUT_S = 30.0
+_CONSECUTIVE_FAILURES_ERROR_THRESHOLD = 3
+_consecutive_failures: dict[str, int] = {}
 
 
 async def create_heartbeat(
@@ -41,10 +48,10 @@ async def create_heartbeat(
     name: str,
     condition_type: str,
     condition_config: dict[str, Any],
-    check_interval_seconds: int = 300,
+    check_interval_seconds: int = _DEFAULT_CHECK_INTERVAL_S,
     alert_channel_id: str | None = None,
     alert_template: str = "Condition triggered: {name}",
-    alert_cooldown_seconds: int = 3600,
+    alert_cooldown_seconds: int = _DEFAULT_ALERT_COOLDOWN_S,
     description: str | None = None,
 ) -> dict[str, Any]:
     """Create a new heartbeat monitor in the database.
@@ -61,8 +68,8 @@ async def create_heartbeat(
     if condition_type not in valid_types:
         return {"error": f"Invalid condition_type '{condition_type}'. Must be one of: {', '.join(sorted(valid_types))}"}
 
-    if check_interval_seconds < 30:
-        check_interval_seconds = 30
+    if check_interval_seconds < _MIN_CHECK_INTERVAL_S:
+        check_interval_seconds = _MIN_CHECK_INTERVAL_S
 
     config_with_channel = dict(condition_config)
     if alert_channel_id:
@@ -204,7 +211,7 @@ async def _eval_api_health(config: dict[str, Any]) -> dict[str, Any]:
         timeout: float — request timeout in seconds (default 15)
     """
     url = config.get("url", "")
-    expected = config.get("expected_status", 200)
+    expected = config.get("expected_status", _DEFAULT_EXPECTED_STATUS)
     timeout = config.get("timeout", _HTTP_TIMEOUT)
 
     if not url:
@@ -391,7 +398,7 @@ async def _eval_custom(config: dict[str, Any]) -> dict[str, Any]:
             },
         )
         stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=30.0,
+            process.communicate(), timeout=_SCRIPT_TIMEOUT_S,
         )
 
         if process.returncode != 0:
@@ -415,6 +422,8 @@ async def _eval_custom(config: dict[str, Any]) -> dict[str, Any]:
                 "raw_output": output[:200],
             }
     except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
         return {"triggered": True, "error": "Script timed out after 30s"}
     except Exception as exc:
         return {"triggered": True, "error": str(exc)}
@@ -500,10 +509,10 @@ async def evaluate_due_heartbeats(slack_client: Any) -> int:
                             hb, check_result, slack_client,
                         )
                 else:
+                    _consecutive_failures.pop(str(hb.id), None)
                     if hb.current_status == HeartbeatStatus.TRIGGERED:
                         hb.current_status = HeartbeatStatus.HEALTHY
 
-                await session.commit()
                 evaluated += 1
 
                 logger.debug(
@@ -514,11 +523,19 @@ async def evaluate_due_heartbeats(slack_client: Any) -> int:
                 )
 
             except Exception as exc:
-                logger.warning(
+                hb_key = str(hb.id)
+                _consecutive_failures[hb_key] = _consecutive_failures.get(hb_key, 0) + 1
+                fail_count = _consecutive_failures[hb_key]
+                log_level = "error" if fail_count >= _CONSECUTIVE_FAILURES_ERROR_THRESHOLD else "warning"
+                getattr(logger, log_level)(
                     "heartbeat_eval_error",
                     name=hb.name,
                     error=str(exc),
+                    consecutive_failures=fail_count,
                 )
+
+        if evaluated:
+            await session.commit()
 
     return evaluated
 
@@ -548,7 +565,17 @@ async def _send_alert(
     channel: str | None = config.get("_slack_alert_channel")
 
     if not channel and hb.alert_channel_id:
-        channel = str(hb.alert_channel_id)
+        from sqlalchemy import select as _select
+
+        from lucy.db import AsyncSessionLocal as _ASL
+        from lucy.db.models import Channel
+
+        async with _ASL() as _sess:
+            stmt_ch = _select(Channel).where(Channel.id == hb.alert_channel_id)
+            result_ch = await _sess.execute(stmt_ch)
+            ch_record = result_ch.scalar_one_or_none()
+            if ch_record and hasattr(ch_record, "slack_id"):
+                channel = ch_record.slack_id
 
     if not channel:
         from sqlalchemy import select

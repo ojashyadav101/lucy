@@ -26,14 +26,14 @@ from typing import Any
 import httpx
 import structlog
 
-from lucy.config import settings
+from lucy.config import LLMPresets, settings
 from lucy.integrations.grounded_search import IntegrationClassification
 
 logger = structlog.get_logger()
 
 _WRAPPERS_DIR = Path(__file__).parent / "custom_wrappers"
 
-_GENERATOR_MODEL = "google/gemini-2.5-flash"
+_GENERATOR_MODEL = settings.model_tier_fast
 
 _GENERATOR_PROMPT = """\
 You are an expert Python developer. Generate a production-ready Python wrapper
@@ -321,8 +321,8 @@ async def _generate_wrapper_code(
     payload = {
         "model": _GENERATOR_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_tokens": 16384,
+        "temperature": LLMPresets.CODE_GEN.temperature,
+        "max_tokens": LLMPresets.CODE_GEN.max_tokens,
     }
 
     try:
@@ -475,8 +475,8 @@ def delete_custom_wrapper(slug: str) -> dict[str, Any]:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             service_name = meta.get("service_name", slug)
             tool_count = meta.get("total_tools", 0)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("wrapper_meta_parse_failed", slug=slug, error=str(e))
 
     shutil.rmtree(wrapper_dir, ignore_errors=True)
     removed.append(f"wrapper directory: custom_wrappers/{slug}/")

@@ -21,8 +21,8 @@ from lucy.config import settings
 
 logger = structlog.get_logger()
 
-_REQUEST_TIMEOUT = 30.0
-_NAVIGATE_TIMEOUT = 45.0
+_REQUEST_TIMEOUT = settings.camofox_request_timeout_s
+_NAVIGATE_TIMEOUT = settings.camofox_navigate_timeout_s
 
 
 class CamoFoxError(Exception):

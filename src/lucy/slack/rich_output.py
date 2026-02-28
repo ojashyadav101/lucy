@@ -46,7 +46,7 @@ _SECTION_EMOJI_RE = re.compile(
 
 def add_section_emoji(header: str) -> str:
     """Add a strategic emoji prefix to a section header if appropriate."""
-    if any(ord(c) > 0x1F000 for c in header):
+    if any(ord(c) > 0x2600 for c in header):
         return header
 
     match = _SECTION_EMOJI_RE.search(header.lower())
@@ -82,13 +82,17 @@ _DOMAIN_NAMES: dict[str, str] = {
     "composio.dev": "Connect here",
     "connect.composio.dev": "Connect here",
     "auth.composio.dev": "Connect here",
+    "zeeya.app": "Live App",
 }
 
 
 def format_links(text: str) -> str:
     """Convert raw URLs to Slack anchor-text links."""
+    # Pre-clean: strip bold markers that got attached to URLs
+    text = re.sub(r"\*(https?://[^\s*|>]+)\*", r"\1", text)
+
     def _replace_url(match: re.Match[str]) -> str:
-        url = match.group(1)
+        url = match.group(1).rstrip("*")
 
         domain_match = re.search(r"https?://(?:www\.)?([^/]+)", url)
         if not domain_match:
@@ -112,6 +116,12 @@ def format_links(text: str) -> str:
                     issue_match = re.search(r"/issue/([A-Z]+-\d+)", url)
                     if issue_match:
                         return f"<{url}|{issue_match.group(1)} on Linear>"
+
+                if "zeeya.app" in domain:
+                    slug = domain.split(".")[0] if "." in domain else domain
+                    readable = slug.replace("-", " ").rsplit(" ", 1)[0].strip().title()
+                    if readable:
+                        return f"<{url}|{readable} on Zeeya>"
 
                 return f"<{url}|{friendly_name}>"
 
@@ -160,7 +170,9 @@ def enhance_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # RESPONSE LENGTH MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════
 
-MAX_SINGLE_MESSAGE_CHARS = 3000
+MAX_SINGLE_MESSAGE_CHARS = 6000
+_SPLIT_MIN_RATIO = 0.3
+_SPLIT_MIN_RATIO_NEWLINE = 0.2
 
 
 def should_split_response(text: str) -> bool:
@@ -196,13 +208,13 @@ def split_response(text: str) -> list[str]:
                 return idx
             return -1
 
-        split_idx = _try_split("\n*", 0.3)
+        split_idx = _try_split("\n*", _SPLIT_MIN_RATIO)
         if split_idx < 0:
-            split_idx = _try_split("\n---", 0.3)
+            split_idx = _try_split("\n---", _SPLIT_MIN_RATIO)
         if split_idx < 0:
-            split_idx = _try_split("\n\n", 0.3)
+            split_idx = _try_split("\n\n", _SPLIT_MIN_RATIO)
         if split_idx < 0:
-            split_idx = _try_split("\n", 0.2)
+            split_idx = _try_split("\n", _SPLIT_MIN_RATIO_NEWLINE)
 
         if split_idx >= 0:
             chunks.append(remaining[:split_idx].rstrip())

@@ -18,7 +18,7 @@ from lucy.config import settings
 logger = structlog.get_logger()
 
 _BASE = "https://api.vercel.com"
-_TIMEOUT = 60.0
+_TIMEOUT = settings.vercel_timeout_s
 
 _client: VercelAPI | None = None
 

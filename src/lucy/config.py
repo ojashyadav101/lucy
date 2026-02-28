@@ -7,6 +7,7 @@ Sensitive credentials can also be loaded from keys.json.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -78,6 +79,47 @@ class Settings(BaseSettings):
     spaces_domain: str = "zeeya.app"
     spaces_enabled: bool = True
 
+    # ── Agent limits ────────────────────────────────────────────
+    agent_max_tool_turns: int = 50
+    agent_max_context_messages: int = 80
+    agent_tool_result_max_chars: int = 50_000
+    agent_tool_result_summary_threshold: int = 24_000
+    agent_max_payload_chars: int = 120_000
+    agent_absolute_max_seconds: int = 14_400
+    agent_silence_threshold_s: float = 480.0
+    agent_wallclock_timeout_s: float = 1200.0
+
+    # ── Slack handler limits ──────────────────────────────────
+    handler_execution_timeout: int = 14400
+    approved_action_timeout: int = 300
+    max_concurrent_agents: int = 10
+    event_dedup_ttl: float = 30.0
+
+    # ── Sub-agent limits ──────────────────────────────────────
+    subagent_max_turns: int = 20
+    subagent_max_payload_chars: int = 200_000
+    subagent_max_tool_result_chars: int = 32_000
+    subagent_timeout_s: int = 600
+
+    # ── Supervisor ────────────────────────────────────────────
+    supervisor_check_interval_turns: int = 3
+    supervisor_check_interval_s: float = 60.0
+
+    # ── Connection watcher ────────────────────────────────────
+    connection_poll_interval_s: int = 5
+    connection_poll_max_duration_s: int = 600
+    connection_max_concurrent_watches: int = 20
+
+    # ── External service timeouts ─────────────────────────────
+    composio_timeout_s: float = 60.0
+    vercel_timeout_s: float = 60.0
+    convex_timeout_s: float = 30.0
+    camofox_request_timeout_s: float = 30.0
+    camofox_navigate_timeout_s: float = 45.0
+    clerk_api_timeout_s: float = 60.0
+    polar_api_timeout_s: float = 60.0
+    openclaw_gateway_timeout_s: float = 120.0
+
     # Application
     log_level: str = "INFO"
     env: str = "development"
@@ -125,3 +167,30 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore[call-arg]
+
+
+@dataclass(frozen=True)
+class LLMPreset:
+    """Named parameter preset for internal LLM calls."""
+
+    temperature: float
+    max_tokens: int
+
+
+class LLMPresets:
+    """Central registry of LLM parameter presets used for internal calls.
+
+    Keeps temperature/max_tokens pairs out of individual files so they
+    can be tuned in one place.
+    """
+
+    ACK = LLMPreset(temperature=0.9, max_tokens=80)
+    SUPERVISOR = LLMPreset(temperature=0.2, max_tokens=1000)
+    SUPERVISOR_TERSE = LLMPreset(temperature=0.1, max_tokens=200)
+    HUMANIZE = LLMPreset(temperature=0.9, max_tokens=500)
+    HUMANIZE_POOL = LLMPreset(temperature=0.9, max_tokens=8000)
+    CLASSIFIER = LLMPreset(temperature=0.1, max_tokens=500)
+    CODE_GEN = LLMPreset(temperature=0.2, max_tokens=16384)
+    SEARCH = LLMPreset(temperature=0.1, max_tokens=8192)
+    DEAI_REWRITE = LLMPreset(temperature=0.4, max_tokens=16384)
+    SUBAGENT = LLMPreset(temperature=0.4, max_tokens=16384)

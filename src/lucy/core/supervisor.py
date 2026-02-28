@@ -16,6 +16,9 @@ Both the planner and supervisor use the cheapest/fastest model tier
 
 from __future__ import annotations
 
+import itertools
+import json
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -23,12 +26,12 @@ from typing import Any
 
 import structlog
 
-from lucy.config import settings
+from lucy.config import LLMPresets, settings
 
 logger = structlog.get_logger()
 
-SUPERVISOR_CHECK_INTERVAL_TURNS = 3
-SUPERVISOR_CHECK_INTERVAL_SECONDS = 60.0
+SUPERVISOR_CHECK_INTERVAL_TURNS = settings.supervisor_check_interval_turns
+SUPERVISOR_CHECK_INTERVAL_SECONDS = settings.supervisor_check_interval_s
 
 _COMPLEX_INTENTS = frozenset({
     "data", "document", "code", "code_reasoning", "tool_use", "research",
@@ -61,14 +64,29 @@ class TaskPlan:
     goal: str
     steps: list[PlanStep]
     success_criteria: str = ""
+    ideal_outcome: str = ""
+    underwhelming: str = ""
+    who: str = ""
+    risks: str = ""
+    format_hint: str = ""
 
     def to_prompt_text(self) -> str:
         lines = [f"Goal: {self.goal}"]
+        if self.who:
+            lines.append(f"Who is asking: {self.who}")
+        if self.ideal_outcome:
+            lines.append(f"AMAZING outcome: {self.ideal_outcome}")
+        if self.underwhelming:
+            lines.append(f"AVOID (underwhelming): {self.underwhelming}")
         for s in self.steps:
             tools_hint = f" (using: {', '.join(s.expected_tools)})" if s.expected_tools else ""
             lines.append(f"  {s.number}. {s.description}{tools_hint}")
+        if self.risks:
+            lines.append(f"Risks: {self.risks}")
         if self.success_criteria:
             lines.append(f"Success: {self.success_criteria}")
+        if self.format_hint:
+            lines.append(f"Format: {self.format_hint}")
         return "\n".join(lines)
 
 
@@ -89,25 +107,44 @@ class SupervisorResult:
 
 
 def _needs_plan(intent: str, message: str) -> bool:
-    """Determine if a task is complex enough to warrant a plan."""
+    """Determine if a task is complex enough to warrant a plan.
+
+    Cost-conscious: only burn planner tokens when the task genuinely
+    has multiple steps or ambiguous scope. Short messages within
+    complex intents (e.g. "deploy it") don't need a plan — the main
+    model handles them fine.
+    """
     if intent in _SIMPLE_INTENTS:
         return False
+    stripped = re.sub(r"```[\s\S]*?```", "", message)
+    stripped = re.sub(r"https?://\S+", "", stripped)
+    words = stripped.split()
+    word_count = len(words)
+    if word_count < 10:
+        return False
     if intent in _COMPLEX_INTENTS:
-        if len(message.split()) < 8:
-            return False
         return True
-    return len(message.split()) > 15
+    return word_count > 20
 
 
 async def create_plan(
     user_message: str,
     available_tools: list[str],
     intent: str,
+    user_context: str = "",
 ) -> TaskPlan | None:
-    """Generate a step-by-step plan for complex tasks.
+    """Run the Thinking Model as an explicit LLM step before execution.
 
-    Returns None for simple tasks that don't need planning.
-    Uses the cheapest model tier for cost efficiency.
+    This is the most important step in Lucy's pipeline. A cheap/fast model
+    thinks through the full problem BEFORE the main model starts executing.
+    This produces a concrete plan artifact that:
+    - Forces real planning to happen (not just prompt suggestions)
+    - Gives the main model a clear roadmap
+    - Gives the supervisor something to evaluate against
+    - Catches failure modes before they waste tool calls
+
+    Returns None for simple tasks (greetings, short follow-ups).
+    Cost: ~400 tokens on the cheapest model (~$0.0001).
     """
     if not _needs_plan(intent, user_message):
         return None
@@ -118,19 +155,33 @@ async def create_plan(
     model = MODEL_TIERS.get("fast", settings.model_tier_fast)
     client = await get_openclaw_client()
 
-    tools_str = ", ".join(available_tools[:30])
+    tools_str = ", ".join(available_tools[:50])
+    context_block = ""
+    if user_context:
+        context_block = f"\nCONTEXT:\n{user_context[:1500]}\n"
+
+    _user_msg = user_message
+    if len(_user_msg) > 1500:
+        _user_msg = _user_msg[:750] + "\n...(middle omitted)...\n" + _user_msg[-750:]
+
     prompt = (
-        "You are a task planner. Create a brief execution plan.\n\n"
-        f"USER REQUEST: {user_message[:300]}\n"
-        f"AVAILABLE TOOLS: {tools_str}\n\n"
-        "Output a plan with 2-6 numbered steps. Each step should be "
-        "one concrete action. Keep it terse — one line per step.\n"
-        "Format:\n"
-        "GOAL: <one sentence>\n"
-        "1. <step> [tool: <tool_name>]\n"
-        "2. <step> [tool: <tool_name>]\n"
+        f"REQUEST: {_user_msg}\n"
+        f"TOOLS: {tools_str}"
+        f"{context_block}\n"
+        "Think through this task. One line per field. Be terse.\n\n"
+        "REAL_NEED: <what does the person actually need? Use context "
+        "about their role, company, and recent conversations to infer "
+        "the real need behind the literal request.>\n"
+        "WHO: <who is asking? technical/non-technical? what format do "
+        "they prefer? what's their communication style from context?>\n"
+        "AMAZING: <what response would make them say 'exactly what I needed'?>\n"
+        "UNDERWHELMING: <what response would make them think 'I could have Googled this'?>\n"
+        "1. <action> [tool] (fallback: <alt if this fails>)\n"
         "...\n"
-        "SUCCESS: <what the final output should contain>"
+        "RISKS: <1-2 biggest risks: pagination, missing creds, scope>\n"
+        "SUCCESS: <specific deliverables>\n"
+        "FORMAT: <how to present the result to this person; inline text, "
+        "text + file, or text + multi-tab Excel>"
     )
 
     try:
@@ -138,8 +189,30 @@ async def create_plan(
             messages=[{"role": "user", "content": prompt}],
             config=ChatConfig(
                 model=model,
-                max_tokens=400,
-                temperature=0.3,
+                system_prompt=(
+                    "You are a task planner. Think step by step about what "
+                    "the user really needs, not just what they literally said. "
+                    "Output structured fields. Be terse, one line each.\n\n"
+                    "THREE-FRAME TEST (critical):\n"
+                    "- AMAZING: What response would make them say 'this is exactly what I needed'?\n"
+                    "- UNDERWHELMING: What would make them think 'I could have Googled this'? "
+                    "Avoid this at all costs.\n"
+                    "- Build toward AMAZING. If AMAZING includes insights they didn't ask for, "
+                    "month-over-month comparison, a well-organized file, or a specific next step, "
+                    "plan for those.\n\n"
+                    "WHO: Consider who is asking. Technical or non-technical? "
+                    "Brief or detailed preference? Match the response format to the person.\n\n"
+                    "FORMAT guidance rules:\n"
+                    "- Data requests: key metric first with comparison, then supporting detail. "
+                    "If data is large, multi-tab Excel + concise Slack message with top insights. "
+                    "File must contain MORE than the message.\n"
+                    "- 'Detailed'/'all'/'comprehensive' = EVERYTHING, not a sample. "
+                    "Plan for pagination.\n"
+                    "- Simple requests: short answer, no file.\n"
+                    "- Always specify: inline text, text + file, or text + multi-tab Excel."
+                ),
+                max_tokens=LLMPresets.SUPERVISOR.max_tokens,
+                temperature=LLMPresets.SUPERVISOR.temperature,
             ),
         )
         return _parse_plan(response.content or "")
@@ -149,14 +222,19 @@ async def create_plan(
 
 
 def _parse_plan(text: str) -> TaskPlan | None:
-    """Parse the LLM's plan output into a TaskPlan."""
+    """Parse the LLM's thinking model output into a TaskPlan."""
     if not text or len(text) < 10:
         return None
 
     lines = text.strip().splitlines()
     goal = ""
-    steps: list[PlanStep] = []
+    ideal_outcome = ""
+    underwhelming = ""
+    who = ""
+    risks = ""
     success = ""
+    format_hint = ""
+    steps: list[PlanStep] = []
 
     for line in lines:
         stripped = line.strip()
@@ -165,8 +243,29 @@ def _parse_plan(text: str) -> TaskPlan | None:
         if upper.startswith("GOAL:"):
             goal = stripped[5:].strip()
             continue
+        if upper.startswith("REAL_NEED:"):
+            goal = stripped[10:].strip()
+            continue
+        if upper.startswith("IDEAL:"):
+            ideal_outcome = stripped[6:].strip()
+            continue
+        if upper.startswith("AMAZING:"):
+            ideal_outcome = stripped[8:].strip()
+            continue
+        if upper.startswith("UNDERWHELMING:"):
+            underwhelming = stripped[14:].strip()
+            continue
+        if upper.startswith("WHO:"):
+            who = stripped[4:].strip()
+            continue
+        if upper.startswith("RISKS:"):
+            risks = stripped[6:].strip()
+            continue
         if upper.startswith("SUCCESS:"):
             success = stripped[8:].strip()
+            continue
+        if upper.startswith("FORMAT:"):
+            format_hint = stripped[7:].strip()
             continue
 
         if stripped and stripped[0].isdigit() and "." in stripped[:4]:
@@ -178,6 +277,12 @@ def _parse_plan(text: str) -> TaskPlan | None:
                 tool_part = desc[bracket_start + 6:].rstrip("]").strip()
                 tools = [t.strip() for t in tool_part.split(",") if t.strip()]
                 desc = desc[:bracket_start].strip()
+            elif "[" in desc and "]" in desc:
+                bracket_start = desc.index("[")
+                bracket_end = desc.index("]")
+                tool_part = desc[bracket_start + 1:bracket_end].strip()
+                tools = [t.strip() for t in tool_part.split(",") if t.strip()]
+                desc = (desc[:bracket_start] + desc[bracket_end + 1:]).strip()
             steps.append(PlanStep(
                 number=len(steps) + 1,
                 description=desc,
@@ -191,6 +296,11 @@ def _parse_plan(text: str) -> TaskPlan | None:
         goal=goal or "Complete the user's request",
         steps=steps,
         success_criteria=success,
+        ideal_outcome=ideal_outcome,
+        underwhelming=underwhelming,
+        who=who,
+        risks=risks,
+        format_hint=format_hint,
     )
 
 
@@ -221,12 +331,40 @@ async def evaluate_progress(
     current_model: str,
     response_text_length: int,
     intent: str = "",
+    consecutive_failures: int = 0,
 ) -> SupervisorResult:
     """Evaluate agent progress and decide next action.
 
     Uses the cheapest model tier for a fast, single-classification call.
     The prompt is kept under 500 tokens for minimal cost.
+
+    When ``consecutive_failures`` (consecutive LLM-call failures for
+    the supervisor itself) reaches 3+, a heuristic fallback is used
+    instead of calling the LLM again.
     """
+    if consecutive_failures >= 3:
+        consecutive_errors = 0
+        for r in reversed(turn_reports):
+            if r.had_error:
+                consecutive_errors += 1
+            else:
+                break
+        turn = len(turn_reports)
+        if turn > 20:
+            return SupervisorResult(
+                decision=SupervisorDecision.ABORT,
+                guidance="Heuristic: too many turns without supervisor LLM",
+            )
+        if consecutive_errors >= 3:
+            return SupervisorResult(
+                decision=SupervisorDecision.ESCALATE,
+                guidance="Heuristic: 3+ consecutive tool errors",
+            )
+        return SupervisorResult(
+            decision=SupervisorDecision.CONTINUE,
+            guidance="Heuristic fallback (supervisor LLM unavailable)",
+        )
+
     from lucy.core.openclaw import ChatConfig, get_openclaw_client
     from lucy.pipeline.router import MODEL_TIERS
 
@@ -262,29 +400,21 @@ async def evaluate_progress(
         )
 
     prompt = (
-        "You are a task supervisor. Evaluate this agent's progress and "
-        "decide what should happen next.\n\n"
-        f"USER REQUEST: {user_message[:150]}\n"
-        f"INTENT: {intent or 'general'}\n"
+        f"Evaluate agent progress. Bias: CONTINUE unless clearly stuck.\n\n"
+        f"REQUEST: {user_message[:250] + '...(middle omitted)...' + user_message[-250:] if len(user_message) > 500 else user_message}\n"
         f"{intent_hint}"
-        f"PLAN:\n{plan_text}\n"
-        f"TURN: {len(turn_reports)}\n"
-        f"ELAPSED: {int(elapsed_seconds)}s\n"
-        f"RECENT ACTIONS:\n{recent_text}\n"
-        f"TOTAL ERRORS: {error_count} "
-        f"(consecutive: {consecutive_errors})\n"
-        f"RESPONSE SO FAR: {response_text_length} chars\n"
-        f"MODEL: {current_model}\n\n"
-        "Reply with EXACTLY one letter, then optionally a brief reason "
-        "or guidance on the same line:\n"
-        "C = continue (agent is making progress)\n"
-        "I = intervene (inject guidance to correct course)\n"
-        "R = replan (current plan is wrong, needs new approach)\n"
-        "E = escalate (switch to a stronger/smarter model)\n"
-        "A = ask user (need clarification from the user)\n"
-        "X = abort (task is impossible, stop gracefully)\n\n"
-        "IMPORTANT: Only choose I/R/E/A/X if there is a clear problem. "
-        "If the agent is working and making progress, choose C."
+        f"PLAN: {plan_text}\n"
+        f"TURN: {len(turn_reports)} | ELAPSED: {int(elapsed_seconds)}s | "
+        f"ERRORS: {error_count} (consec: {consecutive_errors}) | "
+        f"RESPONSE: {response_text_length} chars\n"
+        f"RECENT:\n{recent_text}\n\n"
+        "NOTE: Long elapsed time alone is NOT a problem. The streaming "
+        "layer handles hung models automatically. Only evaluate based on "
+        "tool results and errors, not duration.\n\n"
+        "Reply ONE letter + brief reason:\n"
+        "C=continue | I=intervene(say what to try) | R=replan | "
+        "E=escalate model | A=ask user | X=abort(truly impossible only)\n"
+        "X is last resort — try I/R/E first."
     )
 
     try:
@@ -293,8 +423,9 @@ async def evaluate_progress(
             messages=[{"role": "user", "content": prompt}],
             config=ChatConfig(
                 model=model,
-                max_tokens=100,
-                temperature=0.1,
+                system_prompt="Reply ONE letter + short reason. Be terse.",
+                max_tokens=LLMPresets.SUPERVISOR_TERSE.max_tokens,
+                temperature=LLMPresets.SUPERVISOR_TERSE.temperature,
             ),
         )
         return _parse_decision(response.content or "C")
@@ -312,9 +443,6 @@ def _parse_decision(text: str) -> SupervisorResult:
     if not text:
         return SupervisorResult(decision=SupervisorDecision.CONTINUE)
 
-    first_char = text[0].upper()
-    guidance = text[1:].strip().lstrip("=:—-–").strip() if len(text) > 1 else ""
-
     mapping = {
         "C": SupervisorDecision.CONTINUE,
         "I": SupervisorDecision.INTERVENE,
@@ -324,8 +452,18 @@ def _parse_decision(text: str) -> SupervisorResult:
         "X": SupervisorDecision.ABORT,
     }
 
-    decision = mapping.get(first_char, SupervisorDecision.CONTINUE)
-    return SupervisorResult(decision=decision, guidance=guidance)
+    first_char = text[0].upper()
+    if first_char in mapping:
+        guidance = text[1:].strip().lstrip("=:—-–").strip() if len(text) > 1 else ""
+        return SupervisorResult(decision=mapping[first_char], guidance=guidance)
+
+    upper_text = text.upper()
+    for letter, decision in mapping.items():
+        if letter in upper_text:
+            guidance = text.strip()
+            return SupervisorResult(decision=decision, guidance=guidance)
+
+    return SupervisorResult(decision=SupervisorDecision.CONTINUE, guidance=text)
 
 
 def build_turn_report(
@@ -335,7 +473,16 @@ def build_turn_report(
 ) -> list[TurnReport]:
     """Build TurnReports from a turn's tool calls and results."""
     reports: list[TurnReport] = []
-    for tc, (call_id, result_str) in zip(tool_calls, tool_results):
+    if len(tool_calls) != len(tool_results):
+        logger.warning(
+            "turn_report_length_mismatch",
+            tool_calls=len(tool_calls),
+            tool_results=len(tool_results),
+        )
+    for tc, tr in itertools.zip_longest(tool_calls, tool_results):
+        if tc is None:
+            tc = {}
+        call_id, result_str = tr if tr is not None else ("", "")
         name = tc.get("name", "unknown")
         args = tc.get("arguments", "")
         if isinstance(args, str) and len(args) > 80:
@@ -350,11 +497,11 @@ def build_turn_report(
             if '"error"' in lower or '"error":' in lower:
                 had_error = True
                 try:
-                    parsed = __import__("json").loads(result_str)
+                    parsed = json.loads(result_str)
                     if isinstance(parsed, dict) and parsed.get("error"):
                         error_summary = str(parsed["error"])[:120]
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("supervisor_error_parse_failed", error=str(e))
             if "traceback" in lower or "exception" in lower:
                 had_error = True
                 error_summary = error_summary or result_str[:120]

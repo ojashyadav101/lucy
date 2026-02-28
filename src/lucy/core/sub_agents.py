@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 
 import structlog
 
-from lucy.config import settings
+from lucy.config import LLMPresets, settings
 from lucy.core.openclaw import (
     ChatConfig,
     OpenClawClient,
@@ -31,10 +31,10 @@ from lucy.core.openclaw import (
 logger = structlog.get_logger()
 
 PROMPTS = Path(__file__).parent.parent.parent.parent / "prompts"
-SUB_MAX_TURNS = 10
-SUB_MAX_PAYLOAD_CHARS = 80_000
-SUB_TOOL_RESULT_MAX_CHARS = 8_000
-SUB_TIMEOUT_SECONDS = 120
+SUB_MAX_TURNS = settings.subagent_max_turns
+SUB_MAX_PAYLOAD_CHARS = settings.subagent_max_payload_chars
+SUB_TOOL_RESULT_MAX_CHARS = settings.subagent_max_tool_result_chars
+SUB_TIMEOUT_SECONDS = settings.subagent_timeout_s
 
 
 @dataclass
@@ -46,8 +46,8 @@ class SubAgentSpec:
     model: str
     tool_names: list[str] = field(default_factory=list)
     max_turns: int = SUB_MAX_TURNS
-    max_tokens: int = 4096
-    temperature: float = 0.4
+    max_tokens: int = LLMPresets.SUBAGENT.max_tokens
+    temperature: float = LLMPresets.SUBAGENT.temperature
 
 
 REGISTRY: dict[str, SubAgentSpec] = {
@@ -60,7 +60,7 @@ REGISTRY: dict[str, SubAgentSpec] = {
             "COMPOSIO_MULTI_EXECUTE_TOOL",
             "lucy_search_slack_history",
         ],
-        max_turns=12,
+        max_turns=25,
     ),
     "code": SubAgentSpec(
         name="code",
@@ -72,7 +72,7 @@ REGISTRY: dict[str, SubAgentSpec] = {
             "lucy_write_file",
             "lucy_edit_file",
         ],
-        max_turns=10,
+        max_turns=25,
     ),
     "integrations": SubAgentSpec(
         name="integrations",
@@ -84,7 +84,7 @@ REGISTRY: dict[str, SubAgentSpec] = {
             "COMPOSIO_MULTI_EXECUTE_TOOL",
             "lucy_resolve_custom_integration",
         ],
-        max_turns=8,
+        max_turns=20,
     ),
     "document": SubAgentSpec(
         name="document",
@@ -98,8 +98,8 @@ REGISTRY: dict[str, SubAgentSpec] = {
             "lucy_generate_excel",
             "lucy_generate_csv",
         ],
-        max_turns=8,
-        max_tokens=8192,
+        max_turns=20,
+        max_tokens=16_384,
     ),
 }
 
@@ -272,9 +272,6 @@ async def run_subagent(
     )
 
     for turn in range(spec.max_turns):
-        if progress_callback and turn > 0 and turn % 3 == 0:
-            await progress_callback(spec.name, turn)
-
         config = ChatConfig(
             model=spec.model,
             system_prompt=system_prompt,
@@ -313,6 +310,12 @@ async def run_subagent(
                 break
 
         if loop_detected:
+            for tc_idx, tc in enumerate(resp.tool_calls):
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", f"sub_call_{tc_idx}"),
+                    "content": "Skipped — repeated call detected. Try a different approach.",
+                })
             continue
 
         for tc_idx, tc in enumerate(resp.tool_calls):

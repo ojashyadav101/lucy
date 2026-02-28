@@ -16,7 +16,7 @@ from lucy.config import settings
 logger = structlog.get_logger()
 
 _BASE = "https://api.convex.dev/v1"
-_TIMEOUT = 30.0
+_TIMEOUT = settings.convex_timeout_s
 
 _client: ConvexAPI | None = None
 
