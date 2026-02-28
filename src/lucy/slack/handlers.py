@@ -24,6 +24,9 @@ logger = structlog.get_logger()
 _processed_events: dict[str, float] = {}
 _dedup_lock: asyncio.Lock | None = None
 EVENT_DEDUP_TTL = settings.event_dedup_ttl
+
+# Track events where we've already posted a response to prevent double-posting
+_responded_events: dict[str, float] = {}
 HANDLER_EXECUTION_TIMEOUT = settings.handler_execution_timeout
 APPROVED_ACTION_TIMEOUT = settings.approved_action_timeout
 
@@ -885,6 +888,17 @@ async def _run_with_recovery(
             raise
 
     # Attempt 2: single retry with failure context (skip for client errors)
+    # But ONLY if attempt 1 didn't already produce a partial response  
+    # that was posted to Slack (to avoid double-responding)
+    event_key = f"{ctx.channel_id}:{ctx.thread_ts}"
+    if event_key in _responded_events:
+        logger.warning(
+            "skip_retry_already_responded",
+            workspace_id=workspace_id,
+            event_key=event_key,
+        )
+        raise RuntimeError(f"Attempt 1 failed after responding: {last_error}")
+
     await asyncio.sleep(_retry_delay(last_error))
     try:
         return await agent.run(

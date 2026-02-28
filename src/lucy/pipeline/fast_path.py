@@ -84,6 +84,16 @@ _HELP_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ALIVE_RE = re.compile(
+    r"^(?:(?:can you|do you) hear me\??|"
+    r"are you (?:alive|working|listening|there|awake|up)\??|"
+    r"(?:quick )?test.*|testing.*|"
+    r"just (?:checking|testing).*|"
+    r"(?:say |respond with )?(?:hello|hi|hey)\s*(?:back)?[!.\s]*)"
+    r"[!?.\s]*$",
+    re.IGNORECASE,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FAST PATH EVALUATION
@@ -130,5 +140,10 @@ def evaluate_fast_path(
         response = pick("help")
         logger.info("fast_path_match", pattern="help", message=text[:50])
         return FastPathResult(is_fast=True, response=response, reason="help")
+
+    if _ALIVE_RE.match(text):
+        response = pick("status")
+        logger.info("fast_path_match", pattern="alive_check", message=text[:50])
+        return FastPathResult(is_fast=True, response=response, reason="alive_check")
 
     return FastPathResult(is_fast=False, response=None, reason="no_match")

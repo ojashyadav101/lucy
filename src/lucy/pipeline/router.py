@@ -52,9 +52,12 @@ _RESEARCH_HEAVY = re.compile(
 )
 
 _GREETING_PATTERNS = re.compile(
-    r"^(hi|hey|hello|yo|sup|thanks|thank you|ok|okay|got it|"
-    r"sounds good|perfect|great|cool|nice|yes|no|yep|nope|sure)"
-    r"(\s+(there|lucy|everyone|all|team))*\s*[!.?]*$",
+    r"^(hi|hey|hello|yo|sup|hiya|howdy|thanks|thank you|thx|ty|"
+    r"ok|okay|got it|sounds good|perfect|great|cool|nice|"
+    r"yes|no|yep|nope|sure|good morning|good afternoon|good evening|"
+    r"morning|evening|gm|how are you|how's it going|what's up)"
+    r"(\s+(there|lucy|everyone|all|team|buddy|mate|friend))*"
+    r"[!.,?\s]*$",
     re.IGNORECASE,
 )
 
@@ -224,9 +227,13 @@ def classify_and_route(
         return _choice("tool_use", "default")
 
     # 8. Simple lookups — truly simple questions with no data dependency
-    if len(text) < 40 and _SIMPLE_QUESTION.match(text):
+    if len(text) < 80 and _SIMPLE_QUESTION.match(text):
         if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
             return _choice("lookup", "fast")
+
+    # 8b. Short conversational messages with no tool/data keywords
+    if len(text) < 100 and not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text) and not _ACTION_VERBS.search(text):
+        return _choice("chat", "fast")
 
     # 9. Default — tool-calling, general tasks
     return _choice("tool_use", "default")

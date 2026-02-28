@@ -260,6 +260,47 @@ class LucyAgent:
         async with trace.span("ensure_workspace"):
             ws = await ensure_workspace(ctx.workspace_id, slack_client)
 
+        # ── FAST INTENT SHORT-CIRCUIT ──────────────────────────────
+        # For chat/lookup/confirmation intents, skip the entire tool
+        # loading pipeline. No Composio, no custom wrappers, no 85KB
+        # prompt. Just a lightweight system prompt + direct LLM call.
+        _NO_TOOLS_INTENTS = frozenset({
+            "chat", "lookup", "confirmation", "followup",
+        })
+        if route.intent in _NO_TOOLS_INTENTS and not failure_context:
+            logger.info(
+                "fast_intent_no_tools",
+                intent=route.intent,
+                model=model,
+                workspace_id=ctx.workspace_id,
+            )
+            from lucy.pipeline.prompt import build_lightweight_prompt
+            async with trace.span("build_lightweight_prompt"):
+                system_prompt = await build_lightweight_prompt(ws)
+
+            messages = await self._build_thread_messages(
+                message, ctx, slack_client,
+            )
+            client = await self._get_client()
+            async with trace.span("llm_call_fast") as llm_span:
+                response = await client.chat_completion(
+                    messages=[{"role": "system", "content": system_prompt}]
+                    + messages,
+                    config=ChatConfig(
+                        model=model,
+                        temperature=0.8,
+                        max_tokens=500,
+                    ),
+                )
+            trace.model_used = model
+            logger.info(
+                "fast_intent_complete",
+                intent=route.intent,
+                response_length=len(response.content or ""),
+                workspace_id=ctx.workspace_id,
+            )
+            return response.content or ""
+
         # 3. Fetch connected services + meta-tools in parallel
         from lucy.pipeline.prompt import build_system_prompt
 

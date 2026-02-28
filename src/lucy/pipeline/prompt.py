@@ -75,6 +75,57 @@ def _load_prompt_modules(names: list[str]) -> str:
 _COMMON_MODULES = ["tool_use", "memory"]
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LIGHTWEIGHT PROMPT (for chat/lookup/confirmation — no tools needed)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_SOUL_LITE_PATH = _PROMPTS_DIR / "SOUL_LITE.md"
+
+async def build_lightweight_prompt(ws: WorkspaceFS) -> str:
+    """Build a minimal prompt for simple conversational messages.
+
+    This skips the full 85KB system prompt, tool documentation, and
+    integration blocks. Used for greetings, simple questions, and
+    follow-ups that don't need tool access.
+
+    Typical size: ~2-4KB vs ~85KB for the full prompt.
+    """
+    # Use SOUL_LITE if available, otherwise extract key personality from SOUL
+    if _SOUL_LITE_PATH.exists():
+        soul = _SOUL_LITE_PATH.read_text(encoding="utf-8")
+    else:
+        soul = _load_soul()
+
+    # Minimal instructions
+    core = (
+        "You are Lucy, an AI coworker in Slack. You're direct, warm, "
+        "and helpful. Keep responses concise and natural — like a smart "
+        "colleague, not a customer service bot.\n\n"
+        "For this message, you're having a casual conversation. No tools "
+        "are needed. Just respond naturally.\n\n"
+        "If the user is asking something that actually requires tools, "
+        "data access, or complex work, tell them you can help and ask "
+        "them to elaborate so you can assist properly."
+    )
+
+    # Add basic workspace context if available
+    key_content = await get_key_skill_content(ws)
+
+    parts = [soul, core]
+    if key_content:
+        parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
+
+    prompt = "\n\n---\n\n".join(parts)
+    logger.debug(
+        "lightweight_prompt_built",
+        workspace_id=ws.workspace_id,
+        prompt_length=len(prompt),
+    )
+    return prompt
+
+
 async def build_system_prompt(
     ws: WorkspaceFS,
     connected_services: list[str] | None = None,
