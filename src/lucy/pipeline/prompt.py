@@ -125,7 +125,17 @@ async def build_system_prompt(
             f"Connected integrations: {services_str}\n"
             "DO NOT ask users to connect any of these — they are already active.\n"
             "You are ON Slack — never suggest 'connecting to Slack'.\n"
-            "When a user asks what integrations are available, list ONLY these.\n"
+            "\n"
+            "CRITICAL — Integration listing rules:\n"
+            "• When a user asks what integrations they have, answer from THIS "
+            "list. This is the authoritative source of truth.\n"
+            "• Do NOT call COMPOSIO_MANAGE_CONNECTIONS to verify or list "
+            "connected integrations. That tool only sees OAuth connections and "
+            "misses custom integrations (Polar.sh, Clerk, etc.).\n"
+            "• Only use COMPOSIO_MANAGE_CONNECTIONS when you need to CREATE a "
+            "new connection or check a SPECIFIC service's auth status.\n"
+            "• Always include BOTH Composio-managed AND custom integrations "
+            "(lucy_custom_* tools) in your answer.\n"
             "</current_environment>"
         )
         static_parts.append(env_block)
@@ -196,8 +206,8 @@ async def build_system_prompt(
     if keys_path.exists():
         try:
             keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("keys_file_read_failed", error=str(e))
 
     if custom_wrappers:
         lines = [

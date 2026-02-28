@@ -15,12 +15,16 @@ Lucy uses Composio's meta-tools to access 10,000+ third-party integrations. You 
 | `COMPOSIO_REMOTE_WORKBENCH` | Run Python in a persistent sandbox |
 | `COMPOSIO_REMOTE_BASH_TOOL` | Run bash commands in a sandbox |
 
+## Listing Connected Integrations
+
+When a user asks what integrations are connected, **always answer from the `<current_environment>` block** in your system prompt. That list is the single source of truth — it includes both Composio OAuth connections AND custom API wrappers (Polar.sh, Clerk, etc.). Do NOT call `COMPOSIO_MANAGE_CONNECTIONS` to list integrations.
+
 ## Workflow: Using an Integration
 
-1. **Check if integration is connected**: Use `COMPOSIO_MANAGE_CONNECTIONS` to verify
-2. **If not connected**: Generate an OAuth link and share with the user
-3. **Find the right tool**: Use `COMPOSIO_SEARCH_TOOLS("create github issue")` to discover the exact tool
-4. **Execute**: Use `COMPOSIO_MULTI_EXECUTE_TOOL` with the discovered tool schema
+1. **Check the `<current_environment>` block** for whether the service is listed
+2. **If connected via custom wrapper** (Polar.sh, Clerk): use `lucy_custom_*` tools directly
+3. **If connected via Composio**: Use `COMPOSIO_SEARCH_TOOLS` to find the right tool, then execute with `COMPOSIO_MULTI_EXECUTE_TOOL`
+4. **If not connected**: Use `COMPOSIO_MANAGE_CONNECTIONS` to generate an OAuth link
 
 ## When a User Needs to Connect
 
@@ -52,9 +56,18 @@ These sub-skills document:
 - Known quirks or limitations
 - Workarounds for common issues
 
+## Two Types of Integrations
+
+Lucy has two categories of integrations:
+
+1. **Composio-managed** (Gmail, GitHub, Google Sheets, etc.): OAuth-based, managed through Composio meta-tools. Use `COMPOSIO_SEARCH_TOOLS` → `COMPOSIO_MULTI_EXECUTE_TOOL`.
+2. **Custom wrappers** (Polar.sh, Clerk, etc.): API-key-based, built by Lucy. Use `lucy_custom_*` tools directly — NEVER route through `COMPOSIO_MULTI_EXECUTE_TOOL`.
+
+Both types are listed in `<current_environment>`. When listing integrations, include ALL of them.
+
 ## Important Notes
 
-- Never guess whether an integration is connected; always verify
+- The `<current_environment>` list is authoritative for what's connected
 - Some integrations require additional scopes; check connection status after auth
 - Per-user OAuth: each team member has their own connections
 - If a tool returns an error, check if the connection has expired before retrying

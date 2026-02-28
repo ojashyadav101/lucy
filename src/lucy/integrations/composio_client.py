@@ -512,6 +512,46 @@ class ComposioClient:
                             services=permanently_failed,
                             workspace_id=workspace_id,
                         )
+
+            # Inject custom wrapper integrations so the LLM sees the full picture
+            if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                try:
+                    from lucy.integrations.wrapper_generator import (
+                        discover_saved_wrappers,
+                    )
+                    wrappers = discover_saved_wrappers()
+                    if wrappers:
+                        data = result.setdefault("data", {})
+                        if isinstance(data, dict):
+                            results_map = data.setdefault("results", {})
+                            note_parts = []
+                            for w in wrappers:
+                                svc = w.get("service_name", "")
+                                slug = w.get("slug", "")
+                                tool_count = w.get("total_tools", 0)
+                                if svc and slug not in results_map:
+                                    results_map[slug] = {
+                                        "status": "connected",
+                                        "toolkit": svc,
+                                        "note": (
+                                            f"Custom integration with {tool_count} "
+                                            f"tools (use lucy_custom_{slug}_* tools)"
+                                        ),
+                                    }
+                                    note_parts.append(svc)
+                            if note_parts:
+                                result.setdefault(
+                                    "_custom_integrations_note",
+                                    (
+                                        f"Also connected via custom wrappers: "
+                                        f"{', '.join(note_parts)}. These use "
+                                        f"lucy_custom_* tools, not Composio."
+                                    ),
+                                )
+                except Exception as e:
+                    logger.warning(
+                        "composio_custom_wrapper_inject_failed", error=str(e),
+                    )
             # --------------------------------------------------------
 
             return result
@@ -632,39 +672,78 @@ class ComposioClient:
             logger.warning("composio_get_apps_failed", error=str(e))
             return []
 
+    _SLUG_DISPLAY_NAMES: dict[str, str] = {
+        "gmail": "Gmail",
+        "github": "GitHub",
+        "googlecalendar": "Google Calendar",
+        "googlesheets": "Google Sheets",
+        "googledrive": "Google Drive",
+        "googlemeet": "Google Meet",
+        "google_search_console": "Google Search Console",
+        "slack": "Slack",
+        "vercel": "Vercel",
+        "brightdata": "Bright Data",
+        "outlook": "Outlook",
+        "sentry": "Sentry",
+    }
+
     async def get_connected_app_names(self, workspace_id: str) -> list[str]:
         """Return just the names of actively connected apps."""
         apps = await self.get_connected_apps(workspace_id)
         return [a["name"] for a in apps if a.get("connected")]
 
     async def get_connected_app_names_reliable(self, workspace_id: str) -> list[str]:
-        """Get connected app names using multiple detection methods.
+        """Get connected app names using the REST API across all entity aliases.
 
-        Always tries both the basic check and the is_connected=True filter
-        to ensure we don't miss any connections.
+        The session.toolkits() API is unreliable because connections may be
+        registered under different entity IDs (workspace UUID vs slack team ID
+        vs 'default'). This method queries the connected_accounts REST API
+        with ALL known entity IDs to get the complete picture.
         """
-        names = await self.get_connected_app_names(workspace_id)
+        names: list[str] = []
+
+        # Gather all entity IDs that might hold connections for this workspace
+        ws_key = str(workspace_id)
+        entity_ids: list[str] = [ws_key]
+        mapped_id = self._entity_id_map.get(ws_key)
+        if mapped_id and mapped_id != ws_key:
+            entity_ids.append(mapped_id)
+        entity_ids.append("default")
 
         try:
-            def _fetch_connected() -> list[str]:
-                session = self._get_session_with_recovery(workspace_id)
-                toolkits = session.toolkits(is_connected=True)
-                items = getattr(toolkits, "items", [])
+            def _fetch_via_rest() -> list[str]:
+                if not self._composio:
+                    return []
+                accounts = self._composio.connected_accounts.list(
+                    user_ids=entity_ids,
+                    statuses=["ACTIVE"],
+                )
                 found: list[str] = []
-                for tk in items:
-                    name = getattr(tk, "name", None) or getattr(tk, "slug", None)
-                    if name and name not in found:
-                        found.append(name)
+                for acc in accounts.items:
+                    toolkit_data = getattr(acc, "toolkit", {})
+                    if isinstance(toolkit_data, dict):
+                        slug = toolkit_data.get("slug", "")
+                    else:
+                        slug = getattr(toolkit_data, "slug", "")
+                    if not slug:
+                        continue
+                    display = self._SLUG_DISPLAY_NAMES.get(slug, slug.title())
+                    if display not in found:
+                        found.append(display)
                 return found
 
-            fallback_names = await asyncio.to_thread(_fetch_connected)
-            for n in fallback_names:
-                if n not in names:
-                    names.append(n)
-        except Exception as e:
-            logger.warning(
-                "connected_toolkits_fallback_failed", error=str(e),
+            names = await asyncio.to_thread(_fetch_via_rest)
+            logger.debug(
+                "composio_rest_connections_fetched",
+                workspace_id=workspace_id,
+                entity_ids=entity_ids,
+                connections=names,
             )
+        except Exception as e:
+            logger.warning("composio_rest_connections_failed", error=str(e))
+
+        if not names:
+            names = await self.get_connected_app_names(workspace_id)
 
         return names
 
