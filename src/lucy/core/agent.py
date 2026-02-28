@@ -340,33 +340,48 @@ class LucyAgent:
         tools: list[dict[str, Any]] = []
 
         async with trace.span("fetch_tools_and_connections"):
-            tools_coro = self._get_meta_tools(ctx.workspace_id)
-            connections_coro = self._get_connected_services(ctx.workspace_id)
-            cached_tools, connected_services = await asyncio.gather(
-                tools_coro, connections_coro,
-            )
+            # For cron executions, skip Composio meta-tools entirely.
+            # Crons don't need COMPOSIO_SEARCH_TOOLS, COMPOSIO_MANAGE_CONNECTIONS,
+            # COMPOSIO_REMOTE_WORKBENCH etc. — they waste turns searching for
+            # tools that don't help with monitoring/reporting tasks.
+            if ctx.is_cron_execution:
+                cached_tools: list[dict[str, Any]] = []
+                connected_services = await self._get_connected_services(
+                    ctx.workspace_id,
+                )
+            else:
+                tools_coro = self._get_meta_tools(ctx.workspace_id)
+                connections_coro = self._get_connected_services(
+                    ctx.workspace_id,
+                )
+                cached_tools, connected_services = await asyncio.gather(
+                    tools_coro, connections_coro,
+                )
             tools = list(cached_tools)  # copy — never mutate the cache
 
-            # Inject internal tools (workspace, Slack history, file generation)
+            # Inject internal tools — workspace + history always,
+            # others conditionally (skip for crons to keep tool count low).
             from lucy.tools.workspace_tools import get_workspace_tool_definitions
             tools.extend(get_workspace_tool_definitions())
 
             from lucy.workspace.history_search import get_history_tool_definitions
             tools.extend(get_history_tool_definitions())
 
-            from lucy.tools.file_generator import get_file_tool_definitions
-            tools.extend(get_file_tool_definitions())
-
-            from lucy.tools.email_tools import get_email_tool_definitions
-            if settings.agentmail_enabled and settings.agentmail_api_key:
-                tools.extend(get_email_tool_definitions())
-
-            from lucy.tools.spaces import get_spaces_tool_definitions
-            if settings.spaces_enabled:
-                tools.extend(get_spaces_tool_definitions())
-
             from lucy.tools.web_search import get_web_search_tool_definitions
             tools.extend(get_web_search_tool_definitions())
+
+            # File generation, email, spaces, services — skip for crons
+            if not ctx.is_cron_execution:
+                from lucy.tools.file_generator import get_file_tool_definitions
+                tools.extend(get_file_tool_definitions())
+
+                from lucy.tools.email_tools import get_email_tool_definitions
+                if settings.agentmail_enabled and settings.agentmail_api_key:
+                    tools.extend(get_email_tool_definitions())
+
+                from lucy.tools.spaces import get_spaces_tool_definitions
+                if settings.spaces_enabled:
+                    tools.extend(get_spaces_tool_definitions())
 
             from lucy.tools.services import get_services_tool_definitions
             if settings.openclaw_base_url and settings.openclaw_api_key:
@@ -839,6 +854,40 @@ class LucyAgent:
                 },
             })
 
+        # 3b2. For cron executions, strip tools that waste model turns.
+        # Crons don't need: cron/heartbeat management, custom integration
+        # building, file generation, email, spaces, delegation, or Composio
+        # meta-tools. Keep only: workspace, history, web search, services.
+        if ctx.is_cron_execution:
+            _CRON_KEEP_TOOLS = {
+                # Workspace management (read/write knowledge)
+                "lucy_workspace_read", "lucy_workspace_write",
+                "lucy_workspace_list", "lucy_workspace_search",
+                "lucy_manage_skill",
+                # History search (check Slack activity)
+                "lucy_search_slack_history", "lucy_get_channel_history",
+                # Web search (check service URLs)
+                "lucy_web_search",
+                # Services (check health)
+                "lucy_start_service", "lucy_stop_service",
+                "lucy_list_services", "lucy_service_logs",
+                # List crons (for monitoring/reporting)
+                "lucy_list_crons",
+            }
+            pre_filter_count = len(tools)
+            tools = [
+                t for t in tools
+                if isinstance(t, dict)
+                and "function" in t
+                and t["function"]["name"] in _CRON_KEEP_TOOLS
+            ]
+            logger.info(
+                "cron_tool_optimization",
+                pre_filter=pre_filter_count,
+                post_filter=len(tools),
+                kept_tools=[t["function"]["name"] for t in tools],
+            )
+
         # 3c. Build tool registry for sub-agent use
         self._tool_registry: dict[str, dict[str, Any]] = {
             t["function"]["name"]: t
@@ -1115,7 +1164,9 @@ class LucyAgent:
                 )
 
         # 6b. Quality gate: catch service confusion and escalate if needed
-        if route.tier != "frontier":
+        # Skip for cron executions — short responses are normal for crons,
+        # and escalation wastes an LLM call for no benefit.
+        if route.tier != "frontier" and not ctx.is_cron_execution:
             gate = _assess_response_quality(message, response_text)
             if gate["should_escalate"]:
                 logger.info(
@@ -1145,7 +1196,10 @@ class LucyAgent:
         # quality gate (6b) escalates to frontier for genuine confusion.
         # A future Phase 5 will add targeted fixes (e.g., inject a
         # follow-up user message) instead of brute-force reruns.
-        if not failure_context and _retry_depth == 0:
+        # Skip verification gate for cron executions — the cron task
+        # description triggers false positives (e.g., "google_drive missing"
+        # from connected services list, "email_send missing" from boilerplate).
+        if not failure_context and _retry_depth == 0 and not ctx.is_cron_execution:
             verification = _verify_output(
                 message, response_text or "", route.intent,
             )
