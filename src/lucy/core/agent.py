@@ -711,11 +711,12 @@ class LucyAgent:
                 detect_relevant_wrappers,
                 load_custom_wrapper_tools,
             )
-            # For cron executions, only load wrappers explicitly
-            # mentioned in the message — never load all via _LOAD_ALL.
+            # For cron executions, use strict mode: only match on
+            # service names (clerk, polar), not generic keywords like
+            # "user" or "product" that appear in cron boilerplate.
             if ctx.is_cron_execution:
                 relevant_slugs = detect_relevant_wrappers(
-                    message, allow_load_all=False,
+                    message, allow_load_all=False, strict_mode=True,
                 )
             else:
                 relevant_slugs = detect_relevant_wrappers(message)
@@ -2438,7 +2439,12 @@ class LucyAgent:
                     }
 
             # Start connection watchers for any pending auth URLs
-            if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+            # Skip for cron executions — no user waiting, no thread to notify
+            if (
+                name == "COMPOSIO_MANAGE_CONNECTIONS"
+                and isinstance(result, dict)
+                and not ctx.is_cron_execution
+            ):
                 has_pending = self._maybe_start_connection_watchers(
                     result, params, ctx, trace, slack_client,
                 )

@@ -133,6 +133,7 @@ def load_custom_wrapper_tools(
 def detect_relevant_wrappers(
     message: str,
     allow_load_all: bool = True,
+    strict_mode: bool = False,
 ) -> list[str] | None:
     """Detect which custom wrappers are relevant to the user's message.
 
@@ -143,6 +144,10 @@ def detect_relevant_wrappers(
     If *allow_load_all* is False (used for cron executions), the
     broad "load everything" shortcut is skipped — only wrappers whose
     keywords appear in the message are returned.
+
+    If *strict_mode* is True (used for cron executions), only match on
+    service names (clerk, polar), not generic keywords like "user" or
+    "product" which appear in boilerplate cron instructions.
 
     This saves ~12K tokens per request by not loading 66 irrelevant
     tool definitions (e.g., 31 Clerk + 35 Polar.sh tools when the
@@ -177,11 +182,20 @@ def detect_relevant_wrappers(
         # Use slug and service name as keywords
         _WRAPPER_TRIGGERS[slug] = [slug, service, service.replace(".", "")]
 
-    # Add known keyword expansions
-    _EXTRA_KEYWORDS: dict[str, list[str]] = {
-        "clerk": ["user", "users", "auth", "authentication", "sign up", "signup", "login", "session", "organization"],
-        "polarsh": ["polar", "subscription", "product", "order", "customer", "checkout", "billing", "payment", "benefit", "discount"],
-    }
+    # In strict mode (crons), only match on service names, not generic keywords.
+    # This prevents cron boilerplate like "fetch data for users" from loading
+    # all 66 wrapper tools when the cron task doesn't actually need them.
+    if not strict_mode:
+        _EXTRA_KEYWORDS: dict[str, list[str]] = {
+            "clerk": ["user", "users", "auth", "authentication", "sign up", "signup", "login", "session", "organization"],
+            "polarsh": ["polar", "subscription", "product", "order", "customer", "checkout", "billing", "payment", "benefit", "discount"],
+        }
+    else:
+        # Strict mode: only service-specific keywords, no generic ones
+        _EXTRA_KEYWORDS = {
+            "clerk": ["clerk"],
+            "polarsh": ["polar", "polar.sh"],
+        }
 
     relevant: list[str] = []
     for slug, keywords in _WRAPPER_TRIGGERS.items():
