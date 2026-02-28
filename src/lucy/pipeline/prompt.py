@@ -32,6 +32,7 @@ _PROMPTS_DIR = Path(__file__).parent.parent.parent.parent / "prompts"
 _SOUL_PATH = _PROMPTS_DIR / "SOUL.md"
 _PROMPT_TEMPLATE_PATH = _PROMPTS_DIR / "SYSTEM_PROMPT.md"
 _SYSTEM_CORE_PATH = _PROMPTS_DIR / "SYSTEM_CORE.md"
+_SYSTEM_CORE_COMPACT_PATH = _PROMPTS_DIR / "SYSTEM_CORE_COMPACT.md"
 _PROMPT_MODULES_DIR = _PROMPTS_DIR / "modules"
 
 # Separator used between prompt sections
@@ -47,8 +48,17 @@ def _load_soul() -> str:
     )
 
 
-def _load_system_core() -> str:
-    """Load SYSTEM_CORE.md (Phase 2) or fall back to full SYSTEM_PROMPT.md."""
+def _load_system_core(*, compact: bool = False) -> str:
+    """Load system core prompt.
+
+    Args:
+        compact: If True, use SYSTEM_CORE_COMPACT.md (83% smaller).
+                 The compact version strips verbose examples and redundant
+                 formatting guides while keeping all essential instructions.
+                 Used by default for tool_use to reduce token cost.
+    """
+    if compact and _SYSTEM_CORE_COMPACT_PATH.exists():
+        return _SYSTEM_CORE_COMPACT_PATH.read_text(encoding="utf-8")
     if _SYSTEM_CORE_PATH.exists():
         return _SYSTEM_CORE_PATH.read_text(encoding="utf-8")
     if _PROMPT_TEMPLATE_PATH.exists():
@@ -131,6 +141,7 @@ async def build_system_prompt(
     connected_services: list[str] | None = None,
     user_message: str | None = None,
     prompt_modules: list[str] | None = None,
+    compact: bool = True,
 ) -> str:
     """Build the complete system prompt for a workspace.
 
@@ -138,7 +149,7 @@ async def build_system_prompt(
 
     STATIC PREFIX (identical across requests per workspace):
       1. SOUL.md — personality traits and voice
-      2. SYSTEM_CORE.md — core instructions
+      2. SYSTEM_CORE.md — core instructions (compact by default)
       3. Common modules (tool_use + memory) for non-chat intents
       4. Connected services environment block
 
@@ -148,12 +159,14 @@ async def build_system_prompt(
       7. Skill descriptions + relevant skill content
       8. Knowledge blocks (company/team)
 
-    Session memory is NOT included here — it is injected via
-    _preflight_context() as a late system message to preserve
-    the cacheable prefix.
+    Args:
+        compact: Use SYSTEM_CORE_COMPACT (8KB vs 48KB). Strips verbose
+                 examples while keeping all essential instructions.
+                 Default True. Set False for research/document intents
+                 where the extra formatting guidance helps.
     """
     soul = _load_soul()
-    system_core = _load_system_core()
+    system_core = _load_system_core(compact=compact)
     skill_descriptions = await get_skill_descriptions_for_prompt(ws)
     key_content = await get_key_skill_content(ws)
 
@@ -315,6 +328,7 @@ async def build_system_prompt(
         workspace_id=ws.workspace_id,
         prompt_length=len(full_prompt),
         static_prefix_length=len(static_prefix),
+        compact=compact,
         connected_services=connected_services or [],
         has_relevant_skills=bool(relevant_skills),
         prompt_modules=prompt_modules or [],

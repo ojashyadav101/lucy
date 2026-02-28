@@ -1065,67 +1065,51 @@ class LucyAgent:
                 if corrected:
                     response_text = corrected
 
-        # 6b2. Verification gate: check completeness and retry if needed
-        _MAX_RETRY_DEPTH = 1
-        if not failure_context and _retry_depth < _MAX_RETRY_DEPTH:
+        # 6b2. Verification gate: log issues but DON'T retry
+        #
+        # PHASE 3 CHANGE: The verification gate previously triggered a
+        # full self.run() retry (entire pipeline: Composio + tools + 85KB
+        # prompt) for ANY heuristic issue — including minor ones like
+        # "short response" or "suggesting unrequested service". This
+        # doubled cost and latency for ~5-10% of requests without
+        # meaningful quality improvement (the retry often produced the
+        # same or worse output with extra "failure context" confusion).
+        #
+        # Now: log issues for observability but skip the retry. The agent
+        # loop itself already handles retries for tool failures, and the
+        # quality gate (6b) escalates to frontier for genuine confusion.
+        # A future Phase 5 will add targeted fixes (e.g., inject a
+        # follow-up user message) instead of brute-force reruns.
+        if not failure_context and _retry_depth == 0:
             verification = _verify_output(
                 message, response_text or "", route.intent,
             )
-            if not verification["passed"] and verification["should_retry"]:
-                failure_desc = "; ".join(verification["issues"])
-                logger.warning(
-                    "verification_gate_retry",
+            if not verification["passed"]:
+                logger.info(
+                    "verification_gate_issues_detected",
                     workspace_id=ctx.workspace_id,
                     issues=verification["issues"],
                     intent=route.intent,
-                    retry_depth=_retry_depth,
+                    action="logged_only",
                 )
-                from lucy.pipeline.router import MODEL_TIERS
-                escalated_model = MODEL_TIERS.get("code", model)
-                try:
-                    retried = await self.run(
-                        message=message,
-                        ctx=ctx,
-                        slack_client=slack_client,
-                        model_override=escalated_model,
-                        failure_context=(
-                            f"Previous attempt failed verification: "
-                            f"{failure_desc}"
-                        ),
-                        _retry_depth=_retry_depth + 1,
-                    )
-                    if retried and len(retried) > len(response_text or ""):
-                        response_text = retried
-                        logger.info(
-                            "verification_retry_succeeded",
-                            workspace_id=ctx.workspace_id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "verification_retry_failed",
-                        workspace_id=ctx.workspace_id,
-                        error=str(e),
-                    )
 
-        # 6b3. Self-critique gate: LLM reviews complex responses before delivery
-        _CRITIQUE_INTENTS = {"data", "research", "document", "code", "reasoning"}
-        if (
-            response_text
-            and route.intent in _CRITIQUE_INTENTS
-            and not failure_context
-            and _retry_depth == 0
-            and len(response_text) > 200
-        ):
-            try:
-                response_text = await self._self_critique(
-                    message, response_text, route.intent, model, ctx,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "self_critique_failed",
-                    workspace_id=ctx.workspace_id,
-                    error=str(exc) or type(exc).__name__,
-                )
+        # 6b3. Self-critique gate: DISABLED
+        #
+        # PHASE 3 CHANGE: The self-critique fired an extra LLM call
+        # (fast model) on every data/research/document/code response,
+        # then potentially triggered ANOTHER full self.run() retry.
+        # Cost: +1 LLM call per complex request, +1 full pipeline
+        # rerun if critique found issues.
+        #
+        # The critique prompt ("check completeness and value-first
+        # framing") overlaps heavily with the system prompt instructions.
+        # If the model can't produce good output with an 8-48KB prompt,
+        # a 200-token critique won't fix it — the prompt needs to be
+        # better, not reviewed after the fact.
+        #
+        # Disabled in favor of improving the system prompt itself (the
+        # compact prompt is tighter and more actionable). Will revisit
+        # in Phase 5 if quality dips.
 
         # 6c. Post-response: persist memorable facts to memory
         try:
