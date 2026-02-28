@@ -592,7 +592,16 @@ async def _handle_message(
     priority = classify_priority(text, route.tier)
 
     # ── Immediate acknowledgment for complex tasks ────────────────
-    if route.intent in _FAST_ACK_INTENTS and client and channel_id:
+    is_thread_reply = thread_ts and event_ts and thread_ts != event_ts
+    is_short_followup = is_thread_reply and len(text.split()) < 12
+    should_ack = (
+        route.intent in _FAST_ACK_INTENTS
+        and client
+        and channel_id
+        and not is_short_followup
+    )
+
+    if should_ack:
         async def _send_ack() -> None:
             svc_names: list[str] | None = None
             try:
