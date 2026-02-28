@@ -324,7 +324,10 @@ class LucyAgent:
             )
             tools = list(cached_tools)  # copy — never mutate the cache
 
-            # Inject internal tools (Slack history search + file generation)
+            # Inject internal tools (workspace, Slack history, file generation)
+            from lucy.tools.workspace_tools import get_workspace_tool_definitions
+            tools.extend(get_workspace_tool_definitions())
+
             from lucy.workspace.history_search import get_history_tool_definitions
             tools.extend(get_history_tool_definitions())
 
@@ -2061,6 +2064,11 @@ class LucyAgent:
         "lucy_stop_service": "stopping a background service",
         "lucy_list_services": "listing background services",
         "lucy_service_logs": "fetching service logs",
+        "lucy_workspace_read": "checking my notes",
+        "lucy_workspace_write": "saving to workspace",
+        "lucy_workspace_list": "browsing workspace",
+        "lucy_workspace_search": "searching workspace",
+        "lucy_manage_skill": "managing skills",
     }
 
     @staticmethod
@@ -2917,6 +2925,14 @@ class LucyAgent:
                 if not heartbeats:
                     return {"heartbeats": [], "message": "No heartbeat monitors configured."}
                 return {"heartbeats": heartbeats, "count": len(heartbeats)}
+
+            # ── Workspace management tools ────────────────────────────
+            from lucy.tools.workspace_tools import is_workspace_tool
+            if is_workspace_tool(tool_name):
+                from lucy.tools.workspace_tools import execute_workspace_tool
+                return await execute_workspace_tool(
+                    tool_name, parameters, workspace_id,
+                )
 
             if tool_name.startswith("lucy_search_slack_history") or \
                tool_name.startswith("lucy_get_channel_history"):
