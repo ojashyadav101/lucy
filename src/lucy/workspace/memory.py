@@ -88,9 +88,29 @@ _TEAM_SIGNALS = re.compile(
 )
 
 
+_HYPOTHETICAL_SIGNALS = re.compile(
+    r"\b(?:"
+    r"(?:what if|imagine|hypothetically|suppose|let's say|pretend|"
+    r"for example|e\.g\.|test|testing|dummy|fake|sample|mock|"
+    r"i'll ask (?:about )?this later|ask (?:me|you) (?:about )?(?:this|it) later)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
 def should_persist_memory(message: str) -> bool:
-    """Quick check: does this message contain facts worth persisting?"""
-    return bool(_REMEMBER_SIGNALS.search(message))
+    """Quick check: does this message contain facts worth persisting?
+
+    Returns False for hypothetical or test scenarios that shouldn't
+    be stored as real facts.
+    """
+    if not _REMEMBER_SIGNALS.search(message):
+        return False
+
+    if _HYPOTHETICAL_SIGNALS.search(message):
+        return False
+
+    return True
 
 
 def classify_memory_target(message: str) -> str:
@@ -210,6 +230,54 @@ async def get_session_context_for_prompt(
 # ═══════════════════════════════════════════════════════════════════════════
 # KNOWLEDGE PERSISTENCE — Writing facts to permanent skill files
 # ═══════════════════════════════════════════════════════════════════════════
+
+async def check_fact_contradictions(
+    ws: WorkspaceFS,
+    fact: str,
+    target: str,
+) -> str | None:
+    """Check if a new fact contradicts existing knowledge.
+
+    Returns a warning string if contradictions found, None if clean.
+    Uses keyword overlap to find potentially conflicting stored facts.
+    """
+    path = f"{target}/SKILL.md"
+    content = await ws.read_file(path)
+    if not content:
+        return None
+
+    fact_lower = fact.lower()
+    keywords = set(re.findall(r"\b[a-z]{3,}\b", fact_lower))
+    keywords -= {
+        "the", "and", "our", "for", "that", "this", "with", "from",
+        "have", "has", "are", "was", "were", "will", "been", "being",
+        "not", "but", "can", "all", "about", "into", "over",
+    }
+
+    if not keywords:
+        return None
+
+    existing_lines = [
+        line.strip().lstrip("- ")
+        for line in content.split("\n")
+        if line.strip().startswith("-")
+    ]
+
+    conflicts: list[str] = []
+    for line in existing_lines:
+        line_lower = line.lower()
+        line_keywords = set(re.findall(r"\b[a-z]{3,}\b", line_lower))
+        overlap = keywords & line_keywords
+        if len(overlap) >= 3 and line_lower != fact_lower:
+            conflicts.append(line)
+
+    if conflicts:
+        return (
+            f"Potential contradictions with existing {target} knowledge: "
+            + "; ".join(conflicts[:3])
+        )
+    return None
+
 
 async def append_to_company_knowledge(
     ws: WorkspaceFS,

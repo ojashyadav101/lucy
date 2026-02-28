@@ -37,10 +37,9 @@ from lucy.infra.trace import Trace
 logger = structlog.get_logger()
 
 MAX_TOOL_TURNS = 50  # Soft limit — supervisor is the real governor
-MAX_TOOL_TURNS_FRONTIER = 50
-MAX_CONTEXT_MESSAGES = 40
-TOOL_RESULT_MAX_CHARS = 16_000
-TOOL_RESULT_SUMMARY_THRESHOLD = 8_000
+MAX_CONTEXT_MESSAGES = 80
+TOOL_RESULT_MAX_CHARS = 50_000
+TOOL_RESULT_SUMMARY_THRESHOLD = 24_000
 ABSOLUTE_MAX_SECONDS = 14_400  # 4-hour catastrophic safety net (supervisor governs real duration)
 MAX_PAYLOAD_CHARS = 120_000
 
@@ -167,6 +166,17 @@ class AgentContext:
     user_slack_id: str | None = None
     team_id: str | None = None
     is_cron_execution: bool = False
+    budget_remaining_s: float = 14400.0
+    budget_start_time: float = 0.0
+
+
+def _check_budget(ctx: AgentContext) -> float:
+    """Return remaining budget in seconds. Raises if exhausted."""
+    elapsed = time.monotonic() - ctx.budget_start_time
+    remaining = ctx.budget_remaining_s - elapsed
+    if remaining <= 0:
+        raise asyncio.TimeoutError("Request budget exhausted")
+    return remaining
 
 
 class LucyAgent:
@@ -193,6 +203,10 @@ class LucyAgent:
         _retry_depth: int = 0,
     ) -> str:
         """Run the full agent loop and return the final response text."""
+        ctx.budget_start_time = time.monotonic()
+        ctx.budget_remaining_s = ABSOLUTE_MAX_SECONDS
+        self._capped_tools = set()
+
         self._current_slack_client = slack_client
         self._current_channel_id = ctx.channel_id
         self._current_thread_ts = ctx.thread_ts
@@ -223,8 +237,8 @@ class LucyAgent:
                         ]):
                             prev_had_tool_calls = True
                         break
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("thread_depth_fetch_failed", component="thread_depth_detection", error=str(e))
 
         async with trace.span("classify_route"):
             route = classify_and_route(message, thread_depth, prev_had_tool_calls)
@@ -816,8 +830,8 @@ class LucyAgent:
                 )
                 if session_ctx:
                     preflight_parts.append(session_ctx)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("component_failed", component="session_context_preflight", error=str(e))
 
             if self._is_history_reference(message) and not ctx.thread_ts:
                 try:
@@ -835,8 +849,8 @@ class LucyAgent:
                                 f"### Relevant Slack History\n"
                                 f"{format_search_results(results)}"
                             )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("component_failed", component="history_search_preflight", error=str(e))
 
             if preflight_parts:
                 context_block = "\n\n".join(preflight_parts)
@@ -877,7 +891,14 @@ class LucyAgent:
                 ),
             })
 
-        # 5e. Pre-execution planning for complex tasks
+        # 5e. Thinking Model — explicit LLM planning step for complex tasks
+        #
+        # The planner needs context to understand the REAL need behind the
+        # request, not just the literal words. We gather a compact snapshot:
+        #   - Who is this person? (role, preferences)
+        #   - What does the company do? (company knowledge)
+        #   - What's been discussed? (session memory, thread summary)
+        # This is kept short (~200 tokens) to minimize planner cost.
         from lucy.core.supervisor import create_plan as _create_plan
 
         tool_names_for_plan = [
@@ -885,16 +906,72 @@ class LucyAgent:
             for t in tools
             if isinstance(t, dict) and t.get("function", {}).get("name")
         ]
+
+        planner_context_parts: list[str] = []
+
+        # User preferences (brief/detailed, format, domains)
+        if ctx.user_slack_id:
+            try:
+                from lucy.workspace.preferences import (
+                    format_preferences_for_prompt,
+                    load_user_preferences,
+                )
+                prefs = load_user_preferences(ws, ctx.user_slack_id)
+                pref_text = format_preferences_for_prompt(prefs)
+                if pref_text:
+                    planner_context_parts.append(pref_text)
+            except Exception as e:
+                logger.warning("component_failed", component="planner_preferences", error=str(e))
+
+        # Company + team knowledge (truncated to keep costs low)
+        try:
+            from lucy.workspace.skills import get_key_skill_content
+            knowledge = await get_key_skill_content(ws)
+            if knowledge:
+                planner_context_parts.append(knowledge[:1000])
+        except Exception as e:
+            logger.warning("component_failed", component="planner_company_knowledge", error=str(e))
+
+        # Session memory (recent facts from this conversation)
+        try:
+            from lucy.workspace.memory import get_session_context_for_prompt
+            session_ctx = await get_session_context_for_prompt(
+                ws, thread_ts=ctx.thread_ts,
+            )
+            if session_ctx:
+                planner_context_parts.append(session_ctx[:1000])
+        except Exception as e:
+            logger.warning("component_failed", component="planner_session_memory", error=str(e))
+
+        # Thread summary (condense earlier messages into a one-liner)
+        if len(messages) > 2:
+            thread_summary_parts: list[str] = []
+            for m in messages[:-1]:
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if isinstance(content, str) and content.strip() and role in ("user", "assistant"):
+                    snippet = content.strip()[:80]
+                    thread_summary_parts.append(f"{role}: {snippet}")
+            if thread_summary_parts:
+                planner_context_parts.append(
+                    "Thread so far: " + " | ".join(thread_summary_parts[-4:])
+                )
+
+        user_context_for_plan = "\n".join(planner_context_parts)
+
         task_plan = await _create_plan(
             user_message=message,
             available_tools=tool_names_for_plan,
             intent=route.intent,
+            user_context=user_context_for_plan,
         )
         if task_plan:
             logger.info(
                 "task_plan_created",
                 goal=task_plan.goal,
+                ideal_outcome=task_plan.ideal_outcome[:80] if task_plan.ideal_outcome else "",
                 steps=len(task_plan.steps),
+                risks=task_plan.risks[:80] if task_plan.risks else "",
                 workspace_id=ctx.workspace_id,
             )
 
@@ -921,11 +998,15 @@ class LucyAgent:
                 channel=ctx.channel_id,
                 timeout_seconds=ABSOLUTE_MAX_SECONDS,
             )
-            response_text = (
-                "This task ran for an unusually long time and I had to "
-                "stop as a safety measure. Let me know if you'd like me "
-                "to continue from where I left off."
-            )
+            partial = self._collect_partial_results(messages)
+            if partial:
+                response_text = partial
+            else:
+                response_text = (
+                    "This task ran for an unusually long time and I had to "
+                    "stop as a safety measure. Let me know if you'd like me "
+                    "to continue from where I left off."
+                )
 
         # 6b. Quality gate: catch service confusion and escalate if needed
         if route.tier != "frontier":
@@ -937,7 +1018,6 @@ class LucyAgent:
                     confidence=gate["confidence"],
                     original_model=model,
                 )
-                trace.decision_log = trace.decision_log if hasattr(trace, "decision_log") else []
                 corrected = await self._escalate_response(
                     message, response_text, gate["reason"], ctx,
                 )
@@ -1012,14 +1092,28 @@ class LucyAgent:
                 add_session_fact,
                 append_to_company_knowledge,
                 append_to_team_knowledge,
+                check_fact_contradictions,
                 classify_memory_target,
                 should_persist_memory,
             )
             if should_persist_memory(message):
                 target = classify_memory_target(message)
                 fact = message.strip()
-                if len(fact) > 300:
-                    fact = fact[:300] + "..."
+                if len(fact) > 500:
+                    fact = fact[:500] + "..."
+
+                if target in ("company", "team"):
+                    warning = await check_fact_contradictions(
+                        ws, fact, target,
+                    )
+                    if warning:
+                        logger.warning(
+                            "memory_contradiction_detected",
+                            fact=fact[:100],
+                            warning=warning,
+                            target=target,
+                            workspace_id=ctx.workspace_id,
+                        )
 
                 if target == "company":
                     await append_to_company_knowledge(ws, fact)
@@ -1063,7 +1157,7 @@ class LucyAgent:
         )
 
         # 8. Write trace
-        trace_record = trace.finish(
+        trace.finish(
             user_message=message,
             response_text=response_text,
         )
@@ -1110,22 +1204,30 @@ class LucyAgent:
         self._empty_retries = 0
         self._narration_retries = 0
         self._edit_attempts = 0
-        progress_sent = False
+        self._400_recovery_count = 0
+        self._504_frontier_retried = False
+        _last_visible_msg_time = time.monotonic()
+        _silence_update_sent = False
+        _SILENCE_THRESHOLD_S = 480.0  # 8 minutes
 
         # Supervisor state
         sv_turn_reports: list[TurnReport] = []
         sv_last_check_time = time.monotonic()
         sv_start_time = time.monotonic()
+        sv_consecutive_failures = 0
 
-        # Inject plan into context if we have one
+        # Inject the thinking model's output into context
         if task_plan:
             plan_text = task_plan.to_prompt_text()
             all_messages.insert(-1, {
                 "role": "system",
                 "content": (
                     f"<execution_plan>\n{plan_text}\n</execution_plan>\n"
-                    "Follow this plan step by step. If a step fails, "
-                    "adapt — do not abandon the entire task."
+                    "Follow this plan. The AMAZING OUTCOME is your target, "
+                    "not just the minimum. Actively AVOID the underwhelming "
+                    "response pattern. If a step fails, check RISKS and try "
+                    "the fallback. Present results using FORMAT. Consider "
+                    "WHO is asking when choosing depth and tone."
                 ),
             })
 
@@ -1137,24 +1239,37 @@ class LucyAgent:
 
         current_model = model
 
-        # Frontier tasks get more turns for deep research
-        is_frontier = "frontier" in (model or "")
-        max_turns = MAX_TOOL_TURNS_FRONTIER if is_frontier else MAX_TOOL_TURNS
+        max_turns = MAX_TOOL_TURNS
 
-        # Tasks involving code generation, data processing, or documents need
-        # higher token budgets for script output and structured content.
-        needs_high_budget = any(
-            t.get("function", {}).get("name", "").startswith("lucy_spaces_")
-            for t in (tools or []) if isinstance(t, dict)
-        ) or getattr(route, "intent", "") in ("data", "document", "code")
-        base_max_tokens = 16_384 if needs_high_budget else 4096
+        base_max_tokens = 16_384
 
         for turn in range(max_turns):
+            try:
+                remaining = _check_budget(ctx)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "request_budget_exhausted",
+                    turn=turn,
+                    workspace_id=ctx.workspace_id,
+                )
+                partial = self._collect_partial_results(all_messages)
+                if partial:
+                    return partial
+                return (
+                    "This task used up the available time budget. "
+                    "Here's what I managed to complete so far."
+                )
+
+            # Main agent loop calls use streaming for intelligent silence
+            # detection. Internal calls (planner, supervisor) stay non-streaming.
+            use_streaming = bool(tools)
             config = ChatConfig(
                 model=current_model,
                 system_prompt=system_prompt,
                 tools=tools,
                 max_tokens=base_max_tokens,
+                stream=use_streaming,
+                wallclock_timeout=min(remaining, 1200.0),
             )
 
             try:
@@ -1170,11 +1285,83 @@ class LucyAgent:
                             if isinstance(v, (int, float)):
                                 trace.usage[k] = trace.usage.get(k, 0) + v
             except OpenClawError as e:
-                if e.status_code == 400 and turn > 0:
+                if e.status_code == 504:
+                    from lucy.pipeline.router import MODEL_TIERS
+                    frontier = MODEL_TIERS.get("frontier", current_model)
+                    if frontier != current_model:
+                        logger.warning(
+                            "silence_detected_model_escalation",
+                            from_model=current_model,
+                            to_model=frontier,
+                            turn=turn,
+                            reason=str(e)[:200],
+                            workspace_id=ctx.workspace_id,
+                        )
+                        current_model = frontier
+                        continue
+                    if not getattr(self, "_504_frontier_retried", False):
+                        self._504_frontier_retried = True
+                        logger.warning(
+                            "504_frontier_retry",
+                            turn=turn,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        await asyncio.sleep(5)
+                        continue
+                    logger.error(
+                        "504_frontier_exhausted",
+                        turn=turn,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    partial = self._collect_partial_results(all_messages)
+                    if partial:
+                        return partial
+                    return (
+                        "I'm experiencing connectivity issues with the AI service. "
+                        "Let me know if you'd like me to try again in a moment."
+                    )
+                if e.status_code == 400:
+                    _400_recovery_count = getattr(
+                        self, "_400_recovery_count", 0,
+                    ) + 1
+                    self._400_recovery_count = _400_recovery_count
+                    if _400_recovery_count > 3:
+                        logger.error(
+                            "400_recovery_limit_exceeded",
+                            turn=turn,
+                            attempts=_400_recovery_count,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        raise
+                    if turn == 0:
+                        logger.warning(
+                            "400_turn0_recovery",
+                            turn=turn,
+                            tool_count=len(tools) if tools else 0,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        if tools and len(tools) > 50:
+                            tools = tools[:50]
+                            logger.info(
+                                "400_turn0_tools_trimmed",
+                                new_count=len(tools),
+                            )
+                            continue
+                        from lucy.pipeline.router import MODEL_TIERS
+                        frontier = MODEL_TIERS.get("frontier", current_model)
+                        if frontier != current_model:
+                            current_model = frontier
+                            logger.info(
+                                "400_turn0_model_escalation",
+                                to_model=frontier,
+                            )
+                            continue
+                        raise
                     logger.warning(
                         "400_recovery_trimming",
                         turn=turn,
                         messages_before=len(all_messages),
+                        attempt=_400_recovery_count,
                     )
                     all_messages = await _trim_tool_results(all_messages)
                     from lucy.pipeline.router import MODEL_TIERS
@@ -1187,6 +1374,32 @@ class LucyAgent:
                         )
                     continue
                 raise
+
+            # Detect output truncation: if the model used nearly all
+            # available tokens and returned no tool_calls, ask it to continue.
+            if (
+                response.content
+                and not response.tool_calls
+                and response.usage
+                and response.usage.get("completion_tokens", 0)
+                >= base_max_tokens * 0.9
+            ):
+                all_messages.append(
+                    {"role": "assistant", "content": response.content}
+                )
+                all_messages.append({
+                    "role": "system",
+                    "content": (
+                        "Your previous response was truncated. "
+                        "Continue from where you left off."
+                    ),
+                })
+                logger.info(
+                    "output_truncation_detected",
+                    turn=turn,
+                    tokens=response.usage.get("completion_tokens"),
+                )
+                continue
 
             response_text = response.content or ""
             tool_calls = response.tool_calls
@@ -1224,9 +1437,14 @@ class LucyAgent:
                         model=current_model,
                         workspace_id=ctx.workspace_id,
                     )
-                    all_messages.append(
-                        {"role": "assistant", "content": ""}
-                    )
+                    all_messages.append({
+                        "role": "system",
+                        "content": (
+                            "Your previous response was empty. You must "
+                            "either call a tool or provide a substantive "
+                            "answer to the user."
+                        ),
+                    })
                     _recovery_intent = getattr(route, "intent", "")
                     if _recovery_intent == "monitoring":
                         _recovery_nudge = (
@@ -1371,18 +1589,28 @@ class LucyAgent:
                         turn=turn,
                         tools=over_cap,
                     )
+                    _capped_tools: set[str] = getattr(self, "_capped_tools", set())
+                    _capped_tools.update(over_cap)
+                    self._capped_tools = _capped_tools
+                    if tools:
+                        tools = [
+                            t for t in tools
+                            if t.get("function", {}).get("name", "") not in _capped_tools
+                        ]
+                        if not tools:
+                            tools = None
                     all_messages.append({
                         "role": "system",
                         "content": (
                             "CRITICAL: You have repeatedly ignored "
                             "instructions to stop calling the same tools. "
+                            f"The following tools have been disabled: "
+                            f"{', '.join(over_cap)}. "
                             "You MUST respond to the user NOW with "
-                            "whatever you have. Do NOT call any more "
-                            "tools. If you were building an app, call "
+                            "whatever you have. If you were building an app, call "
                             "lucy_spaces_deploy with what you have so far."
                         ),
                     })
-                    tools = None
                     continue
                 all_messages.append({
                     "role": "system",
@@ -1403,42 +1631,28 @@ class LucyAgent:
                 workspace_id=ctx.workspace_id,
             )
 
-            should_update = (
-                slack_client
+            _elapsed_silent = time.monotonic() - _last_visible_msg_time
+            _remaining_turns = max_turns - turn
+            if (
+                _elapsed_silent > _SILENCE_THRESHOLD_S
+                and not _silence_update_sent
+                and slack_client
                 and ctx.channel_id
                 and ctx.thread_ts
                 and not ctx.is_cron_execution
-                and (
-                    (turn == 3 and not progress_sent)
-                    or (turn > 3 and turn % 5 == 0)
-                )
-            )
-            if should_update:
-                progress_sent = True
-                completed_tools = list(trace.tool_calls_made)
-                if completed_tools:
-                    task_hint = _extract_task_hint(all_messages)
-                    progress = _describe_progress(
-                        completed_tools, turn, task_hint=task_hint,
-                    )
-                    try:
-                        await slack_client.chat_postMessage(
-                            channel=ctx.channel_id,
-                            thread_ts=ctx.thread_ts,
-                            text=progress,
-                        )
-                        logger.info(
-                            "progress_posted",
-                            turn=turn,
-                            trace_id=trace.trace_id,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "progress_post_failed",
-                            turn=turn,
-                            error=str(exc),
-                            trace_id=trace.trace_id,
-                        )
+                and _remaining_turns > 2
+            ):
+                _silence_update_sent = True
+                all_messages.append({
+                    "role": "system",
+                    "content": (
+                        "You have been working for over 8 minutes. "
+                        "Send the user a brief 1-sentence progress update "
+                        "about what you've done so far and how much longer. "
+                        "Keep it casual and specific to the task — no generic "
+                        "filler. Then continue working."
+                    ),
+                })
 
             # Append assistant message with tool_calls
             assistant_msg: dict[str, Any] = {
@@ -1467,9 +1681,13 @@ class LucyAgent:
 
             for call_id, result_str in tool_results:
                 if len(result_str) > TOOL_RESULT_SUMMARY_THRESHOLD:
+                    head_chars = 4000
+                    tail_chars = 2000
+                    trimmed_count = len(result_str) - head_chars - tail_chars
                     result_str = (
-                        result_str[:TOOL_RESULT_SUMMARY_THRESHOLD]
-                        + "...(trimmed for context efficiency)"
+                        result_str[:head_chars]
+                        + f"...(trimmed {trimmed_count} chars)..."
+                        + result_str[-tail_chars:]
                     )
                 all_messages.append({
                     "role": "tool",
@@ -1481,7 +1699,7 @@ class LucyAgent:
                 len(m.get("content", "")) for m in all_messages
             )
             if payload_size > MAX_PAYLOAD_CHARS:
-                all_messages = await _trim_tool_results(all_messages, max_result_chars=300)
+                all_messages = await _trim_tool_results(all_messages, max_result_chars=1000)
                 logger.info(
                     "payload_trimmed",
                     turn=turn,
@@ -1646,12 +1864,39 @@ class LucyAgent:
                             response_text = sv_result.guidance
                         break
 
+                    sv_consecutive_failures = 0
+
                 except Exception as sv_exc:
+                    sv_consecutive_failures += 1
                     logger.warning(
                         "supervisor_checkpoint_error",
                         error=str(sv_exc),
                         turn=turn,
+                        consecutive_failures=sv_consecutive_failures,
                     )
+                    if sv_consecutive_failures >= 3:
+                        logger.warning(
+                            "supervisor_fallback_heuristic",
+                            turn=turn,
+                            elapsed_s=int(sv_elapsed),
+                            workspace_id=ctx.workspace_id,
+                        )
+                        if sv_elapsed > 300:
+                            all_messages.append({
+                                "role": "system",
+                                "content": (
+                                    "You have been running for over 5 minutes. "
+                                    "Wrap up with what you have and respond now."
+                                ),
+                            })
+                        elif turn > max_turns * 0.75:
+                            all_messages.append({
+                                "role": "system",
+                                "content": (
+                                    "You are running low on turns. Finish up "
+                                    "and deliver your best answer now."
+                                ),
+                            })
 
             # Mid-loop model upgrade: only switch to code model
             # when the original routing intent was code-related.
@@ -1693,9 +1938,47 @@ class LucyAgent:
                         )
                         current_model = frontier_model
 
-            # Trim context window
+            # Trim context window — smart trimming that preserves key messages
             if len(all_messages) > MAX_CONTEXT_MESSAGES:
-                all_messages = all_messages[-MAX_CONTEXT_MESSAGES:]
+                pinned_indices: set[int] = set()
+                # Pin first message (system/user)
+                pinned_indices.add(0)
+                # Pin messages containing execution plan
+                for _i, _m in enumerate(all_messages):
+                    if "<execution_plan>" in (_m.get("content") or ""):
+                        pinned_indices.add(_i)
+                # Pin the last 5 messages
+                tail_start = max(0, len(all_messages) - 5)
+                for _i in range(tail_start, len(all_messages)):
+                    pinned_indices.add(_i)
+
+                trimmed_msgs: list[dict[str, Any]] = []
+                budget = MAX_CONTEXT_MESSAGES - len(pinned_indices)
+                non_pinned = [
+                    (_i, _m) for _i, _m in enumerate(all_messages)
+                    if _i not in pinned_indices
+                ]
+                # Keep newest non-pinned first; drop tool results from middle oldest-first
+                tool_indices = [
+                    _i for _i, _m in non_pinned if _m.get("role") == "tool"
+                ]
+                drop_set: set[int] = set()
+                for _i in tool_indices:
+                    if len(drop_set) >= len(non_pinned) - budget:
+                        break
+                    drop_set.add(_i)
+                # If still over budget, drop oldest non-pinned non-tool messages
+                if len(non_pinned) - len(drop_set) > budget:
+                    for _i, _ in non_pinned:
+                        if _i not in drop_set:
+                            drop_set.add(_i)
+                            if len(non_pinned) - len(drop_set) <= budget:
+                                break
+
+                for _i, _m in enumerate(all_messages):
+                    if _i not in drop_set:
+                        trimmed_msgs.append(_m)
+                all_messages = trimmed_msgs
 
         if not response_text.strip():
             partial = self._collect_partial_results(all_messages)
@@ -1704,9 +1987,10 @@ class LucyAgent:
             else:
                 from lucy.pipeline.humanize import humanize
                 response_text = await humanize(
-                    "You couldn't find the answer. Ask the user "
-                    "to clarify or rephrase what they need. Be "
-                    "warm and brief, not robotic.",
+                    "You tried multiple approaches but couldn't get the "
+                    "result yet. Don't give up — ask the user one specific "
+                    "clarifying question that would help you try a different "
+                    "angle. Be warm and action-oriented, not apologetic.",
                 )
 
         return response_text
@@ -1818,19 +2102,34 @@ class LucyAgent:
             for msg in messages
         )
         if has_tool_results:
-            tool_data = []
+            tool_data: list[str] = []
             for msg in messages:
                 if msg.get("role") == "tool" and msg.get("content", ""):
                     content = msg["content"]
                     if '"error"' not in content:
-                        tool_data.append(content[:500])
-            summary = "; ".join(tool_data[:3]) if tool_data else ""
+                        sanitized = _sanitize_tool_output(content[:500])
+                        # Try to extract a human-readable summary from JSON
+                        try:
+                            parsed = json.loads(sanitized)
+                            if isinstance(parsed, dict):
+                                if "result" in parsed:
+                                    sanitized = str(parsed["result"])[:300]
+                                elif "message" in parsed:
+                                    sanitized = str(parsed["message"])[:300]
+                                elif "data" in parsed:
+                                    sanitized = str(parsed["data"])[:300]
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                        tool_data.append(sanitized)
+            if not tool_data:
+                return ""
+            summary = "; ".join(tool_data[:3])
             return (
                 f"Here's what I found so far: {summary}\n\n"
                 "I'm still piecing together the full picture. "
                 "Let me know if this helps or if you need me "
                 "to dig deeper."
-            ) if summary else ""
+            )
         return ""
 
     # ── Parallel tool execution ─────────────────────────────────────────
@@ -2018,9 +2317,31 @@ class LucyAgent:
             return call_id, self._serialize_result(result)
 
         results = await asyncio.gather(
-            *[_run_one(i, tc) for i, tc in enumerate(tool_calls)]
+            *[_run_one(i, tc) for i, tc in enumerate(tool_calls)],
+            return_exceptions=True,
         )
-        return list(results)
+        safe_results: list[tuple[str, str]] = []
+        for idx, r in enumerate(results):
+            if isinstance(r, Exception):
+                call_id = tool_calls[idx].get("id", f"call_{idx}")
+                logger.warning(
+                    "tool_gather_exception",
+                    call_id=call_id,
+                    error_type=type(r).__name__,
+                    error=str(r)[:200],
+                )
+                safe_results.append((
+                    call_id,
+                    json.dumps({
+                        "error": (
+                            f"Tool execution failed: "
+                            f"{type(r).__name__}: {str(r)[:200]}"
+                        ),
+                    }),
+                ))
+            else:
+                safe_results.append(r)
+        return safe_results
 
     # ── Tool execution ──────────────────────────────────────────────────
 
@@ -2032,7 +2353,11 @@ class LucyAgent:
             from lucy.integrations.composio_client import get_composio_client
 
             client = get_composio_client()
-            return await client.get_tools(workspace_id)
+            tools = await client.get_tools(workspace_id)
+            if tools is None:
+                logger.warning("meta_tools_unavailable", workspace_id=workspace_id)
+                return []
+            return tools
         except Exception as e:
             logger.error("meta_tools_fetch_failed", error=str(e))
             return []
@@ -2040,22 +2365,37 @@ class LucyAgent:
     async def _get_connected_services(
         self, workspace_id: str
     ) -> list[str]:
-        """Fetch names of actively connected integrations."""
+        """Fetch names of actively connected integrations.
+
+        Merges Composio-managed connections with custom wrappers
+        (Polar, Clerk, etc.) so the LLM sees the full picture.
+        """
+        names: list[str] = []
         try:
             from lucy.integrations.composio_client import get_composio_client
 
             client = get_composio_client()
             names = await client.get_connected_app_names_reliable(workspace_id)
-            if names:
-                logger.info(
-                    "connected_services_fetched",
-                    workspace_id=workspace_id,
-                    services=names,
-                )
-            return names
         except Exception as e:
-            logger.warning("connected_services_fetch_failed", error=str(e))
-            return []
+            logger.warning("composio_connections_fetch_failed", error=str(e))
+
+        try:
+            from lucy.integrations.wrapper_generator import discover_saved_wrappers
+
+            for wrapper in discover_saved_wrappers():
+                service = wrapper.get("service_name", "")
+                if service and service not in names:
+                    names.append(service)
+        except Exception as e:
+            logger.warning("custom_wrapper_discovery_failed", error=str(e))
+
+        if names:
+            logger.info(
+                "connected_services_fetched",
+                workspace_id=workspace_id,
+                services=names,
+            )
+        return names
 
     # Per-tool timeout config (seconds). Longer for heavy operations.
     _TOOL_TIMEOUTS: dict[str, float] = {
@@ -2075,7 +2415,9 @@ class LucyAgent:
 
     # Simple in-memory circuit breaker: tool -> consecutive failure count
     _tool_failure_counts: dict[str, int] = {}
+    _tool_circuit_opened_at: dict[str, float] = {}
     _CIRCUIT_OPEN_THRESHOLD = 3
+    _CIRCUIT_COOLDOWN_SECONDS = 60.0
 
     async def _execute_tool(
         self,
@@ -2092,22 +2434,43 @@ class LucyAgent:
         # ── Circuit breaker: skip tools that have repeatedly failed ──
         failure_count = LucyAgent._tool_failure_counts.get(tool_name, 0)
         if failure_count >= LucyAgent._CIRCUIT_OPEN_THRESHOLD:
-            logger.warning(
-                "tool_circuit_open",
+            opened_at = LucyAgent._tool_circuit_opened_at.get(tool_name)
+            now = time.monotonic()
+            if opened_at is None:
+                LucyAgent._tool_circuit_opened_at[tool_name] = now
+                logger.warning(
+                    "tool_circuit_open",
+                    tool=tool_name,
+                    failures=failure_count,
+                )
+                human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+                return {
+                    "error": (
+                        f"The tool for '{human_name}' has failed {failure_count} times "
+                        f"in a row and has been temporarily paused. Try a different "
+                        f"approach or ask the user if they want to retry."
+                    ),
+                    "_circuit_breaker": True,
+                }
+            elapsed_since_open = now - opened_at
+            if elapsed_since_open < LucyAgent._CIRCUIT_COOLDOWN_SECONDS:
+                human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+                remaining = int(LucyAgent._CIRCUIT_COOLDOWN_SECONDS - elapsed_since_open)
+                return {
+                    "error": (
+                        f"The tool for '{human_name}' is still paused "
+                        f"(~{remaining}s remaining). Try a different approach."
+                    ),
+                    "_circuit_breaker": True,
+                }
+            # Half-open: allow one probe call after cooldown
+            logger.info(
+                "tool_circuit_half_open",
                 tool=tool_name,
-                failures=failure_count,
+                elapsed_since_open=int(elapsed_since_open),
             )
-            # Reset after reporting so we don't block forever
             LucyAgent._tool_failure_counts[tool_name] = 0
-            human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
-            return {
-                "error": (
-                    f"The tool for '{human_name}' has failed {failure_count} times "
-                    f"in a row and has been temporarily paused. Try a different "
-                    f"approach or ask the user if they want to retry."
-                ),
-                "_circuit_breaker": True,
-            }
+            LucyAgent._tool_circuit_opened_at.pop(tool_name, None)
 
         timeout = LucyAgent._TOOL_TIMEOUTS.get(tool_name, LucyAgent._DEFAULT_TOOL_TIMEOUT)
 
@@ -2119,6 +2482,17 @@ class LucyAgent:
                         tool_name, parameters, workspace_id, ctx=ctx,
                     ),
                     timeout=timeout,
+                )
+                has_error = isinstance(result, dict) and bool(result.get("error"))
+                logger.info(
+                    "tool_executed",
+                    tool=tool_name,
+                    workspace_id=workspace_id,
+                    has_error=has_error,
+                    result_preview=(
+                        str(result.get("error", ""))[:200]
+                        if has_error and isinstance(result, dict) else ""
+                    ),
                 )
                 LucyAgent._tool_failure_counts.pop(tool_name, None)
                 return result
@@ -2209,7 +2583,16 @@ class LucyAgent:
                 tool=tool_name,
                 error=str(e),
             )
-            return {"error": str(e)}
+            sanitized_error = _INTERNAL_PATH_RE.sub("[path]", str(e))
+            sanitized_error = _WORKSPACE_PATH_RE.sub("[path]", sanitized_error)
+            if len(sanitized_error) > 300:
+                sanitized_error = sanitized_error[:300] + "..."
+            human_name = LucyAgent._TOOL_HUMAN_NAMES.get(tool_name, tool_name)
+            return {
+                "error": (
+                    f"'{human_name}' encountered an error: {sanitized_error}"
+                ),
+            }
 
     _CRON_MANAGEMENT_TOOLS = frozenset({
         "lucy_create_cron", "lucy_delete_cron",
@@ -2262,8 +2645,8 @@ class LucyAgent:
                             from datetime import datetime as _dt
                             dt = _dt.fromisoformat(next_run)
                             next_run = dt.strftime("%A, %B %d at %I:%M %p")
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning("component_failed", component="cron_date_format", error=str(e))
                     entry: dict[str, Any] = {
                         "name": name,
                         "next_run": next_run or "Not scheduled",
@@ -2489,7 +2872,11 @@ class LucyAgent:
                 tool=tool_name,
                 error=str(e),
             )
-            return {"error": str(e)}
+            sanitized = _INTERNAL_PATH_RE.sub("[path]", str(e))
+            sanitized = _WORKSPACE_PATH_RE.sub("[path]", sanitized)
+            if len(sanitized) > 300:
+                sanitized = sanitized[:300] + "..."
+            return {"error": sanitized}
 
     # ── Custom wrapper tool execution ────────────────────────────────
 
@@ -2516,8 +2903,8 @@ class LucyAgent:
                     .get(slug, {})
                     .get("api_key", "")
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("component_failed", component="custom_wrapper_key_load", error=str(e))
 
         if not api_key:
             return {
@@ -2622,8 +3009,8 @@ class LucyAgent:
         if keys_path.exists():
             try:
                 keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("component_failed", component="keys_file_read", error=str(e))
 
         custom = keys_data.setdefault("custom_integrations", {})
         custom.setdefault(slug, {})["api_key"] = api_key
@@ -2748,8 +3135,8 @@ class LucyAgent:
                 await slack_client.chat_postMessage(
                     channel=channel_id, thread_ts=thread_ts, text=start_msg,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("component_failed", component="delegation_start_message", error=str(e))
 
         try:
             result = await asyncio.wait_for(
@@ -2758,7 +3145,7 @@ class LucyAgent:
                     spec=spec,
                     workspace_id=workspace_id,
                     tool_registry=self._tool_registry,
-                    progress_callback=self._on_subagent_progress,
+                    progress_callback=None,
                 ),
                 timeout=SUB_TIMEOUT_SECONDS,
             )
@@ -2791,35 +3178,6 @@ class LucyAgent:
 
         self._current_task_hint = None
         return {"result": result}
-
-    async def _on_subagent_progress(self, name: str, turn: int) -> None:
-        """Progress callback for sub-agents — posts a context-aware Slack message."""
-        slack_client = getattr(self, "_current_slack_client", None)
-        channel_id = getattr(self, "_current_channel_id", None)
-        thread_ts = getattr(self, "_current_thread_ts", None)
-
-        if not slack_client or not channel_id or not thread_ts:
-            return
-
-        _SUBAGENT_LABELS = {
-            "research": "doing deep research",
-            "code": "writing and testing code",
-            "integrations": "setting up the integration",
-            "document": "putting the document together",
-        }
-        label = _SUBAGENT_LABELS.get(name, "working on this")
-        task_hint = getattr(self, "_current_task_hint", None)
-        if task_hint:
-            desc = f"Still {label} — {task_hint[:60]}..."
-        else:
-            desc = f"Still {label}..."
-
-        try:
-            await slack_client.chat_postMessage(
-                channel=channel_id, thread_ts=thread_ts, text=desc,
-            )
-        except Exception:
-            pass
 
     # ── Quality gate escalation ────────────────────────────────────────
 
@@ -2865,7 +3223,7 @@ class LucyAgent:
                             "Be concise. If the response is fine, say "
                             "RESPONSE_OK."
                         ),
-                        max_tokens=800,
+                        max_tokens=4096,
                     ),
                 ),
                 timeout=15.0,
@@ -2916,12 +3274,16 @@ class LucyAgent:
             f"1. Does it answer EVERY part of the user's question?\n"
             f"2. Does it lead with the most important information (not preamble)?\n"
             f"3. Is anything obviously missing or incomplete?\n"
-            f"4. Does it give actual data/results, not just say what was done?\n\n"
+            f"4. Does it give actual data/results, not just say what was done?\n"
+            f"5. HIGH-AGENCY CHECK: Does the response end with a dead end "
+            f"anywhere? Does it say 'I can't' or 'I wasn't able to' without "
+            f"offering an alternative path? A high-agency response always "
+            f"provides a next step, a workaround, or what would unblock it.\n\n"
             f"If the response is solid, reply with exactly: RESPONSE_OK\n"
             f"If there's a clear, specific issue, reply with: ISSUE: [one sentence "
             f"describing what's missing or wrong, and how to fix it]\n\n"
             f"Be strict but fair. Don't flag minor style issues. Only flag substantive "
-            f"completeness or accuracy problems."
+            f"completeness or accuracy problems, and dead-end responses."
         )
 
         try:
@@ -2937,7 +3299,7 @@ class LucyAgent:
                             "missing deliverables, preamble without results). "
                             "Ignore minor style issues. Be decisive and concise."
                         ),
-                        max_tokens=200,
+                        max_tokens=500,
                         temperature=0.1,
                     ),
                 ),
@@ -3433,12 +3795,13 @@ def _validate_connection_relevance(
 
 async def _trim_tool_results(
     messages: list[dict[str, Any]],
-    max_result_chars: int = 500,
+    max_result_chars: int = 2000,
 ) -> list[dict[str, Any]]:
     """Trim old tool results to reduce payload size.
 
-    Uses the fast tier model to summarize older tool outputs if they are large,
-    keeping the narrative intact without exploding the context window.
+    Uses the fast tier model via OpenClaw to summarize older tool outputs
+    if they are large, keeping the narrative intact without exploding the
+    context window.
     """
     trimmed: list[dict[str, Any]] = []
     total_tool_results = sum(1 for m in messages if m.get("role") == "tool")
@@ -3447,7 +3810,6 @@ async def _trim_tool_results(
     tool_idx = 0
 
     from lucy.config import settings
-    import httpx
 
     for msg in messages:
         if msg.get("role") == "tool":
@@ -3455,19 +3817,26 @@ async def _trim_tool_results(
                 content = msg.get("content", "")
                 if len(content) > max_result_chars:
                     try:
-                        prompt = f"Summarize this tool output concisely, preserving key errors, file paths, and success/fail signals. Keep it under {max_result_chars} characters.\n\n{content[:10000]}"
-                        async with httpx.AsyncClient(timeout=10.0) as http_client:
-                            resp = await http_client.post(
-                                "https://openrouter.ai/api/v1/chat/completions",
-                                headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-                                json={
-                                    "model": settings.model_tier_fast,
-                                    "messages": [{"role": "user", "content": prompt}],
-                                    "max_tokens": 150
-                                }
-                            )
-                            summary = resp.json()["choices"][0]["message"]["content"]
-                            msg = {**msg, "content": f"[LLM SUMMARIZED]: {summary}"}
+                        prompt = (
+                            f"Summarize this tool output concisely, preserving "
+                            f"key errors, file paths, and success/fail signals. "
+                            f"Keep it under {max_result_chars} characters."
+                            f"\n\n{content[:10000]}"
+                        )
+                        client = await get_openclaw_client()
+                        result = await asyncio.wait_for(
+                            client.chat_completion(
+                                messages=[{"role": "user", "content": prompt}],
+                                config=ChatConfig(
+                                    model=settings.model_tier_fast,
+                                    system_prompt="You are a concise summarizer.",
+                                    max_tokens=500,
+                                ),
+                            ),
+                            timeout=10.0,
+                        )
+                        summary = result.content or ""
+                        msg = {**msg, "content": f"[LLM SUMMARIZED]: {summary}"}
                     except Exception as e:
                         logger.warning("llm_condensation_failed", error=str(e))
                         msg = {**msg, "content": content[:max_result_chars] + "...(summarized)"}
@@ -3573,57 +3942,6 @@ def _assess_response_quality(
         "reason": "; ".join(issues) if issues else "",
         "issues": issues,
     }
-
-
-def _describe_progress(
-    tool_calls: list[str], turn: int = 0, task_hint: str = "",
-) -> str:
-    """Generate a natural, context-aware progress message.
-
-    Each call posts a NEW message so the thread tells a visible story
-    of what Lucy is doing.  When a *task_hint* is available (extracted
-    from the user's request), it is woven into the status line so
-    messages reference the actual task instead of being generic.
-    Responses come from LLM-generated pools (pre-warmed at startup).
-    Never expose tool names or internal machinery.
-    """
-    from lucy.pipeline.humanize import pick
-
-    if turn <= 2:
-        base = pick("progress_early")
-    elif turn <= 4:
-        base = pick("progress_mid")
-    elif turn <= 7:
-        base = pick("progress_late")
-    else:
-        base = pick("progress_final")
-
-    if not task_hint:
-        return base
-
-    hint_lower = task_hint.lower().rstrip(".")
-    stripped = base.rstrip(" .\u2026!").rstrip()
-    return f"{stripped}, working on _{hint_lower}_ \u2026"
-
-
-def _extract_task_hint(messages: list[dict[str, Any]]) -> str:
-    """Pull a short task description from the LATEST user message.
-
-    Returns at most 60 chars of the user's most recent request,
-    suitable for embedding in a progress status line.
-    """
-    last_user_content = ""
-    for msg in messages:
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                last_user_content = content.strip()
-    if last_user_content:
-        hint = last_user_content[:60]
-        if len(last_user_content) > 60:
-            hint = hint[:57] + "..."
-        return hint
-    return ""
 
 
 def _detect_stuck_state(
@@ -3815,7 +4133,7 @@ def _verify_output(
             "Break the task into steps and execute each one."
         )
 
-    # High-agency check: detect surrender patterns when the user expected action
+    # High-agency check: detect surrender/dead-end patterns
     low_agency_patterns = [
         "i can't access",
         "i'm unable to",
@@ -3828,21 +4146,40 @@ def _verify_output(
         "falls outside my",
         "i don't have the ability",
         "i'm afraid i can't",
+        "this took longer than expected and i had to stop",
+        "the request may have been too complex",
+        "want me to try a simpler approach",
+        "i wasn't able to complete",
+        "i'm having trouble with",
+        "something went wrong",
+        "i hit a snag",
     ]
     action_words = [
         "get", "show", "pull", "fetch", "create", "build", "generate",
         "send", "connect", "set up", "check", "find", "run", "analyze",
+        "monitor", "track", "report", "scan", "deploy", "start", "write",
     ]
     has_action_intent = any(w in user_lower for w in action_words)
     has_low_agency = any(p in resp_lower for p in low_agency_patterns)
     if has_low_agency and has_action_intent:
         issues.append(
-            "Response contains a 'can't do' statement but the user expected action. "
-            "Rewrite to: offer the closest thing you CAN do, explain what you'd need "
-            "to do the full thing, or provide an alternative path. Never leave the "
-            "user with a dead end. Example: instead of 'I can't access Figma directly' "
-            "say 'I can't pull from Figma directly — if you drop the file here I can "
-            "work with it, or I can try to build a custom Figma connection. Want me to?'"
+            "CRITICAL: Response contains a dead-end or surrender pattern. You are a "
+            "high-agency problem solver. Every problem is solvable. Rewrite to: "
+            "(1) Offer the closest thing you CAN do right now, "
+            "(2) Explain specifically what you'd need to do the full thing, "
+            "(3) Provide at least one alternative path forward. "
+            "Never leave the user with a dead end. Never suggest they 'try a simpler "
+            "approach' — YOU find the simpler approach and execute it. "
+            "Example: instead of 'I can't access Figma directly' say "
+            "'I can't pull from Figma directly, but two options: drop the file here "
+            "and I'll extract the content, or I can build a custom connection. "
+            "Which works better?'"
+        )
+    elif has_low_agency:
+        issues.append(
+            "Response contains a 'can't do' pattern without offering an alternative. "
+            "Even if the user didn't explicitly ask for action, always follow 'I can't X' "
+            "with 'but I can Y' or 'here's what would make it possible'. No dead ends."
         )
 
     return {
