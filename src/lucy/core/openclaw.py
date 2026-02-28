@@ -97,6 +97,8 @@ class ChatConfig:
     max_tokens: int = 4096
     system_prompt: str | None = None
     tools: list[dict[str, Any]] | None = None
+    stream: bool = False
+    wallclock_timeout: float | None = None
 
 
 @dataclass
