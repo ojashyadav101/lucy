@@ -1102,6 +1102,7 @@ class LucyAgent:
                 if len(fact) > 500:
                     fact = fact[:500] + "..."
 
+                should_store = True
                 if target in ("company", "team"):
                     warning = await check_fact_contradictions(
                         ws, fact, target,
@@ -1114,21 +1115,26 @@ class LucyAgent:
                             target=target,
                             workspace_id=ctx.workspace_id,
                         )
+                        should_store = False
 
-                if target == "company":
-                    await append_to_company_knowledge(ws, fact)
-                elif target == "team":
-                    await append_to_team_knowledge(ws, fact)
-                else:
-                    await add_session_fact(
-                        ws, fact, source="conversation", category=target,
-                        thread_ts=ctx.thread_ts,
+                if should_store:
+                    tag = " [user-stated, unverified]"
+                    tagged_fact = fact + tag
+
+                    if target == "company":
+                        await append_to_company_knowledge(ws, tagged_fact)
+                    elif target == "team":
+                        await append_to_team_knowledge(ws, tagged_fact)
+                    else:
+                        await add_session_fact(
+                            ws, tagged_fact, source="conversation",
+                            category=target, thread_ts=ctx.thread_ts,
+                        )
+                    logger.debug(
+                        "memory_persisted",
+                        target=target,
+                        workspace_id=ctx.workspace_id,
                     )
-                logger.debug(
-                    "memory_persisted",
-                    target=target,
-                    workspace_id=ctx.workspace_id,
-                )
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
 
@@ -2290,6 +2296,7 @@ class LucyAgent:
                 result = _validate_connection_relevance(
                     result, toolkits_requested, trace.user_message,
                 )
+                result = _inject_custom_wrappers_into_connections(result)
 
             # Annotate unresolved services for the LLM to surface
             if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
@@ -3789,6 +3796,69 @@ def _validate_connection_relevance(
             + " If the correct service is not available, acknowledge "
             "honestly and offer to build a custom integration."
         )
+
+    return result
+
+
+def _inject_custom_wrappers_into_connections(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Inject custom wrapper integrations into COMPOSIO_MANAGE_CONNECTIONS results.
+
+    Composio only knows about OAuth-managed connections (Gmail, GitHub, etc.).
+    Custom wrappers (Polar.sh, Clerk) are managed separately and won't appear
+    in Composio's response. This function appends them so the LLM sees the
+    full picture when listing integrations.
+    """
+    try:
+        import json
+        from pathlib import Path
+
+        from lucy.config import settings
+        from lucy.integrations.wrapper_generator import discover_saved_wrappers
+
+        wrappers = discover_saved_wrappers()
+        if not wrappers:
+            return result
+
+        keys_path = Path(settings.workspace_root).parent / "keys.json"
+        keys_data: dict[str, Any] = {}
+        if keys_path.exists():
+            try:
+                keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        custom_connections: list[dict[str, str]] = []
+        for w in wrappers:
+            slug = w.get("slug", "")
+            service = w.get("service_name", slug)
+            n_tools = w.get("total_tools", 0)
+            ci_keys = keys_data.get("custom_integrations", {}).get(slug, {})
+            has_key = bool(ci_keys.get("api_key"))
+
+            if has_key:
+                custom_connections.append({
+                    "app": service,
+                    "status": "active",
+                    "type": "custom_integration",
+                    "tools_available": str(n_tools),
+                    "note": f"Use lucy_custom_{slug}_* tools (NOT Composio tools)",
+                })
+
+        if custom_connections:
+            result["_custom_integrations"] = custom_connections
+            existing_note = result.get("_custom_integration_note", "")
+            svc_names = ", ".join(c["app"] for c in custom_connections)
+            result["_custom_integration_note"] = (
+                f"IMPORTANT: In addition to the Composio connections above, "
+                f"you also have these custom-built integrations that are "
+                f"ACTIVE and READY: {svc_names}. Include them when listing "
+                f"connected integrations. Use lucy_custom_* tools for these, "
+                f"not Composio tools."
+            )
+    except Exception as e:
+        logger.warning("custom_wrapper_injection_failed", error=str(e))
 
     return result
 

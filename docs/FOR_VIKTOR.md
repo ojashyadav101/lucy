@@ -415,6 +415,12 @@ Based on this analysis, we've implemented:
 
 4. **Swapped default model** from moonshotai/kimi-k2.5 to minimax/minimax-m2.5 (same model Viktor may be using or similar tier).
 
+5. **Fixed integration discovery**: Custom wrappers (Polar.sh, Clerk) are now injected into COMPOSIO_MANAGE_CONNECTIONS results so the LLM sees the full picture when listing integrations. Previously, Composio only returned OAuth-managed connections (Gmail, GitHub), causing the LLM to miss custom integrations.
+
+6. **Anti-hallucination guard for "remember this" requests**: Facts are now tagged as `[user-stated, unverified]` when stored. Added comprehensive anti-hallucination protocol in SYSTEM_CORE.md requiring cross-referencing against existing knowledge before confirming user-stated facts. Contradicted facts are blocked from storage.
+
+7. **Composio connection discovery improvement**: `get_connected_app_names_reliable()` now always tries both detection methods (not just when < 3 results), ensuring we don't miss any connections.
+
 ---
 
 *Document generated: February 28, 2026*

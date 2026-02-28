@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -29,17 +30,32 @@ from tenacity import (
 )
 
 from lucy.config import settings
+from lucy.infra.circuit_breaker import composio_breaker
 
 logger = structlog.get_logger()
 
 _RETRYABLE_KEYWORDS = frozenset({
     "500", "502", "503", "504",
-    "402", "601", "901",
+    "601", "901",
     "timeout", "temporarily", "rate limit", "connection reset",
 })
 
+_RETRYABLE_EXCEPTION_TYPES: tuple[str, ...] = (
+    "ConnectionError",
+    "TimeoutError",
+    "ServerError",
+    "ServiceUnavailable",
+    "GatewayTimeout",
+    "TooManyRequests",
+)
+
 
 def _is_retryable(exc: Exception) -> bool:
+    exc_type_name = type(exc).__name__
+    if exc_type_name in _RETRYABLE_EXCEPTION_TYPES:
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return True
     msg = str(exc).lower()
     return any(kw in msg for kw in _RETRYABLE_KEYWORDS)
 
@@ -57,12 +73,17 @@ class ComposioClient:
 
     _MAX_CACHED_SESSIONS = 200
 
+    _INIT_RETRY_INTERVAL = 60  # seconds between re-init attempts
+
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or settings.composio_api_key
         self._composio: Any = None
+        self._init_error: str | None = None
+        self._last_init_attempt: float = 0
         self._session_cache: dict[str, tuple[datetime, Any]] = {}
         self._session_id_cache: dict[str, str] = {}
         self._tools_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
+        self._last_good_tools: dict[str, list[dict[str, Any]]] = {}
         self._cache_ttl = timedelta(minutes=30)
         self._toolkit_versions: dict[str, str] = {}
         self._cache_lock = asyncio.Lock()
@@ -70,15 +91,31 @@ class ComposioClient:
         self._init_sdk()
 
     def _init_sdk(self) -> None:
+        self._last_init_attempt = time.monotonic()
         try:
             from composio import Composio
             self._composio = Composio(api_key=self.api_key)
+            self._init_error = None
             logger.info("composio_client_initialized")
         except Exception as e:
             logger.error("composio_init_failed", error=str(e))
             self._composio = None
+            self._init_error = str(e)
 
         self._entity_id_map: dict[str, str] = {}
+
+    def _ensure_sdk(self) -> bool:
+        """Lazily retry SDK init if it previously failed and backoff has elapsed.
+
+        Returns True if the SDK is available, False otherwise.
+        """
+        if self._composio is not None:
+            return True
+        elapsed = time.monotonic() - self._last_init_attempt
+        if elapsed >= self._INIT_RETRY_INTERVAL:
+            logger.info("composio_sdk_retry_init", last_error=self._init_error)
+            self._init_sdk()
+        return self._composio is not None
 
     def set_entity_id(self, workspace_id: str, entity_id: str) -> None:
         """Register a stable entity ID for a workspace.
@@ -90,12 +127,13 @@ class ComposioClient:
         next call creates a session with the correct entity.
         """
         ws_key = str(workspace_id)
-        old = self._entity_id_map.get(ws_key)
-        self._entity_id_map[ws_key] = entity_id
-        if old != entity_id:
-            self._session_cache.pop(ws_key, None)
-            self._session_id_cache.pop(ws_key, None)
-            self._tools_cache.pop(ws_key, None)
+        with self._session_lock:
+            old = self._entity_id_map.get(ws_key)
+            self._entity_id_map[ws_key] = entity_id
+            if old != entity_id:
+                self._session_cache.pop(ws_key, None)
+                self._session_id_cache.pop(ws_key, None)
+                self._tools_cache.pop(ws_key, None)
 
     def _get_session(
         self,
@@ -112,8 +150,10 @@ class ComposioClient:
         instead of workspace_id, ensuring the entity persists across
         database resets.
         """
-        if not self._composio:
-            raise RuntimeError("Composio SDK not initialized")
+        if not self._ensure_sdk():
+            raise RuntimeError(
+                f"Composio SDK not initialized: {self._init_error or 'unknown error'}"
+            )
 
         now = datetime.now(timezone.utc)
 
@@ -171,14 +211,34 @@ class ComposioClient:
                 self._session_id_cache.pop(workspace_id, None)
             return self._get_session(workspace_id)
 
-    async def get_tools(self, workspace_id: str) -> list[dict[str, Any]]:
+    async def get_tools(self, workspace_id: str) -> list[dict[str, Any]] | None:
         """Get the 5 meta-tool schemas for a workspace.
 
         Returns OpenAI-compatible tool definitions that can be passed
-        directly to the LLM via OpenClaw.
+        directly to the LLM via OpenClaw. Returns None on failure
+        (distinct from an empty list meaning "no tools available").
         """
-        if not self._composio:
-            return []
+        if not self._ensure_sdk():
+            stale = self._last_good_tools.get(workspace_id)
+            if stale:
+                logger.warning(
+                    "composio_returning_stale_tools",
+                    workspace_id=workspace_id,
+                    reason=self._init_error,
+                )
+                return stale
+            return None
+
+        if not composio_breaker.should_allow_request():
+            logger.warning(
+                "composio_circuit_open",
+                method="get_tools",
+                workspace_id=workspace_id,
+            )
+            stale = self._last_good_tools.get(workspace_id)
+            if stale:
+                return stale
+            return None
 
         now = datetime.now(timezone.utc)
 
@@ -205,6 +265,7 @@ class ComposioClient:
 
             async with self._cache_lock:
                 self._tools_cache[workspace_id] = (now + self._cache_ttl, tool_list)
+                self._last_good_tools[workspace_id] = tool_list
 
             logger.info(
                 "composio_meta_tools_fetched",
@@ -212,11 +273,21 @@ class ComposioClient:
                 count=len(tool_list),
                 names=[t.get("function", {}).get("name", "?") for t in tool_list],
             )
+            composio_breaker.record_success()
             return tool_list
 
         except Exception as e:
+            composio_breaker.record_failure()
             logger.error("composio_get_tools_failed", error=str(e))
-            return []
+            stale = self._last_good_tools.get(workspace_id)
+            if stale:
+                logger.warning(
+                    "composio_returning_stale_tools",
+                    workspace_id=workspace_id,
+                    reason=str(e),
+                )
+                return stale
+            return None
 
     async def execute_tool_call(
         self,
@@ -229,8 +300,23 @@ class ComposioClient:
         Routes through the session object so meta-tools share context
         (SEARCH_TOOLS results are visible to MULTI_EXECUTE_TOOL, etc.).
         """
-        if not self._composio:
-            return {"error": "Composio not initialized"}
+        arguments = {**arguments}
+
+        if not self._ensure_sdk():
+            return {"error": f"Composio not initialized: {self._init_error or 'unknown'}"}
+
+        if not composio_breaker.should_allow_request():
+            logger.warning(
+                "composio_circuit_open",
+                method="execute_tool_call",
+                tool=tool_name,
+                workspace_id=workspace_id,
+            )
+            return {
+                "error": "Composio circuit breaker is open — service appears"
+                " down. Retrying shortly.",
+                "tool": tool_name,
+            }
 
         # Auto-correct common toolkit name mistakes made by LLM or users
         reverse_toolkit_map = {}
@@ -312,6 +398,7 @@ class ComposioClient:
 
         try:
             result = await _execute_with_retry()
+            composio_breaker.record_success()
             logger.info(
                 "composio_tool_executed",
                 tool=tool_name,
@@ -330,14 +417,14 @@ class ComposioClient:
                     
                     if failed_toolkits:
                         recovered_slugs = []
+                        entity_id = self._entity_id_map.get(str(workspace_id)) or str(workspace_id)
                         for ft in failed_toolkits:
                             try:
-                                # Search for the proper toolkit name
                                 search_res = await asyncio.to_thread(
                                     self._composio.tools.execute,
                                     slug="COMPOSIO_SEARCH_TOOLS",
                                     arguments={"query": ft.replace("_", " ")},
-                                    user_id=workspace_id,
+                                    user_id=entity_id,
                                     dangerously_skip_version_check=True
                                 )
                                 search_data = getattr(search_res, "model_dump", lambda: search_res)() if hasattr(search_res, "model_dump") else search_res
@@ -371,7 +458,7 @@ class ComposioClient:
                                     self._composio.tools.execute,
                                     slug="COMPOSIO_MANAGE_CONNECTIONS",
                                     arguments={"toolkits": recovered_slugs},
-                                    user_id=workspace_id,
+                                    user_id=entity_id,
                                     dangerously_skip_version_check=True
                                 )
                                 retry_data = getattr(retry_res, "model_dump", lambda: retry_res)() if hasattr(retry_res, "model_dump") else retry_res
@@ -430,6 +517,7 @@ class ComposioClient:
             return result
 
         except _RetryableComposioError as e:
+            composio_breaker.record_failure()
             logger.error(
                 "composio_execute_retries_exhausted",
                 tool=tool_name,
@@ -439,6 +527,7 @@ class ComposioClient:
             return {"error": f"Tool execution failed after retries: {e}", "tool": tool_name}
 
         except Exception as e:
+            composio_breaker.record_failure()
             logger.error(
                 "composio_execute_failed",
                 tool=tool_name,
@@ -451,13 +540,30 @@ class ComposioClient:
         self,
         workspace_id: str,
         toolkit: str,
-    ) -> str | None:
+    ) -> dict[str, str | None]:
         """Generate an OAuth connection link for a toolkit.
 
-        Returns the redirect URL for the user to complete auth.
+        Returns a dict with 'url' (the redirect URL, or None on failure)
+        and 'error' (a human-readable reason, or None on success).
         """
-        if not self._composio:
-            return None
+        if not self._ensure_sdk():
+            return {
+                "url": None,
+                "error": f"Composio SDK not initialized: {self._init_error or 'unknown'}",
+            }
+
+        if not composio_breaker.should_allow_request():
+            logger.warning(
+                "composio_circuit_open",
+                method="authorize",
+                toolkit=toolkit,
+                workspace_id=workspace_id,
+            )
+            return {
+                "url": None,
+                "error": "Composio circuit breaker is open — service appears"
+                " down. Retrying shortly.",
+            }
 
         try:
             def _auth() -> str | None:
@@ -470,24 +576,38 @@ class ComposioClient:
                 )
 
             url = await asyncio.to_thread(_auth)
+
+            if not url:
+                logger.warning(
+                    "composio_auth_no_redirect_url",
+                    workspace_id=workspace_id,
+                    toolkit=toolkit,
+                )
+                return {
+                    "url": None,
+                    "error": f"Authorization succeeded but no redirect URL returned for {toolkit}",
+                }
+
+            composio_breaker.record_success()
             logger.info(
                 "composio_auth_link_created",
                 workspace_id=workspace_id,
                 toolkit=toolkit,
             )
-            return url
+            return {"url": url, "error": None}
 
         except Exception as e:
+            composio_breaker.record_failure()
             logger.error(
                 "composio_authorize_failed",
                 toolkit=toolkit,
                 error=str(e),
             )
-            return None
+            return {"url": None, "error": f"Authorization failed for {toolkit}: {e}"}
 
     async def get_connected_apps(self, workspace_id: str) -> list[dict[str, Any]]:
         """List connected apps/toolkits for a workspace."""
-        if not self._composio:
+        if not self._ensure_sdk():
             return []
 
         try:
@@ -520,45 +640,46 @@ class ComposioClient:
     async def get_connected_app_names_reliable(self, workspace_id: str) -> list[str]:
         """Get connected app names using multiple detection methods.
 
-        Falls back to session.toolkits(is_connected=True) when the
-        basic check returns suspiciously few results.
+        Always tries both the basic check and the is_connected=True filter
+        to ensure we don't miss any connections.
         """
         names = await self.get_connected_app_names(workspace_id)
 
-        if len(names) < 3:
-            try:
-                def _fetch_connected() -> list[str]:
-                    session = self._get_session_with_recovery(workspace_id)
-                    toolkits = session.toolkits(is_connected=True)
-                    items = getattr(toolkits, "items", [])
-                    found: list[str] = []
-                    for tk in items:
-                        name = getattr(tk, "name", None) or getattr(tk, "slug", None)
-                        if name and name not in found:
-                            found.append(name)
-                    return found
+        try:
+            def _fetch_connected() -> list[str]:
+                session = self._get_session_with_recovery(workspace_id)
+                toolkits = session.toolkits(is_connected=True)
+                items = getattr(toolkits, "items", [])
+                found: list[str] = []
+                for tk in items:
+                    name = getattr(tk, "name", None) or getattr(tk, "slug", None)
+                    if name and name not in found:
+                        found.append(name)
+                return found
 
-                fallback_names = await asyncio.to_thread(_fetch_connected)
-                for n in fallback_names:
-                    if n not in names:
-                        names.append(n)
-            except Exception as e:
-                logger.warning(
-                    "connected_toolkits_fallback_failed", error=str(e),
-                )
+            fallback_names = await asyncio.to_thread(_fetch_connected)
+            for n in fallback_names:
+                if n not in names:
+                    names.append(n)
+        except Exception as e:
+            logger.warning(
+                "connected_toolkits_fallback_failed", error=str(e),
+            )
 
         return names
 
-    def invalidate_cache(self, workspace_id: str | None = None) -> None:
+    async def invalidate_cache(self, workspace_id: str | None = None) -> None:
         """Clear cached sessions and tools for a workspace (or all)."""
-        if workspace_id:
-            self._session_cache.pop(workspace_id, None)
-            self._session_id_cache.pop(workspace_id, None)
-            self._tools_cache.pop(workspace_id, None)
-        else:
-            self._session_cache.clear()
-            self._session_id_cache.clear()
-            self._tools_cache.clear()
+        with self._session_lock:
+            if workspace_id:
+                ws_key = str(workspace_id)
+                self._session_cache.pop(ws_key, None)
+                self._session_id_cache.pop(ws_key, None)
+                self._tools_cache.pop(ws_key, None)
+            else:
+                self._session_cache.clear()
+                self._session_id_cache.clear()
+                self._tools_cache.clear()
 
 
 _client: ComposioClient | None = None
