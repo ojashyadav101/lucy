@@ -196,12 +196,11 @@ def register_handlers(app: AsyncApp) -> None:
                     )
                 else:
                     elapsed = int(time.monotonic() - active.started_at)
-                    from lucy.pipeline.humanize import humanize
-                    msg = await humanize(
-                        f"Let the user know their task is still running "
-                        f"(about {elapsed} seconds in) and you'll post "
-                        f"the results when done.",
-                    )
+                    mins = elapsed // 60
+                    if mins > 0:
+                        msg = f"Still working on this ({mins}m in). I'll post results when done 👍"
+                    else:
+                        msg = f"Still on it ({elapsed}s in), results coming soon 👍"
                     await say(text=msg, thread_ts=thread_ts)
                 return
 
@@ -477,12 +476,10 @@ async def _handle_message(
         workspace_id = str(team_id or enterprise_id or "")
     if not workspace_id:
         logger.error("no_workspace_id", context_keys=list(context.keys()))
-        from lucy.pipeline.humanize import humanize
-        msg = await humanize(
-            "Tell the user you had trouble identifying their workspace "
-            "and ask them to try again."
+        await say(
+            text="Had trouble identifying your workspace. Could you try that again?",
+            thread_ts=thread_ts,
         )
-        await say(text=msg, thread_ts=thread_ts)
         return
     workspace_id = str(workspace_id)
 
@@ -536,12 +533,7 @@ async def _handle_message(
     if is_status_query(text):
         status = await format_task_status(workspace_id)
         if status:
-            from lucy.pipeline.humanize import humanize as _hz
-            msg = await _hz(
-                f"Summarize your current work status for the user. "
-                f"Active tasks: {status}",
-            )
-            await say(text=msg, thread_ts=thread_ts)
+            await say(text=f"Here's what I'm working on:\n{status}", thread_ts=thread_ts)
             return
 
     if is_task_cancellation(text):
@@ -565,13 +557,10 @@ async def _handle_message(
                 thread_ts=effective_thread,
                 workspace_id=workspace_id,
             )
-            from lucy.pipeline.humanize import humanize
-            msg = await humanize(
-                "Let the user know you're still working on their "
-                "previous request in this thread and will get back "
-                "to them shortly. Be warm and brief.",
+            await say(
+                text="Still working on your previous request here. I'll get back to you shortly!",
+                thread_ts=thread_ts,
             )
-            await say(text=msg, thread_ts=thread_ts)
             return
 
     # ── Full agent loop path ──────────────────────────────────────────
@@ -1119,30 +1108,17 @@ async def _handle_connect(
         )
         url = auth_result.get("url")
         if url:
-            from lucy.pipeline.humanize import humanize as _hz
-            msg = await _hz(
-                f"Give the user a connection link for {provider}. "
-                f"The link is: {url} — tell them to click it to "
-                f"authorize, and let you know when done.",
+            await say(
+                text=f"Here's your connection link for *{provider}*: {url}\nClick it to authorize, then let me know when you're done 👍",
             )
-            await say(text=msg)
             await client.invalidate_cache(workspace_id)
         else:
             auth_error = auth_result.get("error", "unknown error")
-            from lucy.pipeline.humanize import humanize as _hz
-            msg = await _hz(
-                f"You couldn't generate a connection link for {provider} "
-                f"({auth_error}). "
-                f"Suggest the user ask you in a regular message instead "
-                f"so you can search for the right integration name.",
+            await say(
+                text=f"Couldn't generate a link for *{provider}* ({auth_error}). Try asking me in a regular message so I can search for the right integration name.",
             )
-            await say(text=msg)
     except Exception as e:
         logger.error("connect_failed", provider=provider, error=str(e))
-        from lucy.pipeline.humanize import humanize as _hz
-        msg = await _hz(
-            f"You had trouble connecting {provider}. Suggest the user "
-            f"ask you directly in a conversation so you can find the "
-            f"right integration.",
+        await say(
+            text=f"Had trouble connecting *{provider}*. Try asking me directly in a conversation and I'll find the right integration for you.",
         )
-        await say(text=msg)

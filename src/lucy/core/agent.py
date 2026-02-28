@@ -2010,12 +2010,10 @@ class LucyAgent:
             if partial:
                 response_text = partial
             else:
-                from lucy.pipeline.humanize import humanize
-                response_text = await humanize(
-                    "You tried multiple approaches but couldn't get the "
-                    "result yet. Don't give up — ask the user one specific "
-                    "clarifying question that would help you try a different "
-                    "angle. Be warm and action-oriented, not apologetic.",
+                response_text = (
+                    "I've tried a few approaches but haven't cracked it yet. "
+                    "Could you give me a bit more detail on what you're looking for? "
+                    "That'll help me take a better angle on this."
                 )
 
         return response_text

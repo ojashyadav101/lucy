@@ -69,12 +69,21 @@ def _load_system_core(*, compact: bool = False) -> str:
     )
 
 
-def _load_prompt_modules(names: list[str]) -> str:
-    """Load and concatenate prompt module files by name."""
+def _load_prompt_modules(names: list[str], *, compact: bool = False) -> str:
+    """Load and concatenate prompt module files by name.
+
+    When *compact* is True, tries ``{name}_compact.md`` first, falling
+    back to ``{name}.md`` if no compact version exists.
+    """
     if not _PROMPT_MODULES_DIR.exists():
         return ""
     parts: list[str] = []
     for name in names:
+        if compact:
+            compact_path = _PROMPT_MODULES_DIR / f"{name}_compact.md"
+            if compact_path.exists():
+                parts.append(compact_path.read_text(encoding="utf-8"))
+                continue
         path = _PROMPT_MODULES_DIR / f"{name}.md"
         if path.exists():
             parts.append(path.read_text(encoding="utf-8"))
@@ -175,7 +184,7 @@ async def build_system_prompt(
         "{available_skills}", skill_descriptions,
     )
 
-    common_modules_text = _load_prompt_modules(_COMMON_MODULES)
+    common_modules_text = _load_prompt_modules(_COMMON_MODULES, compact=compact)
 
     static_parts: list[str] = [soul, system_core_with_skills]
     if common_modules_text:
@@ -258,7 +267,7 @@ async def build_system_prompt(
     dynamic_parts: list[str] = []
 
     if prompt_modules:
-        intent_modules_text = _load_prompt_modules(prompt_modules)
+        intent_modules_text = _load_prompt_modules(prompt_modules, compact=compact)
         if intent_modules_text:
             dynamic_parts.append(intent_modules_text)
 
