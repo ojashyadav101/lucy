@@ -1102,7 +1102,6 @@ class LucyAgent:
                 if len(fact) > 500:
                     fact = fact[:500] + "..."
 
-                should_store = True
                 if target in ("company", "team"):
                     warning = await check_fact_contradictions(
                         ws, fact, target,
@@ -1115,26 +1114,21 @@ class LucyAgent:
                             target=target,
                             workspace_id=ctx.workspace_id,
                         )
-                        should_store = False
 
-                if should_store:
-                    tag = " [user-stated, unverified]"
-                    tagged_fact = fact + tag
-
-                    if target == "company":
-                        await append_to_company_knowledge(ws, tagged_fact)
-                    elif target == "team":
-                        await append_to_team_knowledge(ws, tagged_fact)
-                    else:
-                        await add_session_fact(
-                            ws, tagged_fact, source="conversation",
-                            category=target, thread_ts=ctx.thread_ts,
-                        )
-                    logger.debug(
-                        "memory_persisted",
-                        target=target,
-                        workspace_id=ctx.workspace_id,
+                if target == "company":
+                    await append_to_company_knowledge(ws, fact)
+                elif target == "team":
+                    await append_to_team_knowledge(ws, fact)
+                else:
+                    await add_session_fact(
+                        ws, fact, source="conversation", category=target,
+                        thread_ts=ctx.thread_ts,
                     )
+                logger.debug(
+                    "memory_persisted",
+                    target=target,
+                    workspace_id=ctx.workspace_id,
+                )
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
 
@@ -2296,7 +2290,6 @@ class LucyAgent:
                 result = _validate_connection_relevance(
                     result, toolkits_requested, trace.user_message,
                 )
-                result = _inject_custom_wrappers_into_connections(result)
 
             # Annotate unresolved services for the LLM to surface
             if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
@@ -2319,6 +2312,21 @@ class LucyAgent:
                             "names. That is the ONLY correct next step."
                         ),
                     }
+
+            # Start connection watchers for any pending auth URLs
+            if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
+                has_pending = self._maybe_start_connection_watchers(
+                    result, params, ctx, trace, slack_client,
+                )
+                if has_pending:
+                    result["_auto_detection_note"] = (
+                        "A background watcher is monitoring this connection. "
+                        "When the user completes the OAuth flow, Lucy will "
+                        "automatically detect it and resume work. Tell the "
+                        "user: 'I'll automatically detect when you've "
+                        "connected and pick up right where I left off.' "
+                        "Do NOT tell them to say 'done' or come back later."
+                    )
 
             trace.tool_calls_made.append(name)
             return call_id, self._serialize_result(result)
@@ -2368,6 +2376,94 @@ class LucyAgent:
         except Exception as e:
             logger.error("meta_tools_fetch_failed", error=str(e))
             return []
+
+    def _maybe_start_connection_watchers(
+        self,
+        result: dict[str, Any],
+        params: dict[str, Any],
+        ctx: AgentContext,
+        trace: Trace,
+        slack_client: Any | None,
+    ) -> bool:
+        """Detect auth URLs in COMPOSIO_MANAGE_CONNECTIONS results and start
+        background watchers that poll until the user completes OAuth.
+
+        Returns True if at least one watcher was started.
+        """
+        data = result.get("data", result)
+        if not isinstance(data, dict):
+            return False
+
+        results_map = data.get("results", {})
+        if not isinstance(results_map, dict):
+            return False
+
+        from lucy.integrations.composio_client import ComposioClient
+        from lucy.integrations.connection_watcher import (
+            PendingConnection,
+            get_entity_ids_for_workspace,
+            start_watching,
+        )
+
+        entity_ids = get_entity_ids_for_workspace(ctx.workspace_id)
+        started_any = False
+
+        for toolkit_key, info in results_map.items():
+            if not isinstance(info, dict):
+                continue
+            auth_url = (
+                info.get("auth_url")
+                or info.get("redirect_url")
+                or info.get("redirectUrl")
+                or info.get("url")
+            )
+            status = str(info.get("status", "")).lower()
+            if not auth_url or status == "connected":
+                continue
+
+            slug = str(info.get("toolkit_slug") or toolkit_key).lower()
+            display = ComposioClient._SLUG_DISPLAY_NAMES.get(
+                slug, slug.replace("_", " ").title(),
+            )
+
+            pending = PendingConnection(
+                workspace_id=ctx.workspace_id,
+                toolkit_slug=slug,
+                display_name=display,
+                channel_id=ctx.channel_id or "",
+                thread_ts=ctx.thread_ts or "",
+                original_request=trace.user_message or "",
+                entity_ids=entity_ids,
+            )
+
+            did_start = start_watching(
+                pending,
+                say_fn=self._make_say_fn(ctx, slack_client),
+                slack_client=slack_client,
+            )
+            if did_start:
+                started_any = True
+
+        return started_any
+
+    def _make_say_fn(
+        self, ctx: AgentContext, slack_client: Any | None,
+    ) -> Any:
+        """Create a say function that posts to the right channel/thread."""
+        async def _say(
+            text: str,
+            thread_ts: str | None = None,
+            **kwargs: Any,
+        ) -> None:
+            if not slack_client or not ctx.channel_id:
+                return
+            await slack_client.chat_postMessage(
+                channel=ctx.channel_id,
+                text=text,
+                thread_ts=thread_ts or ctx.thread_ts,
+                **kwargs,
+            )
+        return _say
 
     async def _get_connected_services(
         self, workspace_id: str
@@ -3796,69 +3892,6 @@ def _validate_connection_relevance(
             + " If the correct service is not available, acknowledge "
             "honestly and offer to build a custom integration."
         )
-
-    return result
-
-
-def _inject_custom_wrappers_into_connections(
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    """Inject custom wrapper integrations into COMPOSIO_MANAGE_CONNECTIONS results.
-
-    Composio only knows about OAuth-managed connections (Gmail, GitHub, etc.).
-    Custom wrappers (Polar.sh, Clerk) are managed separately and won't appear
-    in Composio's response. This function appends them so the LLM sees the
-    full picture when listing integrations.
-    """
-    try:
-        import json
-        from pathlib import Path
-
-        from lucy.config import settings
-        from lucy.integrations.wrapper_generator import discover_saved_wrappers
-
-        wrappers = discover_saved_wrappers()
-        if not wrappers:
-            return result
-
-        keys_path = Path(settings.workspace_root).parent / "keys.json"
-        keys_data: dict[str, Any] = {}
-        if keys_path.exists():
-            try:
-                keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-
-        custom_connections: list[dict[str, str]] = []
-        for w in wrappers:
-            slug = w.get("slug", "")
-            service = w.get("service_name", slug)
-            n_tools = w.get("total_tools", 0)
-            ci_keys = keys_data.get("custom_integrations", {}).get(slug, {})
-            has_key = bool(ci_keys.get("api_key"))
-
-            if has_key:
-                custom_connections.append({
-                    "app": service,
-                    "status": "active",
-                    "type": "custom_integration",
-                    "tools_available": str(n_tools),
-                    "note": f"Use lucy_custom_{slug}_* tools (NOT Composio tools)",
-                })
-
-        if custom_connections:
-            result["_custom_integrations"] = custom_connections
-            existing_note = result.get("_custom_integration_note", "")
-            svc_names = ", ".join(c["app"] for c in custom_connections)
-            result["_custom_integration_note"] = (
-                f"IMPORTANT: In addition to the Composio connections above, "
-                f"you also have these custom-built integrations that are "
-                f"ACTIVE and READY: {svc_names}. Include them when listing "
-                f"connected integrations. Use lucy_custom_* tools for these, "
-                f"not Composio tools."
-            )
-    except Exception as e:
-        logger.warning("custom_wrapper_injection_failed", error=str(e))
 
     return result
 
