@@ -365,9 +365,12 @@ Output ONLY the acknowledgment text. Nothing else."""
 
 _SKIP_ACK_INTENTS = frozenset({"greeting", "conversational", "lookup"})
 
+# Only acknowledge genuinely long-running tasks.
+# Simple data/tool_use queries (~15-20s) should NOT get an ack —
+# the double-message pattern ("Coming right up!" then real answer)
+# is worse UX than just waiting for a single good response.
 _FAST_ACK_INTENTS = frozenset({
-    "code", "code_reasoning", "data", "document", "research",
-    "monitoring", "tool_use",
+    "code", "code_reasoning", "document", "research",
 })
 
 
