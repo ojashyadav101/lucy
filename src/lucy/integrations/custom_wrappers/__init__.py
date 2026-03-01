@@ -185,7 +185,7 @@ def detect_relevant_wrappers(message: str) -> list[str]:
 # ─── Wrapper Loading with Validation Gate ───────────────────────────────────
 
 
-def load_custom_wrapper_tools() -> list[dict[str, Any]]:
+def load_custom_wrapper_tools(relevant_slugs: list[str] | None = None) -> list[dict[str, Any]]:
     """Scan all custom wrapper directories, validate, and return tool defs.
 
     Each wrapper must have:
@@ -210,6 +210,11 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
         return tool_defs
 
     for meta_path in _WRAPPERS_DIR.glob("*/meta.json"):
+        # Filter by relevant_slugs if provided
+        if relevant_slugs is not None:
+            dir_slug = meta_path.parent.name
+            if dir_slug not in relevant_slugs:
+                continue
         slug_dir = meta_path.parent
         wrapper_path = slug_dir / "wrapper.py"
 
@@ -446,6 +451,11 @@ def detect_relevant_wrappers(
         return []
 
     for meta_path in _WRAPPERS_DIR.glob("*/meta.json"):
+        # Filter by relevant_slugs if provided
+        if relevant_slugs is not None:
+            dir_slug = meta_path.parent.name
+            if dir_slug not in relevant_slugs:
+                continue
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
