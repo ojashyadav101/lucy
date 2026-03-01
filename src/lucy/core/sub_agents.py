@@ -224,7 +224,11 @@ async def _execute_subagent_tool(
         else:
             from lucy.core.agent import get_agent
             agent = get_agent()
-            result = await agent._execute_tool(name, params, workspace_id)
+            # Sub-agents are restricted to READ tools by gate enforcement.
+            # _gate_authorized=False ensures WRITE/DESTRUCTIVE tools are blocked.
+            result = await agent._execute_tool(
+                name, params, workspace_id, _gate_authorized=False,
+            )
 
         if isinstance(result, dict):
             return json.dumps(result, ensure_ascii=False, default=str)

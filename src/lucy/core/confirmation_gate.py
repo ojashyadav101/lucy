@@ -17,7 +17,12 @@ inner actions to determine the aggregate risk level.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import re
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -323,3 +328,114 @@ def _summarize_params(tool_name: str, params: dict[str, Any]) -> str:
     if parts:
         return "Details:\n" + "\n".join(f"  • {p}" for p in parts)
     return ""
+
+
+# ── V2: Infrastructure-Level Enforcement ─────────────────────────────
+
+_GATE_SECRET = os.urandom(32)
+
+
+def _stable_param_hash(params: dict[str, Any]) -> str:
+    serialized = json.dumps(params, sort_keys=True, default=str, ensure_ascii=True)
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+def create_safety_token(
+    action_id: str, tool_name: str, parameters: dict[str, Any],
+) -> str:
+    msg = f"{action_id}:{tool_name}:{_stable_param_hash(parameters)}"
+    return hmac.new(_GATE_SECRET, msg.encode(), hashlib.sha256).hexdigest()
+
+
+def verify_safety_token(
+    token: str, action_id: str, tool_name: str, parameters: dict[str, Any],
+) -> bool:
+    expected = create_safety_token(action_id, tool_name, parameters)
+    return hmac.compare_digest(token, expected)
+
+
+@dataclass
+class PostApprovalSafetyCheck:
+    is_adversarial: bool = False
+    is_prompt_injection: bool = False
+    safe_to_send: bool = True
+
+    @property
+    def approved(self) -> bool:
+        return not self.is_adversarial and not self.is_prompt_injection and self.safe_to_send
+
+    def rejection_reason(self) -> str | None:
+        if self.is_adversarial:
+            return "Adversarial content detected in parameters"
+        if self.is_prompt_injection:
+            return "Prompt injection markers detected"
+        if not self.safe_to_send:
+            return "Action flagged as unsafe to execute"
+        return None
+
+
+_INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(previous|prior|above)\s+instructions", re.I),
+    re.compile(r"disregard\s+(all|previous|prior)", re.I),
+    re.compile(r"system\s*prompt", re.I),
+    re.compile(r"you\s+are\s+now\s+", re.I),
+]
+
+_ADVERSARIAL_PATTERNS = [
+    re.compile(r"send\s+(your|the)\s+(password|secret|key|token)", re.I),
+    re.compile(r"transfer\s+.*\s+(funds|money|crypto)", re.I),
+]
+
+_CONTENT_PARAM_KEYS = frozenset({
+    "body", "text", "content", "message", "description",
+    "subject", "html_body", "note", "comment",
+})
+
+
+def evaluate_post_approval_safety(
+    tool_name: str,
+    parameters: dict[str, Any],
+    description: str = "",
+) -> PostApprovalSafetyCheck:
+    check = PostApprovalSafetyCheck()
+    all_text = json.dumps(parameters, default=str)
+
+    for pattern in _INJECTION_PATTERNS:
+        if pattern.search(all_text):
+            check.is_prompt_injection = True
+            check.safe_to_send = False
+            break
+
+    content_text = " ".join(
+        str(v) for k, v in parameters.items()
+        if k.lower() in _CONTENT_PARAM_KEYS
+    )
+    if content_text:
+        for pattern in _ADVERSARIAL_PATTERNS:
+            if pattern.search(content_text):
+                check.is_adversarial = True
+                check.safe_to_send = False
+                break
+
+    return check
+
+
+class GateBypassed(Exception):
+    def __init__(self, tool_name: str, action_type: ActionType):
+        self.tool_name = tool_name
+        self.action_type = action_type
+        super().__init__(
+            f"Gate bypass blocked: {tool_name} ({action_type.value}) "
+            f"reached execution without gate authorization"
+        )
+
+
+def enforce_gate(tool_name: str, *, gate_authorized: bool) -> None:
+    if gate_authorized:
+        return
+    if tool_name in _GATE_EXEMPT or tool_name in _IMPLICIT_CONSENT_TOOLS:
+        return
+    action_type = classify(tool_name)
+    if action_type == ActionType.READ:
+        return
+    raise GateBypassed(tool_name, action_type)

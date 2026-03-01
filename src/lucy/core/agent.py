@@ -2711,6 +2711,7 @@ class LucyAgent:
             async with trace.span(f"tool_exec_{name}", tool=name):
                 result = await self._execute_tool(
                     name, params, ctx.workspace_id, ctx=ctx,
+                    _gate_authorized=True,  # gate already checked above
                 )
 
             if name == "COMPOSIO_SEARCH_TOOLS":
@@ -2995,12 +2996,34 @@ class LucyAgent:
         parameters: dict[str, Any],
         workspace_id: str,
         ctx: AgentContext | None = None,
+        *,
+        _gate_authorized: bool = False,
     ) -> dict[str, Any]:
         """Execute a single tool call with per-tool timeout and circuit breaker.
 
         Internal tools (lucy_*) are handled locally.
         Everything else routes through Composio.
         """
+        # ── Infrastructure-level gate enforcement ──
+        # Every tool call passes through here. WRITE/DESTRUCTIVE tools
+        # MUST have _gate_authorized=True (set after confirmation gate).
+        try:
+            from lucy.core.confirmation_gate import enforce_gate, GateBypassed
+            enforce_gate(tool_name, gate_authorized=_gate_authorized)
+        except GateBypassed as exc:
+            logger.error(
+                "gate_bypass_blocked",
+                tool=tool_name,
+                action_type=exc.action_type.value,
+            )
+            return {
+                "error": (
+                    f"Safety gate blocked unauthorized execution of {tool_name}. "
+                    f"This action requires user approval first."
+                ),
+                "_gate_bypass": True,
+            }
+
         # ── Circuit breaker: skip tools that have repeatedly failed ──
         failure_count = LucyAgent._tool_failure_counts.get(tool_name, 0)
         if failure_count >= LucyAgent._CIRCUIT_OPEN_THRESHOLD:

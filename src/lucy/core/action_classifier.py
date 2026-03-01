@@ -112,6 +112,18 @@ _INTERNAL_READ_TOOLS: frozenset[str] = frozenset({
     "lucy_web_search",
     "lucy_read_file",
     "lucy_list_files",
+    "lucy_read_emails",
+    "lucy_search_emails",
+    "lucy_get_email_thread",
+    "lucy_workspace_read",
+    "lucy_workspace_list",
+    "lucy_workspace_search",
+    "lucy_spaces_list",
+    "lucy_spaces_status",
+    "lucy_browse_url",
+    "lucy_browser_snapshot",
+    "lucy_list_services",
+    "lucy_service_logs",
     # Composio meta-tools (discovery, not execution)
     "COMPOSIO_SEARCH_TOOLS",
     "COMPOSIO_GET_TOOL_SCHEMAS",
@@ -128,11 +140,24 @@ _INTERNAL_WRITE_TOOLS: frozenset[str] = frozenset({
     "lucy_store_api_key",
     "lucy_resolve_custom_integration",
     "lucy_spaces_deploy",
+    "lucy_spaces_init",
     "lucy_generate_pdf",
     "lucy_generate_excel",
+    "lucy_generate_csv",
     "lucy_generate_docx",
     "lucy_generate_pptx",
     "lucy_generate_image",
+    "lucy_generate_chart",
+    "lucy_workspace_write",
+    "lucy_manage_skill",
+    "lucy_browser_interact",
+    "lucy_browser_close",
+    "lucy_start_service",
+    "lucy_stop_service",
+    "lucy_execute_python",
+    "lucy_execute_js",
+    "lucy_execute_bash",
+    "lucy_run_script",
 })
 
 # Internal tools that are DESTRUCTIVE
@@ -141,6 +166,8 @@ _INTERNAL_DESTRUCTIVE_TOOLS: frozenset[str] = frozenset({
     "lucy_delete_heartbeat",
     "lucy_delete_custom_integration",
     "lucy_send_email",
+    "lucy_reply_to_email",
+    "lucy_spaces_delete",
 })
 
 

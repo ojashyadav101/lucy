@@ -27,6 +27,7 @@ logger = structlog.get_logger()
 PENDING_TTL_SECONDS = 300.0
 
 _pending_actions: dict[str, dict[str, Any]] = {}
+_safety_tokens: dict[str, str] = {}  # action_id -> HMAC token
 
 
 def _hitl_store_path(workspace_id: str) -> Path:
@@ -112,6 +113,14 @@ def create_pending_action(
     _pending_actions[action_id] = action
     _persist_action(workspace_id, action_id, action)
 
+    # Create HMAC safety token binding action_id to tool + params
+    try:
+        from lucy.core.confirmation_gate import create_safety_token
+        token = create_safety_token(action_id, tool_name, parameters)
+        _safety_tokens[action_id] = token
+    except Exception:
+        logger.warning("hitl_safety_token_creation_failed", action_id=action_id)
+
     _cleanup_expired()
 
     logger.info(
@@ -163,9 +172,30 @@ async def resolve_pending_action(
         _remove_persisted_action(workspace_id, action_id)
 
     if approved:
+        # Verify HMAC safety token to detect tampering
+        stored_token = _safety_tokens.pop(action_id, None)
+        if stored_token:
+            try:
+                from lucy.core.confirmation_gate import verify_safety_token
+                tool_name = action.get("tool_name", "")
+                parameters = action.get("parameters", {})
+                if not verify_safety_token(stored_token, action_id, tool_name, parameters):
+                    logger.error(
+                        "hitl_safety_token_mismatch",
+                        action_id=action_id,
+                        tool=tool_name,
+                    )
+                    return None  # Reject tampered action
+            except Exception:
+                logger.warning("hitl_safety_token_verify_failed", action_id=action_id)
+        else:
+            # No token stored (pre-v2 action or post-restart) — allow with warning
+            logger.warning("hitl_no_safety_token", action_id=action_id)
+
         logger.info("hitl_action_approved", action_id=action_id)
         return action
 
+    _safety_tokens.pop(action_id, None)  # Clean up on cancel
     logger.info("hitl_action_cancelled", action_id=action_id)
     return None
 

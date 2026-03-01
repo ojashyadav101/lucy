@@ -1225,9 +1225,40 @@ async def _execute_approved_action(
     client: Any,
     context: AsyncBoltContext,
 ) -> None:
-    """Execute a human-approved action through the agent."""
+    """Execute a human-approved action atomically.
+
+    Unlike the previous version which re-ran the full agent loop via
+    agent.run(), this executes the stored tool call DIRECTLY with the
+    stored parameters. This matches Viktor's submit_draft pattern:
+    - Atomic execution (no re-planning, no prompt injection window)
+    - Post-approval safety check before execution
+    - _gate_authorized=True since user explicitly approved
+    """
+    import json as _json
     tool_name = action_data.get("tool_name", "unknown")
+    parameters = action_data.get("parameters", {})
+
     try:
+        # ── Post-approval safety check ──
+        from lucy.core.confirmation_gate import evaluate_post_approval_safety
+        safety = evaluate_post_approval_safety(
+            tool_name, parameters,
+            description=action_data.get("description", ""),
+        )
+        if not safety.approved:
+            reason = safety.rejection_reason() or "Unknown safety concern"
+            logger.warning(
+                "post_approval_safety_blocked",
+                tool=tool_name,
+                reason=reason,
+            )
+            await say(
+                text=f"⚠️ Safety check blocked execution of '{tool_name}': {reason}",
+                thread_ts=thread_ts,
+            )
+            return
+
+        # ── Atomic execution — directly call _execute_tool ──
         from lucy.core.agent import AgentContext, get_agent
 
         agent = get_agent()
@@ -1236,22 +1267,32 @@ async def _execute_approved_action(
             channel_id=channel_id,
             thread_ts=thread_ts,
         )
-        instruction = (
-            f"The user has approved the following action. Execute it now:\n"
-            f"{action_data.get('description', '')}\n"
-            f"Tool: {tool_name}\n"
-            f"Parameters: {action_data.get('parameters', {})}"
-        )
-        response = await asyncio.wait_for(
-            agent.run(message=instruction, ctx=ctx, slack_client=client),
+        result = await asyncio.wait_for(
+            agent._execute_tool(
+                tool_name, parameters, workspace_id, ctx=ctx,
+                _gate_authorized=True,  # user approved
+            ),
             timeout=APPROVED_ACTION_TIMEOUT,
         )
 
-        from lucy.pipeline.output import process_output
-        output = await process_output(response)
-        if not output or not output.strip():
-            output = "The action completed but produced no visible output."
-        await say(text=output, thread_ts=thread_ts)
+        # ── Format result for user ──
+        if isinstance(result, dict) and result.get("error"):
+            await say(
+                text=f"⚠️ The action '{tool_name}' encountered an error: "
+                f"{result['error']}",
+                thread_ts=thread_ts,
+            )
+        else:
+            result_str = _json.dumps(result, default=str, ensure_ascii=False) \
+                if isinstance(result, dict) else str(result)
+            if len(result_str) > 2000:
+                result_str = result_str[:2000] + "..."
+            desc = action_data.get("description", tool_name)
+            await say(
+                text=f"✅ *{desc}* — completed successfully."
+                + (f"\n```{result_str}```" if result_str.strip() else ""),
+                thread_ts=thread_ts,
+            )
 
     except asyncio.TimeoutError:
         logger.error(
