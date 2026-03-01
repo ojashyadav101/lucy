@@ -401,16 +401,15 @@ def _align_cell(cell: str, width: int) -> str:
 # Patterns that match standalone filler openers (first sentence only).
 # These are "content-free" — removing them never loses information.
 _NARRATION_OPENERS: list[re.Pattern[str]] = [
-    # Exclamatory filler: "Great question! " / "Awesome! " / "Ooh, "
+    # Exclamatory filler — ONLY strip pure filler with no content
+    # NOTE: "Great question!" and warm openers are PRESERVED (Sprint 3)
     re.compile(
-        r"^(?:Great|Awesome|Amazing|Wonderful|Fantastic|Excellent|Perfect|Lovely|Nice|Ooh|Oh|Okay|Alright|Sure|Absolutely|Certainly|Definitely|Of course)[!,.]?\s*",
+        r"^(?:Ooh|Oh|Okay|Alright)[!,.]?\s+(?!.*(?:here|this|the|so|let|you|it|we|that))",
         re.IGNORECASE,
     ),
-    # Sycophantic openers: "That's exciting! " / "That's a great question! "
-    re.compile(
-        r"^(?:That's|This is|What an?|How) (?:a |an )?(?:exciting|great|excellent|wonderful|fantastic|interesting|insightful|fun|cool|neat|good|really good|thoughtful|intriguing)(?:\s+(?:question|topic|idea|request|one|ask|thought|thing|project))?[!.,]?\s*",
-        re.IGNORECASE,
-    ),
+    # NOTE: Warm acknowledgments like "That's a great question!" are
+    # now PRESERVED (Sprint 3). Only strip pure meta-narration.
+    # re.compile(r"... sycophantic ..."),  # DISABLED — preserves warmth
     # Promise-then-nothing: "I'll whip up..." / "Let me map out..." / "I'll put together..."
     # Only strip when the sentence ends with "..." or "!" (no real content follows in that sentence)
     re.compile(
@@ -760,16 +759,10 @@ _REGEX_DEAI_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\s*(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)[!.]?\s*", re.IGNORECASE), " "),
     (re.compile(r"\s*Happy to (?:help|assist|answer|elaborate)(?:\s+(?:with that|with this|further))?[!.]?\s*", re.IGNORECASE), " "),
 
-    # Sycophantic openers
-    (re.compile(
-        r"^(?:Absolutely|Certainly|Of course|Sure thing)[!.,]?\s*",
-        re.IGNORECASE | re.MULTILINE,
-    ), ""),
-    (re.compile(
-        r"(?:(?:That's|This is|What) an? )?(?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "
-        r"(?:question|point|observation|thought|idea)[!.,]?\s*",
-        re.IGNORECASE,
-    ), ""),
+    # NOTE: Warm openers preserved (Sprint 3)
+    # Only strip robotic patterns, not warm conversational ones
+    # NOTE: "Great question!" etc. preserved (Sprint 3)
+    # (re.compile(r"great question..."), ""),  # DISABLED
 
     # Lucy-specific labels
     (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), ""),
@@ -807,10 +800,10 @@ Notably, Nevertheless, In light of, With regard to, In terms of
 - Hedging: generally speaking, it's worth noting, it's important to note, \
 more often than not, at the end of the day, all things considered, that being \
 said, having said that, needless to say
-- Sycophancy: "Great question!", "Absolutely!", "Certainly!", "Happy to help!", \
-"Hope this helps!", "Feel free to ask!"
-- Chatbot closers: "Let me know if you need anything else", "Don't hesitate \
-to reach out"
+- Remove ONLY excessive sycophancy (multiple compliments in a row). \
+A single warm opener like "Great question!" or "Good one!" is FINE and should be KEPT.
+- Chatbot closers: "Don't hesitate to reach out", "I'm always here to help" \
+(but "Let me know if you want to dig deeper!" or "Want me to expand on any part?" is FINE)
 - Listicle openers: "Here are 5 key things...", "Let's dive in", "Without \
 further ado", "Let me break this down"
 - Uniform sentence length: mix short and long, punch up the rhythm
