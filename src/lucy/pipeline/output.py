@@ -7,6 +7,7 @@ Layer 0.5: Fact verifier - corrects hallucinated dates, validates URLs,
            flags stale version/pricing claims (fact_verifier.py) [W7-TRUTH]
 Layer 1:   Sanitizer - strips paths, tool names, internal references
 Layer 2:   Format converter - transforms Markdown to Slack mrkdwn
+Layer 2.5: Proactive endings - auto-CTA appender & related topic suggestions
 Layer 3:   Tone validator - catches robotic/error-dump patterns
 Layer 4:   De-AI engine - detects and strips AI-generated tells via regex
 
@@ -836,6 +837,168 @@ async def _deai(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# LAYER 2.5: PROACTIVE ENDINGS — AUTO-CTA & RELATED SUGGESTIONS
+# ═══════════════════════════════════════════════════════════════════════
+
+# Patterns that detect an existing call-to-action in the response tail.
+# Only matches CTAs that survive de-AI (excludes generic closers like
+# "Happy to help!" which get stripped in Layer 4).
+_HAS_CTA_RE = re.compile(
+    r"(?:want me to|would you like|shall I|should I|"
+    r"I can also|I could also|like me to|"
+    r"want to explore|just say the word|if you'd like|if you want me|"
+    r"need (?:any )?help with|dive deeper|dig deeper|"
+    r"let me know (?:if|what|which|when|how))",
+    re.IGNORECASE,
+)
+
+# ── Question type detection (simplified from router.py) ──────────────
+
+_Q_COMPARISON_RE = re.compile(
+    r"(?:vs\.?\s|versus|compare|differences?\s+between|better\s+(?:than|between)|"
+    r"pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?|"
+    r"which\s+(?:is|one|should))",
+    re.IGNORECASE,
+)
+_Q_HOWTO_RE = re.compile(
+    r"(?:how\s+(?:to|do\s+(?:I|you|we))|set\s+up|configure|implement|"
+    r"guide\s+me|steps?\s+(?:to|for)|get\s+started)",
+    re.IGNORECASE,
+)
+_Q_CODE_RE = re.compile(
+    r"(?:\bcode\b|\bscript\b|\bfunction\b|\bdebug\b|\bdeploy\b|\bregex\b|"
+    r"api\s+endpoint|dockerfile|ci/?cd|refactor|"
+    r"create\s+a\s+(?:app|program)|\blambda\b)",
+    re.IGNORECASE,
+)
+_Q_CREATIVE_RE = re.compile(
+    r"(?:^|\b)(?:write|draft|compose|rewrite|edit|proofread)\s+"
+    r"(?:me\s+|us\s+)?(?:a\s+|an\s+|the\s+|some\s+)?"
+    r"(?:email|message|announcement|newsletter|blog|post|"
+    r"description|pitch|proposal|tagline|headline|copy|letter|memo)",
+    re.IGNORECASE,
+)
+_Q_KNOWLEDGE_RE = re.compile(
+    r"(?:what\s+(?:is|are)\s|explain\s|how\s+does\s|tell\s+me\s+about\s|"
+    r"overview\s+of\s|walk\s+me\s+through\s|describe\s|teach\s+me)",
+    re.IGNORECASE,
+)
+
+# Context-aware CTAs by question type
+_CTA_MAP: dict[str, str] = {
+    "knowledge": "\n\nWant me to dive deeper into any of these, or explore a specific use case?",
+    "comparison": "\n\nWant me to go deeper on any of these, or help you evaluate for your specific situation?",
+    "howto": "\n\nWant me to walk through any of these steps in more detail, or help you set it up?",
+    "creative": "\n\nWant me to adjust the tone, add more detail, or create a variation?",
+    "code": "\n\nWant me to explain any part of this, or help you adapt it for your setup?",
+    "default": "\n\nLet me know if you'd like me to dig deeper into any of this!",
+}
+
+# ── Related-topic suggestions (knowledge/comparison only) ────────────
+# Maps topic keywords to one-sentence related exploration prompt.
+# Conservative: only fires when a clear topic cluster is detected.
+
+_RELATED_TOPICS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b(?:database|sql|postgres|mysql|mongo|dynamo|supabase)\b", re.IGNORECASE),
+     "how caching layers like Redis interact with your DB setup"),
+    (re.compile(r"\b(?:api|rest|graphql|grpc|endpoint)\b", re.IGNORECASE),
+     "authentication patterns and rate limiting strategies"),
+    (re.compile(r"\b(?:ci/?cd|pipeline|github\s+actions?|jenkins|deployment)\b", re.IGNORECASE),
+     "rollback strategies and canary deployments"),
+    (re.compile(r"\b(?:docker|container|kubernetes|k8s)\b", re.IGNORECASE),
+     "orchestration trade-offs between Docker Compose, ECS, and K8s"),
+    (re.compile(r"\b(?:react|next\.?js|vue|angular|svelte|frontend)\b", re.IGNORECASE),
+     "server-side rendering vs. static generation trade-offs"),
+    (re.compile(r"\b(?:aws|gcp|azure|cloud|serverless)\b", re.IGNORECASE),
+     "cloud cost optimization and multi-region architecture"),
+    (re.compile(r"\b(?:auth|oauth|jwt|session|login|sso)\b", re.IGNORECASE),
+     "token refresh strategies and session management best practices"),
+    (re.compile(r"\b(?:testing|unit\s+test|e2e|integration\s+test|jest|pytest)\b", re.IGNORECASE),
+     "test coverage strategies and when to use mocks vs. integration tests"),
+    (re.compile(r"\b(?:typescript|python|rust|go(?:lang)?|java|node)\b", re.IGNORECASE),
+     "project structure patterns and dependency management for your stack"),
+    (re.compile(r"\b(?:security|encryption|https|ssl|vulnerability)\b", re.IGNORECASE),
+     "compliance frameworks and security audit checklists"),
+    (re.compile(r"\b(?:microservice|monolith|architecture|system\s+design)\b", re.IGNORECASE),
+     "service communication patterns and data consistency strategies"),
+    (re.compile(r"\b(?:git|branch|merge|rebase|version\s+control)\b", re.IGNORECASE),
+     "branching strategies like trunk-based development vs. GitFlow"),
+    (re.compile(r"\b(?:ai|ml|machine\s+learning|llm|gpt|model)\b", re.IGNORECASE),
+     "prompt engineering patterns and model evaluation strategies"),
+    (re.compile(r"\b(?:monitoring|logging|observability|metrics|alert)\b", re.IGNORECASE),
+     "the three pillars of observability: logs, metrics, and traces"),
+    (re.compile(r"\b(?:startup|saas|pricing|business\s+model|revenue)\b", re.IGNORECASE),
+     "pricing psychology and how to structure tier-based plans"),
+    (re.compile(r"\b(?:seo|marketing|growth|conversion|analytics)\b", re.IGNORECASE),
+     "content strategy and technical SEO fundamentals"),
+    (re.compile(r"\b(?:performance|optimization|speed|latency|caching)\b", re.IGNORECASE),
+     "profiling tools and the most common performance bottlenecks"),
+]
+
+
+def _classify_question_type(question: str) -> str:
+    """Classify a user question into a type for CTA selection."""
+    if not question:
+        return "default"
+    # Order matters: more specific patterns first
+    if _Q_COMPARISON_RE.search(question):
+        return "comparison"
+    if _Q_HOWTO_RE.search(question):
+        return "howto"
+    if _Q_CODE_RE.search(question):
+        return "code"
+    if _Q_CREATIVE_RE.search(question):
+        return "creative"
+    if _Q_KNOWLEDGE_RE.search(question):
+        return "knowledge"
+    return "default"
+
+
+def _find_related_topic(question: str) -> str | None:
+    """Find a related topic suggestion based on question keywords.
+
+    Returns a one-sentence suggestion or None if no confident match.
+    Only used for knowledge/comparison questions.
+    """
+    for pattern, suggestion in _RELATED_TOPICS:
+        if pattern.search(question):
+            return suggestion
+    return None
+
+
+def _ensure_actionable_ending(text: str, question: str = "") -> str:
+    """Append a contextual CTA if the response is substantive but trails off.
+
+    Triggered when:
+    - Response is >150 words (substantive, not greetings/quick answers)
+    - No existing CTA detected in the last 300 chars of the response
+
+    For knowledge/comparison questions, also adds a one-line related
+    topic suggestion when a confident topic match is found.
+    """
+    word_count = len(text.split())
+    if word_count <= 150:
+        return text
+
+    # Check the tail of the response for existing CTAs
+    tail = text[-300:] if len(text) > 300 else text
+    if _HAS_CTA_RE.search(tail):
+        return text
+
+    q_type = _classify_question_type(question)
+    cta = _CTA_MAP.get(q_type, _CTA_MAP["default"])
+    text = text.rstrip() + cta
+
+    # For knowledge/comparison: optionally add a related topic hint
+    if q_type in ("knowledge", "comparison") and question:
+        related = _find_related_topic(question)
+        if related:
+            text += f"\n💡 *Related*: You might also want to explore {related}."
+
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -864,7 +1027,7 @@ def _verify_facts_sync(text: str) -> str:
         return text
 
 
-async def process_output(text: str | None) -> str:
+async def process_output(text: str | None, question: str = "") -> str:
     """Run all output layers on a message before posting to Slack.
 
     Pipeline order:
@@ -872,6 +1035,7 @@ async def process_output(text: str | None) -> str:
       Layer 0.5: Fact verification — correct dates, validate URLs, flag stale claims
       Layer 1:   Sanitize paths, tool names, internal references
       Layer 2:   Convert Markdown to Slack mrkdwn
+      Layer 2.5: Proactive endings — auto-CTA & related topic suggestions
       Layer 3:   Validate tone (catch robotic patterns)
       Layer 4:   De-AI engine (regex pass, LLM rewrite disabled)
 
@@ -897,6 +1061,7 @@ async def process_output(text: str | None) -> str:
     text = _sanitize(text)
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
+    text = _ensure_actionable_ending(text, question)
     text = _validate_tone(text)
     text = await _deai(text)
 
@@ -907,7 +1072,7 @@ async def process_output(text: str | None) -> str:
     return text.strip()
 
 
-def process_output_sync(text: str | None) -> str:
+def process_output_sync(text: str | None, question: str = "") -> str:
     """Synchronous fallback for contexts where async isn't available.
 
     Runs the full pipeline except the LLM rewrite tier. Uses regex-only
@@ -930,6 +1095,7 @@ def process_output_sync(text: str | None) -> str:
     text = _sanitize(text)
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
+    text = _ensure_actionable_ending(text, question)
     text = _validate_tone(text)
     text = _regex_deai(text)
 
