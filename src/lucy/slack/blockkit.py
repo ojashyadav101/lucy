@@ -36,11 +36,12 @@ _TRUNCATION_BUFFER = 30
 _TRUNCATION_SPLIT_RATIO = 0.5
 
 
-def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
+def text_to_blocks(text: str) -> list[dict[str, Any]]:
     """Convert processed mrkdwn text into Slack Block Kit blocks.
 
-    Returns None if the text is too short/simple to benefit from blocks,
-    so the caller can fall back to plain text.
+    Always returns a list of blocks — never None. For short/simple text,
+    returns a single section block so Slack renders it as mrkdwn (not
+    rich_text which happens when the caller falls back to plain text).
 
     Key behaviors:
     - Code blocks (``` ... ```) are kept intact in a single section block
@@ -49,11 +50,14 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
     - Divider lines (---) become divider blocks
     - Adjacent content groups into section blocks
     """
-    if not text or len(text) < MIN_BLOCKS_THRESHOLD:
-        return None
+    if not text:
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": " "}}]
+
+    if len(text) < MIN_BLOCKS_THRESHOLD:
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
     if text.count("\n") < MIN_NEWLINES_FOR_BLOCKS and not _BULLET_RE.search(text):
-        return None
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
     # Pre-process: stash code blocks to prevent line-by-line splitting
     code_stash: list[str] = []
@@ -108,8 +112,8 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
 
     _flush_section()
 
-    if len(blocks) <= 1:
-        return None
+    if len(blocks) == 0:
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
     if len(blocks) > MAX_BLOCKS_PER_MESSAGE:
         blocks = blocks[:MAX_BLOCKS_PER_MESSAGE - 1]
