@@ -3312,7 +3312,12 @@ class LucyAgent:
             f"a CORRECTED response that addresses the user's actual "
             f"request. Keep the same tone and style.\n\n"
             f"If the original response is actually fine and the issues "
-            f"are false positives, respond with exactly: RESPONSE_OK"
+            f"are false positives, respond with exactly: RESPONSE_OK\n\n"
+            f"CRITICAL: Output ONLY the corrected text — no "
+            f"meta-commentary, no explanations of what you changed, "
+            f"no 'Here is the corrected version:', no references to "
+            f"'the original response'. Just the clean, corrected text "
+            f"that a user would see."
         )
 
         try:
@@ -3329,7 +3334,13 @@ class LucyAgent:
                             "confusion (e.g., Clerk ≠ MoonClerk), wrong "
                             "suggestions, and hallucinated capabilities. "
                             "Be concise. If the response is fine, say "
-                            "RESPONSE_OK."
+                            "RESPONSE_OK. "
+                            "IMPORTANT: When providing corrections, output "
+                            "ONLY the corrected user-facing text. Never "
+                            "include meta-commentary like 'The original "
+                            "response was incorrect' or 'I've corrected "
+                            "the following'. The output goes directly to "
+                            "the user."
                         ),
                         max_tokens=4096,
                     ),
@@ -3341,6 +3352,10 @@ class LucyAgent:
             if "RESPONSE_OK" in corrected:
                 logger.info("quality_gate_original_ok")
                 return None
+
+            # Strip any meta-commentary the quality checker may have
+            # prepended despite instructions
+            corrected = self._strip_quality_gate_meta(corrected)
 
             logger.info(
                 "quality_gate_corrected",
@@ -3355,6 +3370,55 @@ class LucyAgent:
                 error=str(exc) or type(exc).__name__,
             )
             return None
+
+    @staticmethod
+    def _strip_quality_gate_meta(text: str) -> str:
+        """Strip meta-commentary from quality gate / self-critique output.
+
+        Quality checkers sometimes prepend explanations like:
+        - "Here is the corrected version:"
+        - "The original response had issues with..."
+        - "I've fixed the following problems:"
+
+        This strips those so only the actual corrected text remains.
+        """
+        import re
+        # Strip common preamble patterns (greedy up to first double-newline)
+        preamble_patterns = [
+            re.compile(
+                r"^(?:Here(?:'s| is) (?:the |a )?(?:corrected|improved|fixed|updated)"
+                r"(?: version| response| text)?[:\s]*\n+)",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+            re.compile(
+                r"^(?:(?:The |My )?(?:original|previous|initial) response"
+                r"[^.]*\.?\s*\n+)",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+            re.compile(
+                r"^(?:I(?:'ve| have) (?:corrected|fixed|updated|improved)"
+                r"[^.]*\.?\s*\n+)",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+            re.compile(
+                r"^(?:Corrected (?:version|response|text)[:\s]*\n+)",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+        ]
+        for pattern in preamble_patterns:
+            text = pattern.sub("", text, count=1)
+
+        # Strip trailing meta (e.g., "Note: I changed X to Y")
+        trailing_patterns = [
+            re.compile(
+                r"\n+(?:Note|Changes?|I (?:changed|replaced|fixed))[:\s][^\n]+$",
+                re.IGNORECASE,
+            ),
+        ]
+        for pattern in trailing_patterns:
+            text = pattern.sub("", text)
+
+        return text.strip()
 
     # ── Self-critique gate ──────────────────────────────────────────────
 
@@ -3391,7 +3455,10 @@ class LucyAgent:
             f"If there's a clear, specific issue, reply with: ISSUE: [one sentence "
             f"describing what's missing or wrong, and how to fix it]\n\n"
             f"Be strict but fair. Don't flag minor style issues. Only flag substantive "
-            f"completeness or accuracy problems, and dead-end responses."
+            f"completeness or accuracy problems, and dead-end responses.\n\n"
+            f"CRITICAL: Your output goes into a pipeline. Reply ONLY with "
+            f"'RESPONSE_OK' or 'ISSUE: ...' — no other commentary, no "
+            f"meta-discussion, no 'the original response is...' preamble."
         )
 
         try:
@@ -3405,7 +3472,10 @@ class LucyAgent:
                             "You are a strict quality reviewer for AI responses. "
                             "Your job: catch substantive failures (incomplete answers, "
                             "missing deliverables, preamble without results). "
-                            "Ignore minor style issues. Be decisive and concise."
+                            "Ignore minor style issues. Be decisive and concise. "
+                            "Output ONLY 'RESPONSE_OK' or 'ISSUE: [description]' — "
+                            "no meta-commentary, no explanations of the original "
+                            "response, no preamble. Your output is parsed by code."
                         ),
                         max_tokens=LLMPresets.CLASSIFIER.max_tokens,
                         temperature=LLMPresets.CLASSIFIER.temperature,
