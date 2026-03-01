@@ -555,16 +555,49 @@ async def _handle_message(
         try:
             acquired = await asyncio.wait_for(tlock.acquire(), timeout=0.1)
         except asyncio.TimeoutError:
+            # Thread is busy — wait quietly instead of spamming
+            # React with ⏳ so user knows we saw the message
+            if client and channel_id and event_ts:
+                try:
+                    await client.reactions_add(
+                        channel=channel_id,
+                        name="hourglass_flowing_sand",
+                        timestamp=event_ts,
+                    )
+                except Exception:
+                    pass
             logger.info(
-                "thread_busy_skipped",
+                "thread_busy_queued",
                 thread_ts=effective_thread,
                 workspace_id=workspace_id,
             )
-            await say(
-                text="Still working on your previous request here. I'll get back to you shortly!",
-                thread_ts=thread_ts,
-            )
-            return
+            try:
+                # Wait up to 45s for the current request to finish
+                acquired = await asyncio.wait_for(
+                    tlock.acquire(), timeout=45.0,
+                )
+                logger.info(
+                    "thread_lock_acquired_after_wait",
+                    thread_ts=effective_thread,
+                    workspace_id=workspace_id,
+                )
+            except asyncio.TimeoutError:
+                logger.info(
+                    "thread_busy_dropped",
+                    thread_ts=effective_thread,
+                    workspace_id=workspace_id,
+                )
+                # Remove the hourglass since we're giving up
+                if client and channel_id and event_ts:
+                    try:
+                        await client.reactions_remove(
+                            channel=channel_id,
+                            name="hourglass_flowing_sand",
+                            timestamp=event_ts,
+                        )
+                    except Exception:
+                        pass
+                return
 
     # ── Full agent loop path ──────────────────────────────────────────
     working_emoji = get_working_emoji(text)
@@ -823,6 +856,14 @@ async def _handle_message(
                 _remove_reaction(client, channel_id, event_ts, emoji=working_emoji)
             )
             cleanup_task.add_done_callback(_log_task_exception)
+            # Also remove ⏳ if this was a queued (waited) request
+            hourglass_task = asyncio.create_task(
+                _remove_reaction(
+                    client, channel_id, event_ts,
+                    emoji="hourglass_flowing_sand",
+                )
+            )
+            hourglass_task.add_done_callback(_log_task_exception)
 
 
 # ═══════════════════════════════════════════════════════════════════════
