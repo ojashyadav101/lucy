@@ -121,7 +121,7 @@ _COMPOSITION_INTENT = re.compile(
     r"(?:product\s+)?(?:update|announcement|email|message|memo|"
     r"report|summary|brief|newsletter|post|blog|note|copy|text|"
     r"description|blurb|paragraph|response|reply|answer|"
-    r"letter|proposal|pitch)",
+    r"letter|proposal|pitch|tweet|thread|caption|tagline|headline)",
     re.IGNORECASE,
 )
 
@@ -204,6 +204,10 @@ def classify_and_route(
         if prev_had_tool_calls:
             return _choice("followup", "default")
         if _ACTION_VERBS.search(text):
+            return _choice("command", "default")
+        # Data queries need tools even deep in threads —
+        # "how many users signed up?" should never be fast-path
+        if _DATA_SOURCE_KEYWORDS.search(text) or _CHECK_PATTERNS.search(text):
             return _choice("command", "default")
         return _choice("followup", "fast")
 

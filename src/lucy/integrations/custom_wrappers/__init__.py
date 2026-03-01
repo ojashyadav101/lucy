@@ -209,6 +209,12 @@ def detect_relevant_wrappers(
                            "event", "events", "free time", "free slot",
                            "am i free", "are you free", "i free",
                            "busy", "appointment", "block time"],
+        "gmail": ["email", "emails", "gmail", "inbox", "unread",
+                  "mail", "draft", "send email", "send a email",
+                  "send an email", "compose email", "reply to email",
+                  "email thread", "latest emails", "recent emails",
+                  "new emails", "read email", "check email",
+                  "check my email", "check my inbox"],
     }
 
     # Tier 2: Ambiguous keywords that need data-action context
