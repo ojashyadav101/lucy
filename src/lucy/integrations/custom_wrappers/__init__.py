@@ -369,11 +369,6 @@ def detect_relevant_wrappers(
         return []
 
     for meta_path in _WRAPPERS_DIR.glob("*/meta.json"):
-        # Filter by relevant_slugs if provided
-        if relevant_slugs is not None:
-            dir_slug = meta_path.parent.name
-            if dir_slug not in relevant_slugs:
-                continue
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception:
