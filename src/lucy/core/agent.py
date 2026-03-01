@@ -72,15 +72,29 @@ _DANGLING_AND_RE = re.compile(r",\s+and\b")
 
 
 def _strip_backend_names(text: str) -> str:
-    """Remove leaked backend platform names from user-facing text."""
+    """Remove leaked backend platform names from user-facing text.
+
+    Cleans up surrounding punctuation so ``"Google Gemini, MiniMax, and
+    OpenRouter models"`` becomes ``"Google Gemini models"`` instead of
+    ``"Google Gemini, , and  models"``.
+    """
     if not _BACKEND_NAMES_RE.search(text):
         return text
     text = _BACKEND_NAMES_RE.sub("", text)
-    # Clean up punctuation artifacts: ", , and" → ", and" → natural
+    # Repeated commas: ", ," → ","
     text = _DANGLING_COMMA_RE.sub(",", text)
-    # Clean empty list items: "Gemini,  and models" → "Gemini models"
-    text = re.sub(r",\s+and\s+", " and ", text)
-    text = re.sub(r"\s{2,}", " ", text)  # collapse double spaces
+    # Dangling "and": ", and " with nothing after comma → just the rest
+    text = re.sub(r",\s+and\s+", " ", text)
+    # Dangling "via/by" before whitespace: "via  " → ""
+    text = re.sub(r"\b(?:via|by)\s{2,}", "", text)
+    # "X and  for" (both removed) → "for"
+    text = re.sub(r"\band\s{2,}", "", text)
+    # Collapse multiple spaces
+    text = re.sub(r"\s{2,}", " ", text)
+    # Clean trailing comma before period: ", ." → "."
+    text = re.sub(r",\s*\.", ".", text)
+    # Clean space before period: "includes ." → "includes."
+    text = re.sub(r"\s+\.", ".", text)
     return text
 
 

@@ -110,12 +110,16 @@ async def build_lightweight_prompt(
     *,
     user_slack_id: str | None = None,
     workspace_id: str | None = None,
+    is_composition: bool = False,
 ) -> str:
     """Build a minimal prompt for simple conversational messages.
 
     This skips the full 85KB system prompt, tool documentation, and
     integration blocks. Used for greetings, simple questions, and
     follow-ups that don't need tool access.
+
+    When ``is_composition`` is True, the prompt is tuned for writing/
+    drafting tasks rather than casual conversation.
 
     Typical size: ~2-4KB vs ~85KB for the full prompt.
     """
@@ -127,17 +131,33 @@ async def build_lightweight_prompt(
     else:
         soul = _load_soul()
 
-    # Minimal instructions
-    core = (
-        "You are Lucy, an AI coworker in Slack. You're direct, warm, "
-        "and helpful. Keep responses concise and natural — like a smart "
-        "colleague, not a customer service bot.\n\n"
-        "For this message, you're having a casual conversation. No tools "
-        "are needed. Just respond naturally.\n\n"
-        "If the user is asking something that actually requires tools, "
-        "data access, or complex work, tell them you can help and ask "
-        "them to elaborate so you can assist properly."
-    )
+    # Minimal instructions — varies for composition vs conversation
+    if is_composition:
+        core = (
+            "You are Lucy, an AI coworker in Slack. You're direct, warm, "
+            "and helpful.\n\n"
+            "The user is asking you to WRITE or DRAFT content. Focus on "
+            "producing high-quality, ready-to-use text. Use the company "
+            "knowledge below for context. Write in a natural, professional "
+            "voice that matches the team's culture.\n\n"
+            "If the user provided specific data (numbers, names, dates), "
+            "use those exactly. If they didn't provide data and you don't "
+            "know the real numbers, either use reasonable placeholders "
+            "marked [X] or note what data you'd need.\n\n"
+            "DO NOT try to send, post, or share the content anywhere — "
+            "just write it and present it in your response."
+        )
+    else:
+        core = (
+            "You are Lucy, an AI coworker in Slack. You're direct, warm, "
+            "and helpful. Keep responses concise and natural — like a smart "
+            "colleague, not a customer service bot.\n\n"
+            "For this message, you're having a casual conversation. No tools "
+            "are needed. Just respond naturally.\n\n"
+            "If the user is asking something that actually requires tools, "
+            "data access, or complex work, tell them you can help and ask "
+            "them to elaborate so you can assist properly."
+        )
 
     # Current date/time — critical for "what day is it?" type questions
     # NOTE: Must be VERY prominent. Models sometimes hallucinate dates
