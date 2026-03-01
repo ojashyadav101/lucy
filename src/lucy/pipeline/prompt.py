@@ -35,6 +35,7 @@ _PROMPT_TEMPLATE_PATH = _PROMPTS_DIR / "SYSTEM_PROMPT.md"
 _SYSTEM_CORE_PATH = _PROMPTS_DIR / "SYSTEM_CORE.md"
 _SYSTEM_CORE_COMPACT_PATH = _PROMPTS_DIR / "SYSTEM_CORE_COMPACT.md"
 _PROMPT_MODULES_DIR = _PROMPTS_DIR / "modules"
+_CAPABILITIES_PATH = _PROMPTS_DIR / "CAPABILITIES.md"
 
 # Separator used between prompt sections
 _SECTION_SEP = "\n\n---\n\n"
@@ -92,6 +93,34 @@ def _load_prompt_modules(names: list[str], *, compact: bool = False) -> str:
             parts.append(path.read_text(encoding="utf-8"))
     return "\n\n".join(parts)
 
+
+
+
+def _load_capabilities_summary() -> str:
+    """Load a condensed capability summary for lightweight prompts."""
+    if not _CAPABILITIES_PATH.exists():
+        return ""
+    return (
+        "CAPABILITY AWARENESS (use this to know what you can/cannot do):\n"
+        "You CAN: send emails (Gmail), manage calendar (Google Calendar), "
+        "search/post Slack, read/write Google Sheets & Drive, generate PDFs "
+        "& reports, browse websites, write & run code, manage GitHub/Linear, "
+        "check Clerk/Polar data, web search, deep research, build web apps.\n"
+        "You CANNOT: check live weather/stock prices/sports scores, make "
+        "phone calls or send SMS, post to social media (Twitter, LinkedIn, "
+        "etc.), make purchases or financial transactions, access systems "
+        "you\'re not connected to, do Slack admin, process video/audio.\n"
+        "RULE: When asked to do something you cannot do, say so immediately "
+        "and suggest what you CAN do instead. Never ask clarifying questions "
+        "for tasks you fundamentally cannot perform."
+    )
+
+
+def _load_capabilities_full() -> str:
+    """Load the full capabilities manifest for the system prompt."""
+    if _CAPABILITIES_PATH.exists():
+        return _CAPABILITIES_PATH.read_text(encoding="utf-8")
+    return ""
 
 # Modules loaded into the static prefix for all non-chat intents.
 _COMMON_MODULES = ["tool_use", "memory"]
@@ -171,6 +200,11 @@ async def build_lightweight_prompt(
             "- NEVER wide Unicode box-drawing lines\n"
             "- Sections: *bold* with emoji, NOT Block Kit headers\n\n"
             "Be thorough. Reward users trust with complete, insightful response."
+
+    # Inject capability awareness so Lucy knows what she can/cannot do
+    capability_summary = _load_capabilities_summary()
+    if capability_summary:
+        core += "\n\n" + capability_summary
         )
 
     # Current date/time — critical for "what day is it?" type questions
@@ -264,6 +298,19 @@ async def build_system_prompt(
     )
 
     common_modules_text = _load_prompt_modules(_COMMON_MODULES, compact=compact)
+
+    # Inject capability awareness
+    capabilities = _load_capabilities_full()
+    if capabilities:
+        system_core_with_skills += (
+            "\n\n<capability_manifest>\n"
+            "Use this to know what you can and cannot do. When a user\n"
+            "asks you to do something in the CANNOT list, respond\n"
+            "immediately with what you CAN do instead. Never ask\n"
+            "clarifying questions for fundamentally impossible tasks.\n\n"
+            + capabilities +
+            "\n</capability_manifest>"
+        )
 
     static_parts: list[str] = [soul, system_core_with_skills]
     if common_modules_text:
