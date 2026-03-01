@@ -757,10 +757,24 @@ async def _handle_message(
                     workspace_id=workspace_id,
                     text=text[:300],
                 )
-            slack_text = response_text or (
-                "I processed your request but didn't generate a response. "
-                "Could you rephrase or provide more details?"
-            )
+                slack_text = (
+                    "I processed your request but didn't generate a response. "
+                    "Could you rephrase or provide more details?"
+                )
+            else:
+                # Pipeline stripped everything — content was classified as
+                # internal.  NEVER fall back to raw response_text (it may
+                # contain internal reasoning, system echoes, etc.).
+                logger.warning(
+                    "pipeline_stripped_all_content",
+                    workspace_id=workspace_id,
+                    raw_length=len(response_text),
+                    raw_preview=response_text[:200],
+                )
+                slack_text = (
+                    "I've completed the task. "
+                    "Let me know if you need any details."
+                )
 
         if should_split_response(slack_text):
             chunks = split_response(slack_text)

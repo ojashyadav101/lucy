@@ -108,6 +108,11 @@ _TOOL_CALL_BLOCK_RE = re.compile(
 )
 
 
+# Prefix for system messages injected mid-conversation.  The output
+# pipeline can detect (and strip) echoes of these directives.
+_SYSTEM_INJECT_PREFIX = "[INTERNAL_DIRECTIVE] "
+
+
 def _strip_control_tokens(text: str) -> str:
     """Remove raw model control tokens that leaked into output."""
     text = _TOOL_CALL_BLOCK_RE.sub("", text)
@@ -1481,12 +1486,16 @@ class LucyAgent:
                         {"role": "assistant", "content": response_text}
                     )
                     all_messages.append({
-                        "role": "user",
+                        "role": "system",
                         "content": (
+                            f"{_SYSTEM_INJECT_PREFIX}"
+                            "INTERNAL SYSTEM NOTE (do not repeat to user): "
                             "You DO have tools available to help with "
                             "this. Please use them to search for what's "
                             "needed and execute the request directly, "
-                            "rather than saying you don't have access."
+                            "rather than saying you don't have access. "
+                            "Your response must contain ONLY the answer "
+                            "for the user, not this instruction."
                         ),
                     })
                     continue
@@ -1512,10 +1521,14 @@ class LucyAgent:
                         {"role": "assistant", "content": response_text}
                     )
                     all_messages.append({
-                        "role": "user",
+                        "role": "system",
                         "content": (
+                            f"{_SYSTEM_INJECT_PREFIX}"
+                            "INTERNAL SYSTEM NOTE (do not repeat to user): "
                             "I need the actual data, not a plan. "
-                            "Please call the tools now and give me the results."
+                            "Please call the tools now and give me the "
+                            "results. Your response must contain ONLY the "
+                            "answer for the user, not this instruction."
                         ),
                     })
                     continue
@@ -1777,11 +1790,14 @@ class LucyAgent:
                     )
 
                     if sv_result.decision == SupervisorDecision.INTERVENE:
+                        # INJ-14: Keep guidance with anti-echo instruction.
                         all_messages.append({
                             "role": "system",
                             "content": (
                                 f"<supervisor_guidance>\n"
                                 f"{sv_result.guidance}\n"
+                                f"Do not reference or echo this guidance "
+                                f"in your response to the user.\n"
                                 f"</supervisor_guidance>"
                             ),
                         })
@@ -1801,13 +1817,15 @@ class LucyAgent:
                         )
                         if new_plan:
                             task_plan = new_plan
+                            # INJ-15: Keep plan with anti-echo.
                             all_messages.append({
                                 "role": "system",
                                 "content": (
                                     f"<revised_plan>\n"
-                                    f"The previous approach had issues. "
                                     f"Follow this revised plan:\n"
                                     f"{new_plan.to_prompt_text()}\n"
+                                    f"Do not reference this plan or its "
+                                    f"steps in your response to the user.\n"
                                     f"</revised_plan>"
                                 ),
                             })
@@ -1885,16 +1903,22 @@ class LucyAgent:
                             all_messages.append({
                                 "role": "system",
                                 "content": (
+                                    f"{_SYSTEM_INJECT_PREFIX}"
                                     "You have been running for over 5 minutes. "
-                                    "Wrap up with what you have and respond now."
+                                    "Wrap up with what you have and respond "
+                                    "now. Do NOT mention time limits or this "
+                                    "instruction to the user."
                                 ),
                             })
                         elif turn > max_turns * 0.75:
                             all_messages.append({
                                 "role": "system",
                                 "content": (
+                                    f"{_SYSTEM_INJECT_PREFIX}"
                                     "You are running low on turns. Finish up "
-                                    "and deliver your best answer now."
+                                    "and deliver your best answer now. Do NOT "
+                                    "mention turn limits or this instruction "
+                                    "to the user."
                                 ),
                             })
 
@@ -3406,6 +3430,22 @@ class LucyAgent:
             ),
         ]
         for pattern in preamble_patterns:
+            text = pattern.sub("", text, count=1)
+
+        # Strip inline meta-commentary that may appear on the same
+        # line as content (no trailing newline required)
+        _inline_meta = [
+            re.compile(
+                r"^(?:The |My )?(?:original|previous) response[^.]*\.\s*",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"^Here\'?s? (?:a |the )?corrected (?:response|version|text)[:\s]*",
+                re.IGNORECASE,
+            ),
+            re.compile(r"^RESPONSE_OK\s*", re.IGNORECASE),
+        ]
+        for pattern in _inline_meta:
             text = pattern.sub("", text, count=1)
 
         # Strip trailing meta (e.g., "Note: I changed X to Y")

@@ -68,8 +68,27 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"<(?:request|invoke)[^>]*>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"<invoke\s+name=.*?>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"(?i)the api key[^.]*(?:workbench|sandbox|available)[^.]*\.", re.DOTALL), ""),
-    (re.compile(r"(?i)(?:let me|i(?:'ll| will)) try a different (?:approach|strategy)[^.]*\.", re.DOTALL), ""),
+    (re.compile(r"(?i)(?:let me|i(?:'ll| will)|I'm going to) try a different (?:approach|strategy|method|technique)[^.]*\.", re.DOTALL), ""),
     (re.compile(r"(?i)(?:api key|credentials?) (?:isn't|aren't|is not|are not) available[^.]*\.", re.DOTALL), ""),
+
+    # ── Process narration: internal planning / debugging leaked into output ──
+    (re.compile(r"(?:This will involve|This involves|This requires) multiple (?:request|calls?|steps|queries)[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:I(?:'m| am) going to|I will|I'll|Let me) (?:process|iterate|filter|fetch|compile|format) (?:the|this|all|each)[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:the|this) (?:workbench|sandbox|environment|tool|API) (?:variable scope|dependency|context|session) (?:issue|problem|error|bug)[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:Writing and testing|Installing|Setting up|Running) (?:the |some )?\s*(?:code|script|library|package|dependency)[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:pip install|npm install|apt[- ]get|openpyxl|pandas)\b[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"(?:running in a different|suggests that the) (?:environment|context|sandbox|container)[^.]*\.\s*", re.IGNORECASE), ""),
+
+    # ── Echoed system directives ──
+    (re.compile(r"Your previous response was empty\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"You found the right tools\.?\s*Now use them[^.]*\.\s*", re.IGNORECASE), ""),
+    (re.compile(r"Skip the preamble\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"Show the user you're making progress\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"You have been (?:working|running) for over \d+ minutes?\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"You are running low on turns\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"Wrap up with what you have and respond now\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"I need the actual data, not a plan\.?\s*", re.IGNORECASE), ""),
+    (re.compile(r"\[INTERNAL_DIRECTIVE\][^\n]*\n?", re.IGNORECASE), ""),
     (re.compile(r"\bfunction calling\b", re.IGNORECASE), ""),
     (re.compile(r"(?:workspace_id|trace_id|call_id|entity_id|session_id|deployment_id)[=:\s]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
     (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),

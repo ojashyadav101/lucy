@@ -96,6 +96,14 @@ _META_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"^(?:Internal|Mental) note:\s*", re.IGNORECASE | re.MULTILINE),
      "internal_note"),
 
+    # Inline self-correction in parentheses (mid-sentence)
+    (re.compile(r"\(Self[- ]correction:[^)]*\)", re.IGNORECASE),
+     "inline_self_correction"),
+    (re.compile(r"\(Note to self:[^)]*\)", re.IGNORECASE),
+     "inline_self_note"),
+    (re.compile(r"\(Internal note:[^)]*\)", re.IGNORECASE),
+     "inline_internal_note"),
+
     # Planning leaks
     (re.compile(r"^(?:Step \d+|Plan|Strategy|Approach):\s*(?:First|Next|Then|Finally|I (?:will|should|need))", re.IGNORECASE | re.MULTILINE),
      "planning_leak"),
@@ -118,6 +126,42 @@ _FULL_LINE_INTERNAL_RE: list[re.Pattern[str]] = [
     re.compile(r"^\s*ISSUE:\s*.+$", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*Remember,\s+(?:the user|I should).+$", re.IGNORECASE | re.MULTILINE),
 ]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# INLINE INTERNAL FRAGMENTS — strips internal bits embedded in user text
+# ═══════════════════════════════════════════════════════════════════════
+
+_INLINE_INTERNAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # Self-correction / notes wrapped in parentheses
+    (re.compile(r"\(Self[- ]correction:[^)]*\)\s*", re.IGNORECASE), ""),
+    (re.compile(r"\(Note to self:[^)]*\)\s*", re.IGNORECASE), ""),
+    (re.compile(r"\(Internal note:[^)]*\)\s*", re.IGNORECASE), ""),
+
+    # Quality-gate preambles — strip the meta sentence, keep the content
+    (re.compile(
+        r"(?:The |My )?(?:original|previous|initial|first) "
+        r"(?:response|answer|output|reply) "
+        r"(?:is|was|had|didn\'t|did not|failed|missed|lacked|needs?)[^.]*\.\s*",
+        re.IGNORECASE,
+    ), ""),
+    (re.compile(r"Here\'?s? (?:a |the )?corrected (?:response|version|text)[:\s]*", re.IGNORECASE), ""),
+
+    # Echoed system directives (tagged with _SYSTEM_INJECT_PREFIX)
+    (re.compile(r"\[INTERNAL_DIRECTIVE\][^\n]*\n?", re.IGNORECASE), ""),
+]
+
+
+def strip_inline_internal(text: str) -> str:
+    """Strip internal fragments embedded within otherwise user-facing text.
+
+    Unlike paragraph-level stripping which removes whole blocks, this
+    removes inline phrases like ``(Self-correction: ...)`` and quality-gate
+    preambles while preserving the surrounding user content.
+    """
+    for pattern, replacement in _INLINE_INTERNAL_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -230,6 +274,10 @@ def strip_internal_content(text: str) -> str:
 
     # Step 2: Remove stray internal XML tags
     cleaned = _STRAY_INTERNAL_TAG_RE.sub("", cleaned)
+
+    # Step 2.5: Strip inline internal fragments (self-correction in
+    # parentheses, quality-gate preambles, echoed directives)
+    cleaned = strip_inline_internal(cleaned)
 
     # Step 3: Remove full internal lines
     lines = cleaned.split("\n")
