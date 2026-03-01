@@ -16,10 +16,10 @@ import re
 from typing import Any
 
 
-_HEADER_RE = re.compile(r"^\*([^*]+)\*$")
+_HEADER_RE = re.compile(r"^#{1,3}\s+(.+)$")  # Only ## headers, not *bold* lines
 _EMOJI_HEADER_RE = re.compile(
-    r"^(?:[\U0001f300-\U0001f9ff\u2600-\u27bf\u2700-\u27bf][\ufe0f]?\s*)?\*([^*]+)\*$"
-)
+    r"^#{1,3}\s+(?:[\U0001f300-\U0001f9ff\u2600-\u27bf\u2700-\u27bf][\ufe0f]?\s*)?(.+)$"
+)  # Only ## style headers with optional emoji prefix
 _BULLET_RE = re.compile(r"^[\u2022\-\*]\s+")
 _DIVIDER_RE = re.compile(r"^-{3,}$")
 _LINK_RE = re.compile(r"<(https?://[^|>]+)\|([^>]+)>")

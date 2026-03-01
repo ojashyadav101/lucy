@@ -259,8 +259,8 @@ def _table_to_code_block(table_lines: list[str]) -> list[str]:
     )
     output.append(header.rstrip())
 
-    # Separator with box-drawing chars
-    separator = "\u2500" * sum(col_widths)
+    # Separator with simple dashes (avoids wide Unicode rendering issues)
+    separator = "-" * min(sum(col_widths), 55)
     output.append(separator)
 
     # Data rows
