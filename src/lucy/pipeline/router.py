@@ -44,6 +44,18 @@ _RESEARCH_LIGHT = re.compile(
     re.IGNORECASE,
 )
 
+# Advisory / planning questions — "help me plan the tech stack",
+# "review this architecture". These are educational/advisory, not research.
+_ADVISORY_INTENT = re.compile(
+    r"(?:"
+    r"help\s+me\s+(?:plan|create|design|choose|decide|pick|figure\s+out|think\s+(?:about|through))"
+    r"|review\s+(?:this|my|the|our|a)\s+(?:architect|design|stack|code|setup|approach|system|plan|infra)"
+    r"|(?:suggest|recommend)\s+(?:a\s+)?(?:tech\s+)?(?:stack|approach|architecture|strategy|plan|framework)"
+    r"|I'm\s+(?:building|creating|starting|launching)\s+.{5,40}\s+(?:help|what|how|which|should)"
+    r")",
+    re.IGNORECASE,
+)
+
 _RESEARCH_HEAVY = re.compile(
     r"\b(deep dive|deep analysis|comprehensive|thorough|investigate|audit|"
     r"benchmark|detailed analysis|competitive analysis|full report|"
@@ -148,7 +160,7 @@ _KNOWLEDGE_INTENT = re.compile(
     r"(?:"
     # Explicit educational patterns
     r"walk\s+me\s+through"
-    r"|explain\s+(?:how|what|why|the|to\s+me)"
+    r"|explain\s+(?:how|what|why|the|to\s+me|(?:\w+\s+){0,3}(?:vs\.?|versus|and|architecture|concept|pattern|model|component))"
     # "What is X" / "What are X" — educational questions.
     # Negative lookahead excludes possessive/data lookups:
     # "what is MY mrr", "what is OUR user count", "what is THE CURRENT plan"
@@ -165,7 +177,7 @@ _KNOWLEDGE_INTENT = re.compile(
     r"|(?:give|tell)\s+me\s+(?:a\s+)?(?:overview|breakdown|rundown|summary)\s+(?:of|on)"
     r"|compare\s+.+?\s+(?:vs\.?|versus|and|or|with)\s+.+"
     r"|^\s*compare\b"
-    r"|(?:pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?)\s+of"
+    r"|(?:pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?)(?:\s+of)?"
     r"|what\s+are\s+(?:some|the|good|best)\s+(?:ways?|approaches?|strategies?|practices?|tips?)"
     r"|(?:guide|teach)\s+me\s+(?:through|on|about|how)"
     r"|break\s+(?:down|it\s+down)"
@@ -282,6 +294,11 @@ def classify_and_route(
     #    about competitors" routes to document, not research.
     if _DOCUMENT_KEYWORDS.search(text) and _ACTION_VERBS.search(text):
         return _choice("document", "document")
+
+    # 3c. Advisory / planning questions — "help me plan", "review my architecture"
+    #     These are educational/advisory, not research tasks. Route to chat.
+    if _ADVISORY_INTENT.search(text):
+        return _choice("chat", "default")
 
     # 4. Deep research / analysis — check before code to avoid
     #    "research code tools" being classified as coding.
