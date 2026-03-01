@@ -3985,4 +3985,100 @@ class LucyAgent:
             phrase in lower
             for phrase in (
                 "don't have access",
-                "do not have acces
+                "do not have access",
+                "not connected",
+                "need to connect",
+                "no access to",
+            )
+        )
+
+    @staticmethod
+    def _is_simple_greeting(text: str) -> bool:
+        """Check if response is a simple greeting/acknowledgment."""
+        lower = text.strip().lower()
+        return len(lower) < 80 and any(
+            w in lower
+            for w in ("hey", "hi", "hello", "how can i help", "what do you need")
+        )
+
+    @staticmethod
+    def _is_history_reference(message: str) -> bool:
+        """Check if a message references past context or discussions."""
+        lower = message.lower()
+        return any(phrase in lower for phrase in (
+            "what did we", "last time", "remember", "you mentioned",
+            "we discussed", "earlier", "previously", "follow up",
+            "didn't we", "wasn't there", "what about the",
+            "we agreed", "we decided", "you said", "that conversation",
+            "that decision", "status of",
+        ))
+
+    @staticmethod
+    def _extract_search_terms(message: str) -> list[str]:
+        """Extract meaningful search terms from a message."""
+        cleaned = re.sub(
+            r"\b(what|did|we|the|about|you|remember|last|time|earlier|"
+            r"previously|that|this|when|where)\b",
+            "",
+            message.lower(),
+        )
+        words = [w.strip() for w in cleaned.split() if len(w.strip()) > 3]
+        return words[:3]
+
+    @staticmethod
+    def _call_signature(tool_calls: list[dict[str, Any]]) -> str:
+        parts = []
+        for tc in tool_calls:
+            name = tc.get("name", "")
+            params = tc.get("parameters", {}) or {}
+            try:
+                p = json.dumps(params, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                p = str(params)
+            parts.append(f"{name}:{p}")
+        return "||".join(sorted(parts))
+
+    @staticmethod
+    def _serialize_result(result: Any) -> str:
+        """Serialize a tool result, compacting if too large.
+
+        Auth/redirect URLs are extracted and preserved even when the
+        result body is truncated.  For dict/list results that exceed
+        the limit, strip verbose nested fields before falling back
+        to hard truncation so the LLM sees more useful data.
+        """
+        raw = result
+
+        if isinstance(raw, (dict, list)):
+            text = json.dumps(raw, ensure_ascii=False, default=str)
+        else:
+            text = str(raw)
+
+        if len(text) > TOOL_RESULT_MAX_CHARS and isinstance(raw, (dict, list)):
+            compact = _compact_data(raw)
+            text = json.dumps(compact, ensure_ascii=False, default=str)
+
+        if len(text) > TOOL_RESULT_MAX_CHARS:
+            auth_urls = _AUTH_URL_RE.findall(text)
+            text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
+            if auth_urls:
+                preserved = "\n".join(
+                    f"AUTH_URL: {url}" for url in auth_urls
+                )
+                text += f"\n{preserved}"
+
+        text = _sanitize_tool_output(text)
+        return text
+
+
+# ── Singleton ───────────────────────────────────────────────────────────
+
+_agent: LucyAgent | None = None
+
+
+def get_agent() -> LucyAgent:
+    """Get or create the singleton agent."""
+    global _agent
+    if _agent is None:
+        _agent = LucyAgent()
+    return _agent
