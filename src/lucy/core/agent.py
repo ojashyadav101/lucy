@@ -367,6 +367,8 @@ class LucyAgent:
                     user_slack_id=ctx.user_slack_id,
                     workspace_id=str(ctx.workspace_id),
                     is_composition=_is_composition,
+                    user_message=message,
+                    thread_ts=ctx.thread_ts,
                 )
 
             messages = await self._build_thread_messages(
@@ -476,6 +478,19 @@ class LucyAgent:
                 response_length=len(response_text),
                 workspace_id=ctx.workspace_id,
             )
+
+            # Fast-path memory extraction: scan user message for facts
+            try:
+                from lucy.workspace.memory import extract_and_store_memories
+                fast_msgs = [{"role": "user", "content": message}]
+                await extract_and_store_memories(
+                    fast_msgs, ws,
+                    user_id=ctx.user_slack_id,
+                    thread_ts=ctx.thread_ts,
+                )
+            except Exception as e:
+                logger.warning("fast_path_memory_extract_error", error=str(e))
+
             return _strip_control_tokens(response_text)
 
         # 3. Fetch connected services + meta-tools in parallel
@@ -1051,6 +1066,8 @@ class LucyAgent:
                 connected_services=connected_services,
                 user_message=message,
                 prompt_modules=route.prompt_modules,
+                user_id=ctx.user_slack_id,
+                thread_ts=ctx.thread_ts,
             )
             utc_now = datetime.now(timezone.utc)
             time_block = (
@@ -1394,49 +1411,17 @@ class LucyAgent:
         # compact prompt is tighter and more actionable). Will revisit
         # in Phase 5 if quality dips.
 
-        # 6c. Post-response: persist memorable facts to memory
+        # 6c. Post-response: extract and persist memorable facts from
+        # the full conversation (not just the latest user message).
+        # Uses extract_and_store_memories which scans all user messages
+        # for preferences, decisions, facts, and project context.
         try:
-            from lucy.workspace.memory import (
-                add_session_fact,
-                append_to_company_knowledge,
-                append_to_team_knowledge,
-                check_fact_contradictions,
-                classify_memory_target,
-                should_persist_memory,
+            from lucy.workspace.memory import extract_and_store_memories
+            await extract_and_store_memories(
+                messages, ws,
+                user_id=ctx.user_slack_id,
+                thread_ts=ctx.thread_ts,
             )
-            if should_persist_memory(message):
-                target = classify_memory_target(message)
-                fact = message.strip()
-                if len(fact) > 500:
-                    fact = fact[:500] + "..."
-
-                if target in ("company", "team"):
-                    warning = await check_fact_contradictions(
-                        ws, fact, target,
-                    )
-                    if warning:
-                        logger.warning(
-                            "memory_contradiction_detected",
-                            fact=fact[:100],
-                            warning=warning,
-                            target=target,
-                            workspace_id=ctx.workspace_id,
-                        )
-
-                if target == "company":
-                    await append_to_company_knowledge(ws, fact)
-                elif target == "team":
-                    await append_to_team_knowledge(ws, fact)
-                else:
-                    await add_session_fact(
-                        ws, fact, source="conversation", category=target,
-                        thread_ts=ctx.thread_ts,
-                    )
-                logger.debug(
-                    "memory_persisted",
-                    target=target,
-                    workspace_id=ctx.workspace_id,
-                )
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
 

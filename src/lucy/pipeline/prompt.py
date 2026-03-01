@@ -7,7 +7,7 @@ static-to-dynamic so that LLM providers with automatic prefix caching
 Order:
   STATIC PREFIX  — SOUL.md + SYSTEM_CORE.md + common modules + env block
   ─── cache boundary ───
-  DYNAMIC SUFFIX — intent modules, custom integrations, skills, knowledge
+  DYNAMIC SUFFIX — intent modules, custom integrations, skills, knowledge, memory
 """
 
 from __future__ import annotations
@@ -93,10 +93,57 @@ def _load_prompt_modules(names: list[str], *, compact: bool = False) -> str:
     return "\n\n".join(parts)
 
 
+def _load_memory_context_template() -> str:
+    """Load the memory context prompt module template.
+
+    Falls back to a sensible inline default if the file doesn't exist.
+    """
+    path = _PROMPT_MODULES_DIR / "memory_context.md"
+    if path and path.exists():
+        return path.read_text(encoding="utf-8")
+    return (
+        "## What You Remember\n"
+        "{memory_items}\n\n"
+        "Use this context naturally in your responses. "
+        "Don't explicitly reference \"remembering\" unless asked. "
+        "Reference past context with phrases like \"as we discussed\" "
+        "or \"building on what you mentioned\"."
+    )
+
+
 # Modules loaded into the static prefix for all non-chat intents.
 _COMMON_MODULES = ["tool_use", "memory"]
 
 
+async def _build_memory_context(
+    ws: WorkspaceFS,
+    *,
+    user_id: str | None = None,
+    thread_ts: str | None = None,
+    topic_hint: str | None = None,
+) -> str:
+    """Build formatted memory context for prompt injection.
+
+    Loads relevant memories and formats them using the memory_context
+    template. Returns empty string if no memories found.
+    """
+    try:
+        from lucy.workspace.memory import load_relevant_memories
+
+        memory_items = await load_relevant_memories(
+            ws,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            topic_hint=topic_hint,
+        )
+        if not memory_items:
+            return ""
+
+        template = _load_memory_context_template()
+        return template.replace("{memory_items}", memory_items)
+    except Exception as e:
+        logger.warning("memory_context_build_failed", error=str(e))
+        return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -111,6 +158,8 @@ async def build_lightweight_prompt(
     user_slack_id: str | None = None,
     workspace_id: str | None = None,
     is_composition: bool = False,
+    user_message: str | None = None,
+    thread_ts: str | None = None,
 ) -> str:
     """Build a minimal prompt for simple conversational messages.
 
@@ -120,6 +169,9 @@ async def build_lightweight_prompt(
 
     When ``is_composition`` is True, the prompt is tuned for writing/
     drafting tasks rather than casual conversation.
+
+    Now includes memory context so even fast-path responses benefit
+    from cross-conversation memory.
 
     Typical size: ~2-4KB vs ~85KB for the full prompt.
     """
@@ -211,15 +263,28 @@ async def build_lightweight_prompt(
     # Add basic workspace context if available
     key_content = await get_key_skill_content(ws)
 
+    # ── Memory context injection (NEW) ─────────────────────────────
+    # Even fast-path responses should benefit from cross-conversation
+    # memory. This is the key fix for "no memory" between conversations.
+    memory_context = await _build_memory_context(
+        ws,
+        user_id=user_slack_id,
+        thread_ts=thread_ts,
+        topic_hint=user_message,
+    )
+
     parts = [soul, core + time_block]
     if key_content:
         parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
+    if memory_context:
+        parts.append(f"<memory>\n{memory_context}\n</memory>")
 
     prompt = "\n\n---\n\n".join(parts)
     logger.debug(
         "lightweight_prompt_built",
         workspace_id=ws.workspace_id,
         prompt_length=len(prompt),
+        has_memory=bool(memory_context),
     )
     return prompt
 
@@ -230,6 +295,8 @@ async def build_system_prompt(
     user_message: str | None = None,
     prompt_modules: list[str] | None = None,
     compact: bool = True,
+    user_id: str | None = None,
+    thread_ts: str | None = None,
 ) -> str:
     """Build the complete system prompt for a workspace.
 
@@ -246,12 +313,15 @@ async def build_system_prompt(
       6. Custom integrations block
       7. Skill descriptions + relevant skill content
       8. Knowledge blocks (company/team)
+      9. Memory context (session memories relevant to current request)
 
     Args:
         compact: Use SYSTEM_CORE_COMPACT (8KB vs 48KB). Strips verbose
                  examples while keeping all essential instructions.
                  Default True. Set False for research/document intents
                  where the extra formatting guidance helps.
+        user_id: Slack user ID for memory personalization.
+        thread_ts: Thread timestamp for same-thread memory filtering.
     """
     soul = _load_soul(compact=compact)
     system_core = _load_system_core(compact=compact)
@@ -419,6 +489,19 @@ async def build_system_prompt(
     if key_content:
         dynamic_parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
 
+    # ── Memory context injection (NEW) ─────────────────────────────
+    # Load relevant memories and inject them into the dynamic suffix.
+    # This ensures the model has access to cross-conversation context
+    # even on the full tool-use path.
+    memory_context = await _build_memory_context(
+        ws,
+        user_id=user_id,
+        thread_ts=thread_ts,
+        topic_hint=user_message,
+    )
+    if memory_context:
+        dynamic_parts.append(f"<memory>\n{memory_context}\n</memory>")
+
     if dynamic_parts:
         full_prompt = static_prefix + _SECTION_SEP + "\n\n".join(dynamic_parts)
     else:
@@ -432,6 +515,7 @@ async def build_system_prompt(
         compact=compact,
         connected_services=connected_services or [],
         has_relevant_skills=bool(relevant_skills),
+        has_memory=bool(memory_context),
         prompt_modules=prompt_modules or [],
     )
     return full_prompt
