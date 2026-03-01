@@ -10,7 +10,7 @@ If score < threshold, agent regenerates with enhanced instructions.
 Key design constraints:
 - Must be <5ms (regex only, no LLM)
 - Only triggers on knowledge/educational questions (not casual chat)
-- Max 1 regeneration attempt (latency budget)
+- Max 2 regeneration attempts with temperature escalation
 - Works with the existing depth_enhancer patterns where applicable
 """
 
@@ -25,6 +25,8 @@ __all__ = [
     "build_regeneration_prompt",
     "DepthScore",
     "DEPTH_THRESHOLD",
+    "MAX_REGEN_ATTEMPTS",
+    "REGEN_TEMPERATURES",
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -33,11 +35,19 @@ __all__ = [
 
 # Minimum acceptable score for knowledge questions on the fast path.
 # Below this → regenerate with stronger depth instructions.
-DEPTH_THRESHOLD = 5
+DEPTH_THRESHOLD = 4
 
 # Minimum word count for knowledge questions. Even a high-structure
 # response needs enough substance.
 MIN_KNOWLEDGE_WORDS = 120
+
+# Maximum regeneration attempts for shallow responses on the fast path.
+# Each attempt uses escalating temperature to break out of shallow patterns.
+MAX_REGEN_ATTEMPTS = 2
+
+# Temperature for each regeneration attempt. Escalates to push the model
+# toward more creative/comprehensive output if the first regen is still shallow.
+REGEN_TEMPERATURES = [0.9, 1.1]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -253,6 +263,18 @@ def score_response(
             structure_count += 1
     has_structure = structure_count >= 1
 
+    # Quality check: discount structure if list items are too terse.
+    # Bullet points with just 1-3 word items (e.g., "- Yes\n- No")
+    # don't represent real depth and shouldn't inflate the score.
+    _bullet_lines = re.findall(r"(?:^|\n)\s*[-•*]\s+(.+)", text)
+    _numbered_lines = re.findall(r"(?:^|\n)\s*\d+[.)]\s+(.+)", text)
+    _list_items = _bullet_lines + _numbered_lines
+    if _list_items:
+        _avg_words = sum(len(item.split()) for item in _list_items) / len(_list_items)
+        if _avg_words < 5 and structure_count > 0:
+            structure_count = max(0, structure_count - 1)
+            has_structure = structure_count >= 1
+
     # ── Depth signal detection ──
     signals: dict[str, bool] = {}
     for name, pat in _DEPTH_SIGNALS.items():
@@ -289,6 +311,13 @@ def score_response(
 
     # Cap at 10
     score = min(10, score)
+
+    # ── Word count floor for knowledge questions ──
+    # Even a well-structured response needs enough substance.
+    # A 70-word response with bullet points is still shallow —
+    # force it below threshold so regeneration kicks in.
+    if is_knowledge and word_count < MIN_KNOWLEDGE_WORDS:
+        score = min(score, 3)  # Always below DEPTH_THRESHOLD (4)
 
     # ── Missing elements ──
     missing: list[str] = []

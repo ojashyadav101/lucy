@@ -397,6 +397,8 @@ class LucyAgent:
                 from lucy.pipeline.depth_scorer import (
                     score_response as _score_resp,
                     build_regeneration_prompt as _build_regen,
+                    MAX_REGEN_ATTEMPTS as _max_regen,
+                    REGEN_TEMPERATURES as _regen_temps,
                 )
                 depth = _score_resp(response_text, route.intent, message)
                 logger.info(
@@ -408,43 +410,65 @@ class LucyAgent:
                     workspace_id=ctx.workspace_id,
                 )
                 if depth.needs_regeneration:
-                    # Regenerate with depth nudge (max 1 retry)
-                    nudge = _build_regen(message, response_text, depth)
-                    regen_messages = messages + [
-                        {"role": "assistant", "content": response_text},
-                        {"role": "user", "content": nudge},
-                    ]
-                    async with trace.span("llm_call_fast_depth_regen"):
-                        regen_response = await client.chat_completion(
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                            ] + regen_messages,
-                            config=ChatConfig(
-                                model=model,
-                                temperature=0.7,
-                                max_tokens=max_tok,
-                            ),
+                    # Regenerate with depth nudge (up to MAX_REGEN_ATTEMPTS
+                    # with escalating temperature to break shallow patterns)
+                    best_text = response_text
+                    best_depth = depth
+                    for _attempt in range(_max_regen):
+                        _regen_temp = (
+                            _regen_temps[_attempt]
+                            if _attempt < len(_regen_temps)
+                            else 1.1
                         )
-                    regen_text = regen_response.content or ""
-                    # Only use regenerated response if it's actually better
-                    regen_depth = _score_resp(regen_text, route.intent, message)
-                    if regen_depth.score > depth.score:
-                        response_text = regen_text
-                        logger.info(
-                            "fast_depth_regen_accepted",
-                            old_score=depth.score,
-                            new_score=regen_depth.score,
-                            old_words=depth.word_count,
-                            new_words=regen_depth.word_count,
-                            workspace_id=ctx.workspace_id,
+                        nudge = _build_regen(message, best_text, best_depth)
+                        regen_messages = messages + [
+                            {"role": "assistant", "content": best_text},
+                            {"role": "user", "content": nudge},
+                        ]
+                        async with trace.span(
+                            f"llm_call_fast_depth_regen_{_attempt + 1}"
+                        ):
+                            regen_response = await client.chat_completion(
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                ] + regen_messages,
+                                config=ChatConfig(
+                                    model=model,
+                                    temperature=_regen_temp,
+                                    max_tokens=max_tok,
+                                ),
+                            )
+                        regen_text = regen_response.content or ""
+                        regen_depth = _score_resp(
+                            regen_text, route.intent, message
                         )
-                    else:
-                        logger.info(
-                            "fast_depth_regen_rejected",
-                            old_score=depth.score,
-                            regen_score=regen_depth.score,
-                            workspace_id=ctx.workspace_id,
-                        )
+                        if regen_depth.score > best_depth.score:
+                            best_text = regen_text
+                            best_depth = regen_depth
+                            logger.info(
+                                "fast_depth_regen_accepted",
+                                attempt=_attempt + 1,
+                                old_score=depth.score,
+                                new_score=regen_depth.score,
+                                old_words=depth.word_count,
+                                new_words=regen_depth.word_count,
+                                temperature=_regen_temp,
+                                workspace_id=ctx.workspace_id,
+                            )
+                            # Stop early if we've crossed the threshold
+                            if not regen_depth.needs_regeneration:
+                                break
+                        else:
+                            logger.info(
+                                "fast_depth_regen_rejected",
+                                attempt=_attempt + 1,
+                                original_score=depth.score,
+                                best_score=best_depth.score,
+                                regen_score=regen_depth.score,
+                                temperature=_regen_temp,
+                                workspace_id=ctx.workspace_id,
+                            )
+                    response_text = best_text
 
             logger.info(
                 "fast_intent_complete",
