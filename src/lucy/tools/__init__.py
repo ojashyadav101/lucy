@@ -1,7 +1,12 @@
-"""Agent tool implementations: file generation, web search, spaces, email, services."""
+"""Agent tool implementations: code execution, file generation, web search, spaces, email, services."""
 
 from __future__ import annotations
 
+from lucy.tools.code_executor import (
+    execute_code_tool,
+    get_code_tool_definitions,
+    is_code_tool,
+)
 from lucy.tools.email_tools import (
     execute_email_tool,
     get_email_tool_definitions,
@@ -29,16 +34,19 @@ from lucy.tools.web_search import (
 )
 
 __all__ = [
+    "execute_code_tool",
     "execute_email_tool",
     "execute_file_tool",
     "execute_service_tool",
     "execute_spaces_tool",
     "execute_web_search",
+    "get_code_tool_definitions",
     "get_email_tool_definitions",
     "get_file_tool_definitions",
     "get_services_tool_definitions",
     "get_spaces_tool_definitions",
     "get_web_search_tool_definitions",
+    "is_code_tool",
     "is_email_tool",
     "is_service_tool",
     "is_spaces_tool",
