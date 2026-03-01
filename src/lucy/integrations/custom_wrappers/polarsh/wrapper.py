@@ -519,6 +519,21 @@ TOOLS = [
             "required": ["organization_id", "start_date", "end_date", "interval"],
         },
     },
+    {
+        "name": "polarsh_proxy_request",
+        "description": "Make an authenticated HTTP request to ANY Polar.sh API endpoint. Use as fallback.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "default": "GET"},
+                "endpoint": {"type": "string", "description": "API path, e.g. '/v1/subscriptions'"},
+                "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH"},
+                "query_params": {"type": "object", "description": "Query parameters"},
+            },
+            "required": ["endpoint"],
+        },
+        "action_type": "read_only",
+    },
 ]
 
 
@@ -826,8 +841,22 @@ async def execute(tool_name: str, args: dict, api_key: str) -> dict:
             "DELETE", f"{API_BASE_URL}/v1/discounts/{discount_id}", api_key
         )
     elif tool_name == "polarsh_get_metrics":
-        return await _make_request(
-            "GET", f"{API_BASE_URL}/v1/metrics/", api_key, params=args
-        )
+        return await _make_request("GET", f"{API_BASE_URL}/v1/metrics/", api_key, params=args)
+    elif tool_name == "polarsh_proxy_request":
+        return await polarsh_proxy_request(api_key, **args)
     else:
         return {"error": f"Tool {tool_name} not found."}
+
+
+async def polarsh_proxy_request(api_key, method="GET", endpoint="/v1/products", body=None, query_params=None):
+    """Raw HTTP proxy for the entire Polar.sh API."""
+    method = method.upper()
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        return {"error": f"Unsupported method: {method}"}
+    if not endpoint.startswith("/"):
+        endpoint = f"/{endpoint}"
+    url = f"{API_BASE_URL}{endpoint}" if endpoint.startswith("/v1") else f"{API_BASE_URL}/v1{endpoint}"
+    try:
+        return await _make_request(method, url, api_key, params=query_params if method=="GET" else None, json_data=body if method in ("POST","PUT","PATCH") else None)
+    except Exception as e:
+        return {"error": f"Proxy request failed: {e}"}

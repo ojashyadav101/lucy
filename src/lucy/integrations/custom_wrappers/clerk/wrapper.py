@@ -1062,7 +1062,22 @@ TOOLS: List[Dict[str, Any]] = [
             },
             "required": ["webhook_id"]
         }
-    }
+    },
+    {
+        "name": "clerk_proxy_request",
+        "description": "Make an authenticated HTTP request to ANY Clerk API endpoint. Use as a fallback when named Clerk tools don't cover the endpoint you need.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "method": {"type": "string", "enum": ["GET","POST","PUT","PATCH","DELETE"], "default": "GET"},
+                "endpoint": {"type": "string", "description": "API path, e.g. '/v1/users'"},
+                "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH"},
+                "query_params": {"type": "object", "description": "Query parameters"},
+            },
+            "required": ["endpoint"],
+        },
+        "action_type": "read_only",
+    },
 ]
 
 async def execute(tool_name: str, args: Dict, api_key: str) -> Dict:
@@ -1131,5 +1146,27 @@ async def execute(tool_name: str, args: Dict, api_key: str) -> Dict:
         return await clerk_create_webhook(api_key, **args)
     elif tool_name == "clerk_delete_webhook":
         return await clerk_delete_webhook(api_key, **args)
+    elif tool_name == "clerk_proxy_request":
+        return await clerk_proxy_request(api_key, **args)
     else:
         return {"error": f"Tool '{tool_name}' not found."}
+
+
+async def clerk_proxy_request(api_key, method="GET", endpoint="/v1/users", body=None, query_params=None):
+    """Raw HTTP proxy for the entire Clerk API."""
+    method = method.upper()
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        return {"error": f"Unsupported method: {method}"}
+    if not endpoint.startswith("/"):
+        endpoint = f"/{endpoint}"
+    url = f"{BASE_URL}{endpoint}" if endpoint.startswith("/v1") else f"{BASE_URL}/v1{endpoint}"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=settings.clerk_api_timeout_s) as client:
+            resp = await client.request(method, url, headers=headers, params=query_params, json=body if method in ("POST","PUT","PATCH") else None)
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        return {"error": f"HTTP {e.response.status_code}: {e.response.text[:500]}"}
+    except Exception as e:
+        return {"error": str(e)}

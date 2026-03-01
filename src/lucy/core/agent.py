@@ -2285,6 +2285,21 @@ class LucyAgent:
 
             if name == "COMPOSIO_SEARCH_TOOLS":
                 search_query = params.get("query") or params.get("search") or ""
+                # Intercept: redirect if query targets a pre-loaded wrapper
+                from lucy.integrations.custom_wrappers import get_wrapper_health, _INTENT_MAP
+                _sq = search_query.lower()
+                _redir = None
+                for _sl, _cfg in _INTENT_MAP.items():
+                    if any(kw in _sq for kw in _cfg.get("keywords", [])):
+                        _redir = _sl
+                        break
+                if _redir and _redir in get_wrapper_health():
+                    _sn = _INTENT_MAP[_redir].get("service_name", _redir)
+                    return call_id, json.dumps({
+                        "_wrapper_redirect": True,
+                        "message": f"STOP - {_sn} has pre-loaded lucy_custom_{_redir}_* tools. Call them directly.",
+                    }, default=str)
+
                 result = _filter_search_results(result)
                 result = _validate_search_relevance(
                     result, search_query, trace.user_message,

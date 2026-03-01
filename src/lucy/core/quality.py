@@ -72,6 +72,15 @@ def is_genuine_service_match(query: str, result_name: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def get_wrapper_covered_services() -> set[str]:
+    """Return service names covered by custom wrappers."""
+    try:
+        from lucy.integrations.custom_wrappers import get_loaded_wrapper_services
+        return set(get_loaded_wrapper_services().values())
+    except Exception:
+        return set()
+
+
 def filter_search_results(
     result: dict[str, Any],
     max_results: int = 5,
