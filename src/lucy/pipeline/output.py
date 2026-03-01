@@ -32,6 +32,7 @@ import structlog
 
 from lucy.config import LLMPresets, settings
 from lucy.pipeline.content_classifier import strip_internal_content
+from lucy.pipeline.fact_verifier import verify_claims
 
 logger = structlog.get_logger()
 
@@ -722,6 +723,17 @@ async def _deai(text: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
+
+
+async def _verify_facts(text: str) -> str:
+    """Layer 0.5: Verify factual claims and correct hallucinations."""
+    try:
+        result = await verify_claims(text)
+        return result if result else text
+    except Exception:
+        # Fact verification is best-effort — never block output
+        return text
+
 
 async def process_output(text: str | None) -> str:
     """Run all output layers on a message before posting to Slack.
