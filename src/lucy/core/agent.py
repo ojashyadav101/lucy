@@ -345,7 +345,7 @@ class LucyAgent:
                 r"(?:^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\b|(?:help\s+me|can\s+you|could\s+you|please|I\s+need\s+(?:you\s+to\s+)?)(?:write|draft|compose|create|craft)\b)",
                 message, re.IGNORECASE,
             ))
-            max_tok = 4096 if _is_composition else 1000
+            max_tok = 16384
 
             logger.info(
                 "fast_intent_no_tools",
