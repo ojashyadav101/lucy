@@ -109,6 +109,17 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
                 encoding="utf-8",
             )
 
+            # Register action_type annotations from wrapper TOOLS
+            try:
+                from lucy.core.action_classifier import register_overrides_from_wrapper
+                register_overrides_from_wrapper(slug, raw_tools)
+            except Exception as exc:
+                logger.debug(
+                    "action_classifier_annotation_load_skipped",
+                    slug=slug,
+                    error=str(exc),
+                )
+
             logger.info(
                 "custom_wrapper_loaded",
                 slug=slug,
