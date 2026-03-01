@@ -726,3 +726,56 @@ def verify_output(
         "issues": issues,
         "should_retry": len(issues) > 0,
     }
+
+
+async def trim_tool_results(
+    messages: list[dict[str, Any]],
+    max_result_chars: int = 2000,
+) -> list[dict[str, Any]]:
+    """Trim old tool results to reduce payload size."""
+    trimmed: list[dict[str, Any]] = []
+    total_tool_results = sum(1 for m in messages if m.get("role") == "tool")
+    keep_last_n = min(2, total_tool_results)
+    trim_threshold = total_tool_results - keep_last_n
+    tool_idx = 0
+
+    from lucy.config import settings
+
+    for msg in messages:
+        if msg.get("role") == "tool":
+            if tool_idx < trim_threshold:
+                c = msg.get("content", "")
+                if len(c) > max_result_chars:
+                    try:
+                        from lucy.core.openclaw import ChatConfig, get_openclaw_client
+                        prompt = (
+                            f"Summarize this tool output concisely, preserving "
+                            f"key errors, file paths, and success/fail signals. "
+                            f"Keep it under {max_result_chars} characters."
+                            f"
+
+{c[:10000]}"
+                        )
+                        client = await get_openclaw_client()
+                        import asyncio
+                        result = await asyncio.wait_for(
+                            client.chat_completion(
+                                messages=[{"role": "user", "content": prompt}],
+                                config=ChatConfig(
+                                    model=settings.model_tier_fast,
+                                    system_prompt="You are a concise summarizer.",
+                                    max_tokens=500,
+                                ),
+                            ),
+                            timeout=10.0,
+                        )
+                        summary = result.content or ""
+                        msg = {**msg, "content": f"[SUMMARIZED]: {summary}"}
+                    except Exception:
+                        msg = {**msg, "content": c[:max_result_chars] + "...(trimmed)"}
+            tool_idx += 1
+            trimmed.append(msg)
+        else:
+            trimmed.append(msg)
+
+    return trimmed
