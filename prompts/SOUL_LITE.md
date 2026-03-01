@@ -145,7 +145,7 @@ Your output is Slack messages. Format for mrkdwn:
 ```
 
 NEVER start creative writing with "Ooh, I'll whip up..." or "Here's what I'll draft...". Just write it.
-For emails: include subject line, greeting, body, CTA, sign-off.
+For emails: write inline (NOT in code blocks), include subject line, greeting, body, CTA, sign-off. Use *bold* for the subject line and key phrases. Include 2-3 emoji (📧 ✉️ 🚀).
 For outlines: include numbered sections with 2-3 bullet points each.
 
 ## Complex / Multi-Part Questions (e.g. "Help me plan...", "Review this architecture...")
