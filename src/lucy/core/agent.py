@@ -2205,6 +2205,32 @@ class LucyAgent:
                         ),
                     })
 
+            # ── Confirmation Gate: classify and gate actions ─────────
+            from lucy.core.confirmation_gate import should_gate, create_gated_result
+            from lucy.core.action_classifier import get_classification_summary
+
+            gate_needed, action_type = should_gate(
+                name, params,
+                is_cron_execution=getattr(ctx, "is_cron_execution", False),
+            )
+
+            logger.debug(
+                "action_classified",
+                tool=name,
+                action_type=action_type.value,
+                gated=gate_needed,
+                classification=get_classification_summary(name, params),
+            )
+
+            if gate_needed:
+                gated_result = create_gated_result(
+                    tool_name=name,
+                    parameters=params,
+                    action_type=action_type,
+                    workspace_id=ctx.workspace_id,
+                )
+                return call_id, json.dumps(gated_result, default=str)
+
             if name == "COMPOSIO_MULTI_EXECUTE_TOOL":
                 tools_list = params.get("tools") or params.get("actions") or []
                 tools_key = "tools" if "tools" in params else "actions"
@@ -2251,27 +2277,6 @@ class LucyAgent:
                     if not clean_actions:
                         return call_id, json.dumps(local_results, default=str)
                     params[tools_key] = clean_actions
-
-                from lucy.slack.hitl import is_destructive_tool_call
-                for act in clean_actions:
-                    act_name = act if isinstance(act, str) else (act.get("action") or act.get("tool") or "")
-                    if is_destructive_tool_call(str(act_name)):
-                        from lucy.slack.hitl import create_pending_action
-                        action_id = create_pending_action(
-                            tool_name=name,
-                            parameters=params,
-                            description=f"Destructive action detected: {act_name}",
-                            workspace_id=ctx.workspace_id,
-                        )
-                        return call_id, json.dumps({
-                            "status": "pending_approval",
-                            "action_id": action_id,
-                            "message": (
-                                "This action requires user confirmation before execution. "
-                                "Present an approval prompt to the user describing what "
-                                "you're about to do. Include the action_id in your response."
-                            ),
-                        })
 
             async with trace.span(f"tool_exec_{name}", tool=name):
                 result = await self._execute_tool(

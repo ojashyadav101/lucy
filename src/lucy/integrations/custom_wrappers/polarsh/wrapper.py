@@ -284,6 +284,7 @@ TOOLS = [
     },
     {
         "name": "polarsh_generate_order_invoice",
+        "action_type": "READ",
         "description": "Generate an invoice for a specific order.",
         "parameters": {
             "type": "object",
@@ -504,6 +505,7 @@ TOOLS = [
     },
     {
         "name": "polarsh_get_metrics",
+        "action_type": "READ",
         "description": "Retrieve metrics for an organization within a specified date range and interval.",
         "parameters": {
             "type": "object",
