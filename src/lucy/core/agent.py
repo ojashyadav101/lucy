@@ -387,10 +387,13 @@ class LucyAgent:
             response_text = response.content or ""
 
             # ── Fast-path depth gate ──────────────────────────────
-            # For knowledge/educational questions, check response depth
-            # before sending. If too shallow, regenerate once with
-            # stronger depth instructions.
-            if _is_knowledge:
+            # For knowledge AND composition/creative questions, check
+            # response depth before sending. If too shallow, regenerate
+            # once with stronger depth instructions.
+            _needs_depth_check = _is_knowledge or _is_composition or (
+                len(message) > 60 and route.intent == "chat"
+            )
+            if _needs_depth_check:
                 from lucy.pipeline.depth_scorer import (
                     score_response as _score_resp,
                     build_regeneration_prompt as _build_regen,

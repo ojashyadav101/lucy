@@ -308,12 +308,17 @@ def score_response(
         missing.append("sufficient_detail")
 
     # ── Regeneration decision ──
-    # Only enforce depth for knowledge questions on chat intent
+    # Enforce depth for both knowledge AND composition/creative questions
     needs_regen = False
-    if is_knowledge and intent in ("chat", "lookup", "followup"):
+    is_composition = bool(re.search(
+        r"(?:write|draft|compose|create|outline|plan|review|suggest|recommend|help me)",
+        question, re.IGNORECASE,
+    ))
+    if (is_knowledge or is_composition) and intent in ("chat", "lookup", "followup"):
+        min_words = MIN_KNOWLEDGE_WORDS if is_knowledge else 100
         if score < DEPTH_THRESHOLD:
             needs_regen = True
-        elif word_count < MIN_KNOWLEDGE_WORDS:
+        elif word_count < min_words:
             needs_regen = True
 
     return DepthScore(
