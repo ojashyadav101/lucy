@@ -1416,6 +1416,60 @@ class LucyAgent:
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
 
+        # 6d. Post-task skill learning — persist insights from complex tasks
+        # Heuristic: if the agent used >3 tool calls or had >1 retries,
+        # the task was complex enough that there's probably a useful learning.
+        try:
+            tool_call_count = len(trace.tool_calls_made)
+            retry_count = getattr(self, "_empty_retries", 0) + getattr(self, "_narration_retries", 0)
+
+            if tool_call_count > 3 or retry_count > 1:
+                from lucy.workspace.skills import (
+                    detect_relevant_skills,
+                    update_skill_with_learning,
+                )
+
+                # Determine which skill this task was about
+                matched_skills = detect_relevant_skills(message)
+                skill_name = matched_skills[0] if matched_skills else route.intent
+
+                # Build a concise learning summary
+                learning_parts = []
+                if tool_call_count > 3:
+                    # Summarize the tool chain used
+                    unique_tools = list(dict.fromkeys(trace.tool_calls_made))
+                    learning_parts.append(
+                        f"Task required {tool_call_count} tool calls "
+                        f"({', '.join(unique_tools[:5])})"
+                    )
+                if retry_count > 1:
+                    learning_parts.append(
+                        f"Required {retry_count} retries to produce quality output"
+                    )
+
+                # Include a hint from the query for context
+                query_preview = message[:120].replace("\n", " ").strip()
+                learning = (
+                    f"Complex task: \"{query_preview}\". "
+                    + ". ".join(learning_parts) + "."
+                )
+
+                await update_skill_with_learning(
+                    skill_name=skill_name,
+                    learning=learning,
+                    workspace_id=ctx.workspace_id,
+                    ws=ws,
+                )
+                logger.debug(
+                    "post_task_skill_updated",
+                    skill_name=skill_name,
+                    tool_calls=tool_call_count,
+                    retries=retry_count,
+                    workspace_id=ctx.workspace_id,
+                )
+        except Exception as e:
+            logger.warning("post_task_skill_update_error", error=str(e))
+
         # 7. Log activity
         from lucy.workspace.activity_log import log_activity
 
