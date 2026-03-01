@@ -129,8 +129,8 @@ _DATA_SOURCE_KEYWORDS = re.compile(
 _COMPOSITION_INTENT = re.compile(
     r"^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\s+"
     r"(?:me\s+|us\s+)?(?:a\s+|an\s+|the\s+|some\s+)?"
-    r"(?:short\s+|brief\s+|quick\s+|long\s+|detailed\s+)?"
-    r"(?:product\s+)?(?:update|announcement|email|message|memo|"
+    r"(?:\w+\s+){0,3}"  # flexible: up to 3 words before noun (e.g. "cold outreach")
+    r"(?:update|announcement|email|message|memo|"
     r"report|summary|brief|newsletter|post|blog|note|copy|text|"
     r"description|blurb|paragraph|response|reply|answer|"
     r"letter|proposal|pitch|tweet|thread|caption|tagline|headline)",
