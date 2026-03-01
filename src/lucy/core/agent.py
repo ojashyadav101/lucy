@@ -1589,6 +1589,20 @@ class LucyAgent:
             # rate limits can cause empty responses at turn 0 too
             # (especially after planning steps inject system messages).
             if not tool_calls and not response_text.strip():
+                # Detect API anomaly: prompt_tokens=0 means the API call
+                # likely failed silently (rate limit, provider issue).
+                # Log this separately for debugging.
+                _usage = response.usage or {}
+                if _usage.get("prompt_tokens", -1) == 0:
+                    logger.warning(
+                        "empty_response_api_anomaly",
+                        turn=turn,
+                        prompt_tokens=0,
+                        completion_tokens=_usage.get("completion_tokens", 0),
+                        model=current_model,
+                        tool_count=len(tools) if tools else 0,
+                        workspace_id=ctx.workspace_id,
+                    )
                 empty_retries = getattr(self, "_empty_retries", 0)
                 if empty_retries < 2:
                     self._empty_retries = empty_retries + 1

@@ -185,25 +185,109 @@ def detect_relevant_wrappers(
     # In strict mode (crons), only match on service names, not generic keywords.
     # This prevents cron boilerplate like "fetch data for users" from loading
     # all 66 wrapper tools when the cron task doesn't actually need them.
-    if not strict_mode:
+    if strict_mode:
         _EXTRA_KEYWORDS: dict[str, list[str]] = {
-            "clerk": ["user", "users", "auth", "authentication", "sign up", "signup", "login", "session", "organization"],
-            "polarsh": ["polar", "subscription", "product", "order", "customer", "checkout", "billing", "payment", "benefit", "discount"],
-        }
-    else:
-        # Strict mode: only service-specific keywords, no generic ones
-        _EXTRA_KEYWORDS = {
             "clerk": ["clerk"],
             "polarsh": ["polar", "polar.sh"],
         }
+        relevant: list[str] = []
+        for slug, keywords in _WRAPPER_TRIGGERS.items():
+            all_keywords = keywords + _EXTRA_KEYWORDS.get(slug, [])
+            for kw in all_keywords:
+                if kw in msg:
+                    relevant.append(slug)
+                    break
+        return relevant if relevant else []
+
+    # --- Context-aware keyword matching ---
+    # Tier 1: Strong signals (always trigger) - explicit service mentions
+    _STRONG_KEYWORDS: dict[str, list[str]] = {
+        "clerk": ["clerk", "authentication", "sign up", "signup", "login"],
+        "polarsh": ["polar", "polar.sh", "subscription", "checkout",
+                     "billing", "payment", "benefit", "discount"],
+    }
+
+    # Tier 2: Ambiguous keywords that need data-action context
+    # These only trigger when combined with action verbs or data patterns
+    _CONTEXT_KEYWORDS: dict[str, list[str]] = {
+        "clerk": ["user", "users", "session", "organization"],
+        "polarsh": ["product", "products", "order", "orders", "customer", "customers"],
+    }
+
+    # Negative patterns: these phrases contain tier-2 keywords but
+    # are NOT about the service (e.g. "product update" = announcement)
+    _NEGATIVE_PHRASES: set[str] = {
+        "product update", "product announcement", "product launch",
+        "product roadmap", "product news", "product email",
+        "product strategy", "product review", "product feedback",
+        "product demo", "product brief", "product vision",
+        "user experience", "user interface", "user story",
+        "user journey", "user research", "user persona",
+        "user flow", "user guide", "user manual",
+        "user friendly", "user-friendly",
+        "session notes", "session summary", "session agenda",
+        "order of", "in order to", "order to",
+        "customer success", "customer support story",
+    }
+
+    # Data-action patterns that confirm a tier-2 keyword is about data
+    _DATA_ACTION_RE = re.compile(
+        r"\b(?:list|get|fetch|show|count|how many|total|check|find|"
+        r"look up|lookup|search|query|pull|retrieve|export|import|"
+        r"create|add|update|edit|delete|remove|ban|unban|revoke|"
+        r"active|inactive|recent|new|all|our|the|my)\b",
+        re.IGNORECASE,
+    )
+
+    # Writing/composition mode: if the primary intent is writing content
+    # (not querying data), context keywords should NOT trigger wrappers.
+    # E.g., "write a product update mentioning 3000 users" is a writing task.
+    _COMPOSITION_RE = re.compile(
+        r"\b(?:write|draft|compose|summarize|create\s+(?:a|an|the)\s+"
+        r"(?:update|announcement|email|message|report|brief|summary|"
+        r"newsletter|post|blog|note|memo|document))\b",
+        re.IGNORECASE,
+    )
 
     relevant: list[str] = []
-    for slug, keywords in _WRAPPER_TRIGGERS.items():
-        all_keywords = keywords + _EXTRA_KEYWORDS.get(slug, [])
-        for kw in all_keywords:
-            if kw in msg:
+
+    # Check strong keywords first (service names + unambiguous terms)
+    for slug in set(list(_WRAPPER_TRIGGERS) + list(_STRONG_KEYWORDS)):
+        if slug in relevant:
+            continue
+        all_strong = _WRAPPER_TRIGGERS.get(slug, []) + _STRONG_KEYWORDS.get(slug, [])
+        for kw in all_strong:
+            if kw in msg and slug not in relevant:
                 relevant.append(slug)
                 break
+
+    # Check context keywords (only if not already matched)
+    # Skip context keywords entirely if message is a composition task
+    is_composition = bool(_COMPOSITION_RE.search(msg))
+    if not is_composition:
+        for slug, keywords in _CONTEXT_KEYWORDS.items():
+            if slug in relevant:
+                continue
+            for kw in keywords:
+                if kw not in msg:
+                    continue
+                # Check negative phrases first
+                is_negative = False
+                for neg in _NEGATIVE_PHRASES:
+                    if neg in msg:
+                        # The keyword appears only in a negative context
+                        # Check if the keyword also appears outside the negative phrase
+                        remaining = msg.replace(neg, "")
+                        if kw not in remaining:
+                            is_negative = True
+                            break
+                if is_negative:
+                    continue
+                # Require a data-action verb nearby to confirm data context
+                if _DATA_ACTION_RE.search(msg):
+                    if slug not in relevant:
+                        relevant.append(slug)
+                    break
 
     return relevant if relevant else []
 
