@@ -749,12 +749,10 @@ async def trim_tool_results(
                     try:
                         from lucy.core.openclaw import ChatConfig, get_openclaw_client
                         prompt = (
-                            f"Summarize this tool output concisely, preserving "
-                            f"key errors, file paths, and success/fail signals. "
-                            f"Keep it under {max_result_chars} characters."
-                            f"
-
-{c[:10000]}"
+                            "Summarize this tool output concisely, preserving "
+                            "key errors, file paths, and success/fail signals. "
+                            f"Keep it under {max_result_chars} characters. "
+                            + c[:10000]
                         )
                         client = await get_openclaw_client()
                         import asyncio
