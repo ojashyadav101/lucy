@@ -210,10 +210,38 @@ _DATA_TASK_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+
+# Requests Lucy fundamentally cannot fulfill — detect early so we can
+# route to a graceful "I can't do that, but here's what I CAN do" response.
+_IMPOSSIBLE_REQUESTS = re.compile(
+    r"\b(?:"
+    r"(?:what(?:'s| is) the )?(?:weather|temperature|forecast|humidity)"
+    r"|(?:current |today'?s? )?(?:stock price|share price|stock market|nasdaq|dow jones)"
+    r"|live score|match score|game score|sports? score"
+    r"|(?:send|write) (?:a |an )?(?:text|sms|text message)"
+    r"|(?:call|phone|ring|dial) (?:me|them|him|her|this number|\d)"
+    r"|(?:post|tweet|publish|share) (?:\w+ )?(?:on|to) (?:twitter|x\.com|linkedin|instagram|tiktok|facebook)"
+    r"|(?:buy|purchase|order|pay for|checkout|add to cart)"
+    r"|(?:crypto|bitcoin|ethereum|btc|eth) (?:price|value|rate)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Response template for impossible requests (used by the handler)
+IMPOSSIBLE_RESPONSE_HINT = (
+    "The user asked for something Lucy cannot do. Respond by: "
+    "1) Clearly stating you can't do that specific thing. "
+    "2) Suggesting the closest thing you CAN do. "
+    "3) Being direct and helpful, not apologetic. "
+    "Example: \"I can't check live weather, but I can search for a recent "
+    "forecast and summarize it for you. Want me to do that?\""
+)
+
 # Dynamic prompt modules loaded AFTER the static prefix (tool_use + memory
 # are already in the static prefix for all non-chat intents). Only truly
 # intent-specific modules are listed here.
 INTENT_MODULES: dict[str, list[str]] = {
+    "impossible": [],
     "chat": [],
     "lookup": [],
     "confirmation": [],
@@ -260,6 +288,13 @@ def classify_and_route(
             tier=tier,
             prompt_modules=INTENT_MODULES.get(intent, []),
         )
+
+    # 0. Impossible requests — detect FIRST, before anything else can match.
+    #    "What's the weather?" would otherwise match _SIMPLE_QUESTION or
+    #    _KNOWLEDGE_INTENT and get a clarifying question instead of a
+    #    graceful "I can't do that" response.
+    if _IMPOSSIBLE_REQUESTS.search(text):
+        return _choice("impossible", "fast")
 
     # 1. Pure greetings/acknowledgments
     if _GREETING_PATTERNS.match(text):
