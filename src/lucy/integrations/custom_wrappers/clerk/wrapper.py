@@ -485,28 +485,7 @@ async def clerk_delete_organization_membership(api_key: str, organization_id: st
 # Note: Clerk's webhooks are typically configured in the dashboard.
 # These tools are illustrative for an AI to understand the *concept* of webhooks
 # and to potentially interact with a *hypothetical* webhook management API if it existed.
-# For a real Clerk integration, webhook events are consumed, not managed via this API.
-
-async def clerk_list_webhooks(api_key: str) -> Dict:
-    """
-    (Simulated) Lists all configured webhooks. In a real Clerk setup, webhooks are configured
-    via the dashboard, and this would represent fetching their configuration.
-    """
-    return {"error": "Clerk's backend API does not directly manage webhooks via API. Please configure webhooks in the Clerk Dashboard."}
-
-async def clerk_create_webhook(api_key: str, webhook_data: Dict) -> Dict:
-    """
-    (Simulated) Creates a new webhook endpoint. In a real Clerk setup, webhooks are configured
-    via the dashboard. This tool is for conceptual understanding.
-    """
-    return {"error": "Clerk's backend API does not directly manage webhooks via API. Please configure webhooks in the Clerk Dashboard."}
-
-async def clerk_delete_webhook(api_key: str, webhook_id: str) -> Dict:
-    """
-    (Simulated) Deletes a webhook endpoint. In a real Clerk setup, webhooks are configured
-    via the dashboard. This tool is for conceptual understanding.
-    """
-    return {"error": "Clerk's backend API does not directly manage webhooks via API. Please configure webhooks in the Clerk Dashboard."}
+# Webhook management: not available via Clerk API — use the Clerk Dashboard.
 
 # --- Session Management ---
 
@@ -1023,45 +1002,6 @@ TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {}
         }
-    },
-    {
-        "name": "clerk_list_webhooks",
-        "description": "(Simulated) Lists all configured webhooks. In a real Clerk setup, webhooks are configured via the dashboard, and this tool is for conceptual understanding.",
-        "parameters": {
-            "type": "object",
-            "properties": {}
-        }
-    },
-    {
-        "name": "clerk_create_webhook",
-        "description": "(Simulated) Creates a new webhook endpoint. In a real Clerk setup, webhooks are configured via the dashboard. This tool is for conceptual understanding.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "webhook_data": {
-                    "type": "object",
-                    "description": "Data for the new webhook.",
-                    "properties": {
-                        "url": {"type": "string", "format": "uri", "description": "The URL where webhook events will be sent."},
-                        "events": {"type": "array", "items": {"type": "string"}, "description": "List of event types to subscribe to (e.g., 'user.created', 'organization.created')."},
-                        "secret": {"type": "string", "description": "Optional secret for signing webhook payloads."},
-                    },
-                    "required": ["url", "events"]
-                }
-            },
-            "required": ["webhook_data"]
-        }
-    },
-    {
-        "name": "clerk_delete_webhook",
-        "description": "(Simulated) Deletes a webhook endpoint. In a real Clerk setup, webhooks are configured via the dashboard. This tool is for conceptual understanding.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "webhook_id": {"type": "string", "description": "The ID of the webhook to delete."}
-            },
-            "required": ["webhook_id"]
-        }
     }
 ]
 
@@ -1125,11 +1065,5 @@ async def execute(tool_name: str, args: Dict, api_key: str) -> Dict:
         return await clerk_get_domain(api_key, **args)
     elif tool_name == "clerk_get_instance_settings":
         return await clerk_get_instance_settings(api_key, **args)
-    elif tool_name == "clerk_list_webhooks":
-        return await clerk_list_webhooks(api_key, **args)
-    elif tool_name == "clerk_create_webhook":
-        return await clerk_create_webhook(api_key, **args)
-    elif tool_name == "clerk_delete_webhook":
-        return await clerk_delete_webhook(api_key, **args)
     else:
         return {"error": f"Tool '{tool_name}' not found."}
