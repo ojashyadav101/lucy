@@ -363,6 +363,38 @@ Examples of BAD acknowledgments (never do these):
 Output ONLY the acknowledgment text. Nothing else."""
 
 
+
+# ── Empty ack suppressor ──────────────────────────────────────────────
+# 8% of responses are "ack-without-answer": Lucy says "I'll do X!" in
+# 20-27 words with NO actual content following.  The ack LLM generates
+# these short promise-only messages that get posted before the real
+# result comes in.  We suppress them at the source.
+
+_EMPTY_ACK_PATTERNS = re.compile(
+    r"\b(?:I'll|I will|Let me|I'm going to|I'm gonna|I can|Working on|Getting)\b",
+    re.IGNORECASE,
+)
+
+_EMPTY_ACK_MAX_WORDS = 40
+
+
+def _is_empty_ack(text: str) -> bool:
+    """Return True if text is a content-free acknowledgment.
+
+    Matches messages that are:
+    - Under 40 words AND
+    - Contain promise/action patterns (I'll, Let me, I'm working, etc.)
+
+    These should not be sent as standalone messages.
+    """
+    if not text or not text.strip():
+        return True
+    word_count = len(text.split())
+    if word_count >= _EMPTY_ACK_MAX_WORDS:
+        return False
+    return bool(_EMPTY_ACK_PATTERNS.search(text))
+
+
 _SKIP_ACK_INTENTS = frozenset({"greeting", "conversational", "lookup"})
 
 # Only acknowledge genuinely long-running tasks.
@@ -653,8 +685,10 @@ async def _handle_message(
             ack_msg = await _build_acknowledgment(
                 text, route.intent, connected_services=svc_names,
             )
-            if ack_msg:
+            if ack_msg and not _is_empty_ack(ack_msg):
                 await say(text=ack_msg, thread_ts=thread_ts)
+            elif ack_msg:
+                logger.debug("suppressed_empty_ack", ack=ack_msg[:80])
 
         ack_task = asyncio.create_task(_send_ack())
         ack_task.add_done_callback(_log_task_exception)
