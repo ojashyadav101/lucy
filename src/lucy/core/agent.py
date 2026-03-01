@@ -345,6 +345,11 @@ class LucyAgent:
                 r"(?:^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\b|(?:help\s+me|can\s+you|could\s+you|please|I\s+need\s+(?:you\s+to\s+)?)(?:write|draft|compose|create|craft)\b)",
                 message, re.IGNORECASE,
             ))
+            # Detect knowledge/educational questions that need depth.
+            # These deserve structured, comprehensive answers — not
+            # the same brief treatment as casual chat.
+            from lucy.pipeline.depth_scorer import is_knowledge_question as _is_kq
+            _is_knowledge = _is_kq(message)
             max_tok = 16384
 
             logger.info(
@@ -352,6 +357,7 @@ class LucyAgent:
                 intent=route.intent,
                 model=model,
                 is_composition=_is_composition,
+                is_knowledge=_is_knowledge,
                 workspace_id=ctx.workspace_id,
             )
             from lucy.pipeline.prompt import build_lightweight_prompt
@@ -378,13 +384,72 @@ class LucyAgent:
                     ),
                 )
             trace.model_used = model
+            response_text = response.content or ""
+
+            # ── Fast-path depth gate ──────────────────────────────
+            # For knowledge/educational questions, check response depth
+            # before sending. If too shallow, regenerate once with
+            # stronger depth instructions.
+            if _is_knowledge:
+                from lucy.pipeline.depth_scorer import (
+                    score_response as _score_resp,
+                    build_regeneration_prompt as _build_regen,
+                )
+                depth = _score_resp(response_text, route.intent, message)
+                logger.info(
+                    "fast_depth_check",
+                    depth_score=depth.score,
+                    word_count=depth.word_count,
+                    needs_regen=depth.needs_regeneration,
+                    missing=depth.missing_elements[:3],
+                    workspace_id=ctx.workspace_id,
+                )
+                if depth.needs_regeneration:
+                    # Regenerate with depth nudge (max 1 retry)
+                    nudge = _build_regen(message, response_text, depth)
+                    regen_messages = messages + [
+                        {"role": "assistant", "content": response_text},
+                        {"role": "user", "content": nudge},
+                    ]
+                    async with trace.span("llm_call_fast_depth_regen"):
+                        regen_response = await client.chat_completion(
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                            ] + regen_messages,
+                            config=ChatConfig(
+                                model=model,
+                                temperature=0.7,
+                                max_tokens=max_tok,
+                            ),
+                        )
+                    regen_text = regen_response.content or ""
+                    # Only use regenerated response if it's actually better
+                    regen_depth = _score_resp(regen_text, route.intent, message)
+                    if regen_depth.score > depth.score:
+                        response_text = regen_text
+                        logger.info(
+                            "fast_depth_regen_accepted",
+                            old_score=depth.score,
+                            new_score=regen_depth.score,
+                            old_words=depth.word_count,
+                            new_words=regen_depth.word_count,
+                            workspace_id=ctx.workspace_id,
+                        )
+                    else:
+                        logger.info(
+                            "fast_depth_regen_rejected",
+                            old_score=depth.score,
+                            regen_score=regen_depth.score,
+                            workspace_id=ctx.workspace_id,
+                        )
+
             logger.info(
                 "fast_intent_complete",
                 intent=route.intent,
-                response_length=len(response.content or ""),
+                response_length=len(response_text),
                 workspace_id=ctx.workspace_id,
             )
-            return _strip_control_tokens(response.content or "")
+            return _strip_control_tokens(response_text)
 
         # 3. Fetch connected services + meta-tools in parallel
         from lucy.pipeline.prompt import build_system_prompt
@@ -1817,6 +1882,10 @@ class LucyAgent:
                 "COMPOSIO_REMOTE_BASH_TOOL",
                 "COMPOSIO_GET_TOOL_SCHEMAS",
                 "COMPOSIO_MANAGE_CONNECTIONS",
+                # Local code execution tools (may iterate multiple times)
+                "lucy_execute_python",
+                "lucy_execute_bash",
+                "lucy_run_script",
             }
             for tc in tool_calls:
                 tn = tc.get("name", "").strip()
@@ -2189,8 +2258,12 @@ class LucyAgent:
             # Avoids slow DeepSeek calls for calendar/email tasks
             # that happen to trigger REMOTE_WORKBENCH.
             called_names = {tc.get("name", "") for tc in tool_calls}
+            _CODE_EXEC_TOOLS = {
+                "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL",
+                "lucy_execute_python", "lucy_execute_bash", "lucy_run_script",
+            }
             if (
-                called_names & {"COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"}
+                called_names & _CODE_EXEC_TOOLS
                 and route.intent in ("code", "code_reasoning")
                 and getattr(self, "_edit_attempts", 0) < 2
             ):
@@ -2286,6 +2359,8 @@ class LucyAgent:
         "lucy_check_errors": "checking for errors",
         "lucy_spaces_deploy": "deploying your app",
         "lucy_read_file": "reading project files",
+        "lucy_execute_python": "running Python code",
+        "lucy_execute_bash": "running a command",
         "lucy_run_script": "running a script",
         "lucy_generate_excel": "creating a spreadsheet",
         "lucy_generate_csv": "creating a CSV",
@@ -2834,6 +2909,9 @@ class LucyAgent:
         "lucy_spaces_init": 60.0,
         "lucy_spaces_deploy": 180.0,
         "lucy_create_heartbeat": 20.0,
+        "lucy_execute_python": 120.0,
+        "lucy_execute_bash": 60.0,
+        "lucy_run_script": 120.0,
         "COMPOSIO_REMOTE_WORKBENCH": 300.0,
         "COMPOSIO_REMOTE_BASH_TOOL": 180.0,
     }

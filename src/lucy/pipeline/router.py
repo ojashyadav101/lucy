@@ -146,10 +146,21 @@ _COMPOSITION_BROAD = re.compile(
 # system prompt, NOT the lightweight 500-token path.
 _KNOWLEDGE_INTENT = re.compile(
     r"(?:"
+    # Explicit educational patterns
     r"walk\s+me\s+through"
     r"|explain\s+(?:how|what|why|the|to\s+me)"
+    # "What is X" / "What are X" — educational questions.
+    # Negative lookahead excludes possessive/data lookups:
+    # "what is MY mrr", "what is OUR user count", "what is THE CURRENT plan"
+    r"|what\s+(?:is|are)\s+(?!my\b|our\b|your\b|his\b|her\b|their\b|its\b"
+    r"|the\s+(?:current|latest|status|total|number|count))"
+    r"(?:\w+\s+){0,2}\w+"
+    # "How does X work"
     r"|how\s+does\s+\w+\s+(?:work|function)"
-    r"|how\s+do\s+(?:you|I|we)\s+(?:build|implement|set\s+up|design|architect)"
+    # "How do I set up / build / implement" — allow words between verb parts
+    # so "how do I set IT up" still matches (not just "how do I set up")
+    r"|how\s+do\s+(?:you|I|we)\s+(?:\w+\s+){0,2}(?:build|implement|set\s+\w*\s*up|design|architect|configure|deploy|use|start)"
+    # "What is the best / key / common"
     r"|what\s+(?:is|are)\s+(?:the\s+)?(?:best|top|main|key|common|different|recommended)"
     r"|(?:give|tell)\s+me\s+(?:a\s+)?(?:overview|breakdown|rundown|summary)\s+(?:of|on)"
     r"|compare\s+.+?\s+(?:vs\.?|versus|and|or|with)\s+.+"
@@ -159,6 +170,13 @@ _KNOWLEDGE_INTENT = re.compile(
     r"|(?:guide|teach)\s+me\s+(?:through|on|about|how)"
     r"|break\s+(?:down|it\s+down)"
     r"|deep\s+dive\s+(?:into|on)"
+    # "When should I use X" — educational choice question
+    r"|when\s+should\s+I\s+(?:use|choose|pick|go\s+with|prefer)"
+    r"|should\s+I\s+(?:use|choose|pick|go\s+with)\s+\w+"
+    # "Difference(s) between X and Y"
+    r"|differences?\s+between"
+    # "How to / How can I set up / implement / use"
+    r"|how\s+(?:to|can\s+I)\s+(?:set\s+up|implement|use|configure|deploy|get\s+started)"
     r")",
     re.IGNORECASE,
 )
