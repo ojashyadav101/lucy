@@ -1394,6 +1394,7 @@ class LucyAgent:
         base_max_tokens = 16_384
         _truncation_count = 0  # Track consecutive truncations
         _stuck_count = 0  # Track consecutive stuck detections
+        prev_tool_calls: list[dict] | None = None  # Track previous turn's tool calls
 
         for turn in range(max_turns):
             try:
@@ -1688,14 +1689,32 @@ class LucyAgent:
                     all_messages.append(
                         {"role": "assistant", "content": response_text}
                     )
-                    all_messages.append({
-                        "role": "user",
-                        "content": (
+                    # Check if previous tool calls included COMPOSIO_SEARCH_TOOLS
+                    # — if so, the model needs to follow up with MULTI_EXECUTE
+                    _used_search = any(
+                        (tc.get("function", {}).get("name") or "")
+                        == "COMPOSIO_SEARCH_TOOLS"
+                        for tc in (prev_tool_calls or [])
+                    ) if prev_tool_calls else False
+
+                    if _used_search:
+                        redirect_content = (
+                            "Don't narrate or describe what you're going to do. "
+                            "You already searched for tools with COMPOSIO_SEARCH_TOOLS. "
+                            "Now call COMPOSIO_MULTI_EXECUTE_TOOL with the action name "
+                            "from the search results. The service IS connected — do NOT "
+                            "suggest connecting it. Execute the action and give me results."
+                        )
+                    else:
+                        redirect_content = (
                             "Don't narrate or describe what you're going to do. "
                             "Just call the tools silently, then give me the final "
                             "answer with the actual data. No preamble like "
                             "'I'll check' or 'Let me look into'. Start with the result."
-                        ),
+                        )
+                    all_messages.append({
+                        "role": "user",
+                        "content": redirect_content,
                     })
                     continue
 
@@ -1802,6 +1821,8 @@ class LucyAgent:
                     ),
                 })
                 continue
+
+            prev_tool_calls = tool_calls  # Track for narration redirect
 
             logger.info(
                 "tool_turn",
@@ -2485,6 +2506,30 @@ class LucyAgent:
                 result = _validate_search_relevance(
                     result, search_query, trace.user_message,
                 )
+                # Add explicit workflow hint — model often stops after search
+                # instead of calling COMPOSIO_MULTI_EXECUTE_TOOL with the
+                # found action. This costs zero tokens to check, saves retries.
+                if isinstance(result, dict):
+                    items = result.get("items") or result.get("results") or []
+                    action_names = []
+                    for item in items[:3]:
+                        if isinstance(item, dict):
+                            aname = (
+                                item.get("name") or item.get("slug")
+                                or item.get("action_name") or ""
+                            )
+                            if aname:
+                                action_names.append(aname)
+                    if action_names:
+                        result["_next_step"] = (
+                            f"IMPORTANT: These tools are available and ready. "
+                            f"To USE them, call COMPOSIO_MULTI_EXECUTE_TOOL "
+                            f"with one of these action names: "
+                            f"{', '.join(action_names)}. "
+                            f"Do NOT say services are 'not connected'. "
+                            f"Do NOT offer connection links. "
+                            f"Just execute the action you need."
+                        )
 
             if name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
                 toolkits_requested = params.get("toolkits") or []
