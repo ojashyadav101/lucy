@@ -285,6 +285,226 @@ async def load_relevant_skill_content(
     return result
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DYNAMIC SKILL RETRIEVAL — Semantic keyword matching (not just regex triggers)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_MAX_RELEVANT_SKILLS = 3
+_MAX_TOTAL_SKILL_CHARS = 4_000  # ~1000 tokens
+
+
+def _extract_keywords(text: str) -> set[str]:
+    """Extract meaningful keywords from a query for skill matching."""
+    text_lower = text.lower()
+    words = set(re.findall(r"\b[a-z]{3,}\b", text_lower))
+    # Remove common stop words
+    stop_words = {
+        "the", "and", "for", "that", "this", "with", "from", "have", "has",
+        "are", "was", "were", "will", "been", "not", "but", "can", "all",
+        "about", "into", "over", "you", "your", "how", "what", "when",
+        "where", "why", "who", "could", "would", "should", "does", "did",
+        "make", "help", "please", "want", "need", "like", "just", "get",
+        "use", "know", "think", "also", "here", "there", "then", "than",
+        "very", "much", "more", "some", "any", "each", "every",
+    }
+    return words - stop_words
+
+
+def _score_skill_relevance(
+    query_keywords: set[str],
+    skill_name: str,
+    skill_description: str,
+) -> float:
+    """Score how relevant a skill is to the query based on keyword overlap.
+
+    Uses a weighted approach: name matches count more than description matches.
+    """
+    if not query_keywords:
+        return 0.0
+
+    name_keywords = _extract_keywords(skill_name.replace("-", " ").replace("_", " "))
+    desc_keywords = _extract_keywords(skill_description)
+
+    name_overlap = len(query_keywords & name_keywords)
+    desc_overlap = len(query_keywords & desc_keywords)
+
+    # Name matches are worth 3x since they're more specific
+    score = (name_overlap * 3.0) + (desc_overlap * 1.0)
+
+    # Boost if skill name appears directly in query
+    if skill_name.lower().replace("-", " ") in " ".join(query_keywords):
+        score += 5.0
+
+    return score
+
+
+async def find_relevant_skills(
+    query: str,
+    workspace_id: str,
+    ws: WorkspaceFS | None = None,
+) -> list[str]:
+    """Find and return content of skills most relevant to a query.
+
+    Uses two-stage matching:
+    1. Regex trigger matching (fast, high-precision for known intents)
+    2. Keyword similarity matching against skill names + descriptions
+
+    Returns the body content of up to 3 most relevant skills, with
+    total content capped at ~1000 tokens (_MAX_TOTAL_SKILL_CHARS).
+
+    Args:
+        query: The user's message or search query.
+        workspace_id: The workspace ID (used for filesystem access).
+        ws: Optional pre-initialized WorkspaceFS instance.
+
+    Returns:
+        List of skill content strings (body text, no frontmatter).
+    """
+    if ws is None:
+        ws = WorkspaceFS(workspace_id)
+
+    all_skills = await list_skills(ws)
+    if not all_skills:
+        return []
+
+    name_to_skill: dict[str, SkillInfo] = {s.name: s for s in all_skills}
+
+    # Stage 1: Regex trigger matches (high confidence)
+    trigger_matches = detect_relevant_skills(query)
+
+    # Stage 2: Keyword similarity scoring
+    query_keywords = _extract_keywords(query)
+    scored: list[tuple[str, float]] = []
+
+    for skill in all_skills:
+        # Skip skills already matched by triggers
+        if skill.name in trigger_matches:
+            continue
+        score = _score_skill_relevance(query_keywords, skill.name, skill.description)
+        if score > 0:
+            scored.append((skill.name, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Combine: trigger matches first (they're high-confidence), then keyword matches
+    selected_names: list[str] = list(trigger_matches)
+    for name, _score in scored:
+        if name not in selected_names:
+            selected_names.append(name)
+        if len(selected_names) >= _MAX_RELEVANT_SKILLS:
+            break
+
+    # Load content for selected skills
+    results: list[str] = []
+    total_chars = 0
+
+    for name in selected_names:
+        skill = name_to_skill.get(name)
+        if not skill:
+            continue
+
+        content = await ws.read_file(skill.path)
+        if not content:
+            continue
+
+        _, body = parse_frontmatter(content)
+        if not body.strip():
+            continue
+
+        remaining = _MAX_TOTAL_SKILL_CHARS - total_chars
+        if remaining <= 200:
+            break
+
+        if len(body) > remaining:
+            body = body[:remaining] + "\n\n[... truncated]"
+
+        results.append(body.strip())
+        total_chars += len(body)
+
+    logger.info(
+        "find_relevant_skills",
+        workspace_id=workspace_id,
+        query_preview=query[:80],
+        matched_skills=selected_names[:_MAX_RELEVANT_SKILLS],
+        total_chars=total_chars,
+    )
+
+    return results
+
+
+async def update_skill_with_learning(
+    skill_name: str,
+    learning: str,
+    workspace_id: str,
+    ws: WorkspaceFS | None = None,
+) -> str:
+    """Append a new learning to a skill file, creating it if necessary.
+
+    Learnings are appended under a "## Learnings" section with timestamps.
+    If the skill doesn't exist, a new skill file is created with the
+    learning as its initial content.
+
+    Args:
+        skill_name: The skill identifier (e.g., "browser", "pdf-creation").
+        learning: The insight or lesson to persist.
+        workspace_id: The workspace ID.
+        ws: Optional pre-initialized WorkspaceFS instance.
+
+    Returns:
+        The relative path of the updated skill file.
+    """
+    if ws is None:
+        ws = WorkspaceFS(workspace_id)
+
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    rel_path = f"skills/{skill_name}/SKILL.md"
+
+    content = await ws.read_file(rel_path)
+
+    if content:
+        # Skill exists — append learning under ## Learnings section
+        learning_entry = f"- {learning} ({timestamp})"
+
+        # Check for duplicate
+        if learning.strip() in content:
+            logger.debug(
+                "skill_learning_duplicate",
+                skill_name=skill_name,
+                learning=learning[:80],
+            )
+            return rel_path
+
+        section_header = "## Learnings"
+        if section_header in content:
+            content += f"\n{learning_entry}"
+        else:
+            content += f"\n\n{section_header}\n\n{learning_entry}"
+    else:
+        # Skill doesn't exist — create with frontmatter
+        content = (
+            f"---\n"
+            f"name: {skill_name}\n"
+            f"description: Accumulated knowledge about {skill_name}.\n"
+            f"---\n\n"
+            f"# {skill_name.replace('-', ' ').title()}\n\n"
+            f"## Learnings\n\n"
+            f"- {learning} ({timestamp})"
+        )
+
+    await ws.write_file(rel_path, content)
+    logger.info(
+        "skill_learning_updated",
+        workspace_id=workspace_id,
+        skill_name=skill_name,
+        learning_preview=learning[:100],
+    )
+    return rel_path
+
+
 async def get_key_skill_content(ws: WorkspaceFS) -> str:
     """Load full content of team and company skills for direct prompt injection.
 
