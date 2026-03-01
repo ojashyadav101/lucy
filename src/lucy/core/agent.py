@@ -1169,7 +1169,10 @@ class LucyAgent:
         # Skip for cron executions — short responses are normal for crons,
         # and escalation wastes an LLM call for no benefit.
         if route.tier != "frontier" and not ctx.is_cron_execution:
-            gate = _assess_response_quality(message, response_text)
+            gate = _assess_response_quality(
+                message, response_text,
+                connected_services=connected_services,
+            )
             if gate["should_escalate"]:
                 logger.info(
                     "quality_gate_escalation",
@@ -1179,6 +1182,7 @@ class LucyAgent:
                 )
                 corrected = await self._escalate_response(
                     message, response_text, gate["reason"], ctx,
+                    connected_services=connected_services,
                 )
                 if corrected:
                     response_text = corrected
@@ -3500,6 +3504,7 @@ class LucyAgent:
         original_response: str,
         issues: str,
         ctx: AgentContext,
+        connected_services: list[str] | None = None,
     ) -> str | None:
         """Ask frontier model to correct a response flagged by the quality gate.
 
@@ -3508,12 +3513,25 @@ class LucyAgent:
         """
         from lucy.pipeline.router import MODEL_TIERS
 
+        services_info = ""
+        if connected_services:
+            services_info = (
+                f"\nIMPORTANT CONTEXT: The following services are ALREADY "
+                f"CONNECTED and active: {', '.join(connected_services)}. "
+                f"If the response suggests connecting or linking any of these "
+                f"services, that is WRONG — they are already connected. "
+                f"The response should instead explain that the service is "
+                f"connected and offer to use it.\n"
+            )
+
         correction_prompt = (
             f"A user sent this message:\n\"{user_message}\"\n\n"
             f"An AI assistant responded:\n\"{original_response}\"\n\n"
-            f"Quality check detected these issues:\n{issues}\n\n"
+            f"Quality check detected these issues:\n{issues}\n"
+            f"{services_info}\n"
             f"If the response has real problems (wrong services, "
-            f"incorrect information, service name confusion), provide "
+            f"incorrect information, service name confusion, suggesting "
+            f"connecting already-connected services), provide "
             f"a CORRECTED response that addresses the user's actual "
             f"request. Keep the same tone and style.\n\n"
             f"If the original response is actually fine and the issues "

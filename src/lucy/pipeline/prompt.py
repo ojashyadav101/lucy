@@ -140,10 +140,15 @@ async def build_lightweight_prompt(
     )
 
     # Current date/time — critical for "what day is it?" type questions
+    # NOTE: Must be VERY prominent. Models sometimes hallucinate dates
+    # from training data if the injection is subtle.
     utc_now = datetime.now(timezone.utc)
     time_block = (
-        f"\n\n## Current Time\n"
-        f"UTC: {utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}"
+        f"\n\n## Current Date & Time (AUTHORITATIVE — use this exactly)\n"
+        f"Today is {utc_now.strftime('%A, %B %d, %Y')}.\n"
+        f"Current time: {utc_now.strftime('%H:%M UTC')}\n"
+        f"IMPORTANT: When asked about the date, day, or time, use ONLY "
+        f"the values above. Do NOT calculate or guess dates."
     )
 
     # Try to get user's local timezone
@@ -157,11 +162,14 @@ async def build_lightweight_prompt(
             local_time = await get_user_local_time(workspace_id, user_slack_id)
             if local_time and tz_name:
                 time_block = (
-                    f"\n\n## Current Time\n"
-                    f"UTC: {utc_now.strftime('%A, %B %d, %Y %H:%M UTC')}\n"
+                    f"\n\n## Current Date & Time (AUTHORITATIVE — use this exactly)\n"
+                    f"Today is {utc_now.strftime('%A, %B %d, %Y')}.\n"
+                    f"UTC: {utc_now.strftime('%H:%M UTC')}\n"
                     f"User's local time ({tz_name}): "
                     f"{local_time.strftime('%A, %B %d, %Y %H:%M')}\n"
-                    f"Respond with times in the user's timezone ({tz_name})."
+                    f"Respond with times in the user's timezone ({tz_name}).\n"
+                    f"IMPORTANT: When asked about the date, day, or time, use ONLY "
+                    f"the values above. Do NOT calculate or guess dates."
                 )
         except Exception:
             pass  # Fall back to UTC only
@@ -246,6 +254,15 @@ async def build_system_prompt(
             "new connection or check a SPECIFIC service's auth status.\n"
             "• Always include BOTH Composio-managed AND custom integrations "
             "(lucy_custom_* tools) in your answer.\n"
+            "\n"
+            "Using Composio integrations (Google Meet, Gmail, Google Drive, etc.):\n"
+            "• These services are ALREADY CONNECTED. Do NOT offer connection links.\n"
+            "• To use them: call COMPOSIO_SEARCH_TOOLS to find the right action, "
+            "then call COMPOSIO_MULTI_EXECUTE_TOOL with the action name and params.\n"
+            "• For calendar/meetings: search for 'googlemeet' actions. "
+            "Common actions: GOOGLEMEET_LIST_EVENTS, GOOGLEMEET_FIND_EVENT.\n"
+            "• For email: use the built-in lucy_send_email / lucy_read_emails tools.\n"
+            "• NEVER respond saying a connected integration is 'not connected'.\n"
             "</current_environment>"
         )
         static_parts.append(env_block)

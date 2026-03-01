@@ -210,6 +210,7 @@ def validate_connection_relevance(
 def assess_response_quality(
     user_message: str,
     response_text: str | None,
+    connected_services: list[str] | None = None,
 ) -> dict[str, Any]:
     """Heuristic confidence scoring for the agent's response.
 
@@ -225,6 +226,34 @@ def assess_response_quality(
     response_text = response_text or ""
     resp_lower = response_text.lower()
     user_lower = user_message.lower()
+
+    # 0. Connection link for already-connected services
+    # If the response contains composio.dev connect links or says
+    # "not connected" for services we know ARE connected, that's wrong.
+    if connected_services:
+        _connect_link_re = re.compile(
+            r"composio\.dev/connect|connect here|connect (?:your |the )?(?:"
+            + "|".join(re.escape(s.lower()) for s in connected_services)
+            + r")",
+            re.IGNORECASE,
+        )
+        _not_connected_re = re.compile(
+            r"(?:don't|do not|doesn't|does not) have (?:active |any )?"
+            r"(?:connections?|access)",
+            re.IGNORECASE,
+        )
+        if _connect_link_re.search(response_text):
+            issues.append(
+                f"Offering connection links for already-connected services "
+                f"({', '.join(connected_services)})"
+            )
+            confidence -= 5
+        elif _not_connected_re.search(response_text):
+            issues.append(
+                f"Claims no active connections but these are connected: "
+                f"{', '.join(connected_services)}"
+            )
+            confidence -= 4
 
     # 1. Service name confusion detection
     for correct, wrong_matches in _KNOWN_SERVICE_PAIRS.items():
