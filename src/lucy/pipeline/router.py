@@ -274,7 +274,7 @@ def classify_and_route(
     if len(light_matches) >= 2 and len(text) > 50:
         return _choice("reasoning", "research")
     if light_matches and len(text) > 40:
-        return _choice("tool_use", "default")
+        return _choice("chat", "default")
 
     # 5. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
@@ -308,12 +308,11 @@ def classify_and_route(
         if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
             return _choice("lookup", "fast")
 
-    # 8b. Knowledge/educational questions — need full prompt depth, not
-    #     lightweight 500-token path. Route to tool_use so LLM gets the
-    #     complete system prompt with depth instructions + high token limit.
-    #     LLM will answer from knowledge without using tools.
+    # 8b. Knowledge/educational questions — route to fast chat path
+    #     which now has full formatting rules + high token limit.
+    #     LLM answers from training knowledge, no tools needed.
     if _KNOWLEDGE_INTENT.search(text):
-        return _choice("tool_use", "default")
+        return _choice("chat", "default")
 
     # 8c. Short conversational messages with no tool/data keywords
     if len(text) < 100 and not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text) and not _ACTION_VERBS.search(text):
