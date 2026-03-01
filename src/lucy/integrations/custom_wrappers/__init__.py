@@ -378,7 +378,9 @@ def detect_relevant_wrappers(
         "googlecalendar": ["calendar", "meeting", "meetings", "schedule",
                            "event", "events", "free time", "free slot",
                            "am i free", "are you free", "i free",
-                           "busy", "appointment", "block time"],
+                           "busy", "appointment", "block time",
+                           "tomorrow", "next week", "this week",
+                           "today's schedule", "my schedule"],
         "gmail": ["email", "emails", "gmail", "inbox", "unread",
                   "mail", "draft", "send email", "send a email",
                   "send an email", "compose email", "reply to email",
@@ -386,6 +388,14 @@ def detect_relevant_wrappers(
                   "new emails", "read email", "check email",
                   "check my email", "check my inbox"],
     }
+
+    # Regex-based strong triggers for calendar (time patterns)
+    _CALENDAR_TIME_RE = re.compile(
+        r"\b(?:at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)|"
+        r"\d{1,2}\s*(?:am|pm)|"
+        r"(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b)",
+        re.IGNORECASE,
+    )
 
     # Tier 2: Ambiguous keywords that need data-action context
     # These only trigger when combined with action verbs or data patterns
@@ -401,13 +411,17 @@ def detect_relevant_wrappers(
         "product roadmap", "product news", "product email",
         "product strategy", "product review", "product feedback",
         "product demo", "product brief", "product vision",
+        "product page", "product market", "product hunt",
         "user experience", "user interface", "user story",
         "user journey", "user research", "user persona",
         "user flow", "user guide", "user manual",
-        "user friendly", "user-friendly",
+        "user friendly", "user-friendly", "user reported",
+        "user feedback", "user testing", "user engagement",
         "session notes", "session summary", "session agenda",
+        "session recording", "brainstorming session",
         "order of", "in order to", "order to",
         "customer success", "customer support story",
+        "customer journey", "customer feedback",
     }
 
     # Data-action patterns that confirm a tier-2 keyword is about data
@@ -440,6 +454,10 @@ def detect_relevant_wrappers(
             if kw in msg and slug not in relevant:
                 relevant.append(slug)
                 break
+
+    # Regex-based triggers (time patterns → calendar)
+    if "googlecalendar" not in relevant and _CALENDAR_TIME_RE.search(msg):
+        relevant.append("googlecalendar")
 
     # Check context keywords (only if not already matched)
     # Skip context keywords entirely if message is a composition task
