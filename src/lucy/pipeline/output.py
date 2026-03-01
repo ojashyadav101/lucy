@@ -388,6 +388,94 @@ def _align_cell(cell: str, width: int) -> str:
     return stripped.ljust(width)
 
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAYER 2.5: NARRATION STRIPPER (post-processing enforcement)
+# ═══════════════════════════════════════════════════════════════════════
+# The LLM ignores SOUL_LITE anti-narration rules ~26% of the time.
+# This layer enforces them mechanically: strip filler openers from the
+# first sentence if they carry no information.  Runs after format
+# conversion (Layer 2) so we operate on Slack mrkdwn, and before tone
+# validation (Layer 3) so subsequent layers see clean text.
+
+# Patterns that match standalone filler openers (first sentence only).
+# These are "content-free" — removing them never loses information.
+_NARRATION_OPENERS: list[re.Pattern[str]] = [
+    # Exclamatory filler: "Great question! " / "Awesome! " / "Ooh, "
+    re.compile(
+        r"^(?:Great|Awesome|Amazing|Wonderful|Fantastic|Excellent|Perfect|Lovely|Nice|Ooh|Oh|Okay|Alright|Sure|Absolutely|Certainly|Definitely|Of course)[!,.]?\s*",
+        re.IGNORECASE,
+    ),
+    # Sycophantic openers: "That's exciting! " / "That's a great question! "
+    re.compile(
+        r"^(?:That's|This is|What an?|How) (?:a |an )?(?:exciting|great|excellent|wonderful|fantastic|interesting|insightful|fun|cool|neat|good|really good|thoughtful|intriguing)(?:\s+(?:question|topic|idea|request|one|ask|thought|thing|project))?[!.,]?\s*",
+        re.IGNORECASE,
+    ),
+    # Promise-then-nothing: "I'll whip up..." / "Let me map out..." / "I'll put together..."
+    # Only strip when the sentence ends with "..." or "!" (no real content follows in that sentence)
+    re.compile(
+        r"^(?:I'll|I will|Let me|I'm going to|I'm gonna|I can)\s+"
+        r"(?:whip up|put together|map out|draft|create|build|work on|get started on|start working on|cook up|throw together|sketch out|pull together|set up|get right on|jump into|dive into)"
+        r"[^.!?]*[.!]\s*",
+        re.IGNORECASE,
+    ),
+    # Status narration: "I've started working on..." / "I'm currently researching..."
+    re.compile(
+        r"^(?:I've|I have|I'm|I am)\s+"
+        r"(?:started|begun|currently|already|just)\s+"
+        r"(?:working on|researching|looking into|investigating|analyzing|building|drafting|preparing|pulling)"
+        r"[^.!?]*[.!]\s*",
+        re.IGNORECASE,
+    ),
+    # Meta-commentary: "Here's what I'll do:" / "Here's my plan:"
+    re.compile(
+        r"^Here's what I(?:'ll| will)\s+(?:do|build|create|draft|prepare|work on)[^.!?]*[:.!]\s*",
+        re.IGNORECASE,
+    ),
+]
+
+# Content indicators — if the opener contains one of these, it leads
+# into actual content and should NOT be stripped.
+_CONTENT_SIGNALS = re.compile(
+    r"(?:below|following|here(?:'s| is| are)|attached|:$)",
+    re.IGNORECASE,
+)
+
+
+def _strip_narration(text: str) -> str:
+    """Strip content-free narration openers from the first sentence.
+
+    Rules:
+    - Only strip the FIRST sentence/phrase if it matches a filler pattern.
+    - If the opener contains a content signal (e.g. "I've drafted the
+      email below:") it is NOT stripped — the colon/below indicates real
+      content follows.
+    - After stripping, capitalize the new first character.
+    - Never produce empty output.
+    """
+    if not text or not text.strip():
+        return text
+
+    for pattern in _NARRATION_OPENERS:
+        match = pattern.match(text)
+        if match:
+            matched_text = match.group(0)
+            # Don't strip if the matched portion signals content follows
+            if _CONTENT_SIGNALS.search(matched_text):
+                continue
+            remainder = text[match.end():]
+            if remainder.strip():
+                # Capitalize new first character
+                stripped = remainder.lstrip()
+                if stripped and stripped[0].islower():
+                    stripped = stripped[0].upper() + stripped[1:]
+                return stripped
+            # If nothing remains after stripping, keep original
+            break
+
+    return text
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # LAYER 3: TONE VALIDATOR
 # ═══════════════════════════════════════════════════════════════════════
