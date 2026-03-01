@@ -830,22 +830,37 @@ async def _handle_message(
             error=str(e),
             exc_info=True,
         )
-        error_str = str(e).lower()
-        if "timeout" in error_str or "timed out" in error_str:
-            fallback = (
-                "A service I was reaching out to was slow. "
-                "Want me to give it another try?"
-            )
-        elif "rate limit" in error_str or "429" in error_str:
-            fallback = (
-                "I'm getting rate limited right now. "
-                "I'll be ready again in a moment."
-            )
+        # Extract the actionable degradation message from the error
+        # (embedded by _run_with_recovery as "Recovery attempts exhausted: <message>")
+        error_msg = str(e)
+        if "Recovery attempts exhausted: " in error_msg:
+            fallback = error_msg.split("Recovery attempts exhausted: ", 1)[1]
         else:
-            fallback = (
-                "I ran into an issue I couldn't work around. "
-                "Want me to try again?"
-            )
+            # Direct exception (not from recovery cascade) — classify and respond
+            try:
+                from lucy.pipeline.error_strategy import (
+                    classify_error,
+                    get_actionable_degradation_message,
+                )
+                classification = classify_error(e)
+                fallback = get_actionable_degradation_message(classification)
+            except ImportError:
+                error_str = str(e).lower()
+                if "timeout" in error_str or "timed out" in error_str:
+                    fallback = (
+                        "The service I was reaching out to is responding slowly. "
+                        "Want me to try again?"
+                    )
+                elif "rate limit" in error_str or "429" in error_str:
+                    fallback = (
+                        "I'm being rate limited right now. "
+                        "This usually clears up in a minute — want me to try again shortly?"
+                    )
+                else:
+                    fallback = (
+                        "I ran into an unexpected issue after trying several approaches. "
+                        "Want me to take another crack at it?"
+                    )
         await say(text=fallback, thread_ts=thread_ts)
 
     finally:
@@ -877,52 +892,66 @@ async def _run_with_recovery(
     slack_client: Any,
     workspace_id: str,
 ) -> str:
-    """Run agent with a single retry on exception.
+    """Run agent with intelligent multi-strategy recovery.
 
-    The supervisor inside the agent loop handles re-planning and
-    course-correction during execution. This outer layer only catches
-    hard crashes (network errors, 5xx responses) and does ONE retry
-    with failure context so the agent can adapt.
+    High-agency error handling:
+    1. Classify errors specifically (not just "it failed")
+    2. Each retry uses a DIFFERENT strategy (not just failure_context)
+    3. Escalate models when approaches fail
+    4. Deliver partial results (80% > 0%)
+    5. "What would I try with 10x agency?" check before giving up
+
+    Recovery budget: up to 5 attempts with strategy rotation.
     """
     from lucy.core.openclaw import OpenClawError
+    from lucy.pipeline.error_strategy import (
+        classify_error,
+        get_recovery_strategy,
+        should_give_up,
+        get_actionable_degradation_message,
+        high_agency_check,
+        ErrorCategory,
+    )
 
-    def _is_client_error(error_str: str) -> bool:
+    MAX_RECOVERY_ATTEMPTS = 5
+
+    def _is_hard_client_error(error: Exception) -> bool:
+        """True for errors where retrying is guaranteed futile."""
+        error_str = str(error)
         return any(
-            code in error_str for code in ("400", "401", "403", "404", "405", "422")
+            code in error_str for code in ("400", "405", "422")
         )
-
-    def _retry_delay(error_str: str) -> float:
-        lower = error_str.lower()
-        if "rate limit" in lower or "429" in lower:
-            return 15.0
-        if "timeout" in lower:
-            return 3.0
-        return 2.0
 
     # Attempt 1: normal run (router-selected model)
     last_exc: Exception | None = None
+    last_classification = None
     try:
         return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
     except OpenClawError as e:
-        last_error = f"OpenClaw error (status {e.status_code}): {e}"
         last_exc = e
+        last_classification = classify_error(e)
         logger.warning(
             "agent_attempt_1_failed",
             status_code=e.status_code,
+            error_category=last_classification.category.value,
             workspace_id=workspace_id,
         )
-        if _is_client_error(str(e.status_code)):
+        # Hard client errors (400, 422) = our request is malformed, skip retry
+        if _is_hard_client_error(e):
             raise
     except Exception as e:
-        last_error = str(e)
         last_exc = e
-        logger.warning("agent_attempt_1_error", error=str(e), workspace_id=workspace_id)
-        if _is_client_error(last_error):
+        last_classification = classify_error(e)
+        logger.warning(
+            "agent_attempt_1_error",
+            error=str(e)[:300],
+            error_category=last_classification.category.value,
+            workspace_id=workspace_id,
+        )
+        if _is_hard_client_error(e):
             raise
 
-    # Attempt 2: single retry with failure context (skip for client errors)
-    # But ONLY if attempt 1 didn't already produce a partial response  
-    # that was posted to Slack (to avoid double-responding)
+    # Skip retries if attempt 1 already posted to Slack (avoid double-posting)
     event_key = f"{ctx.channel_id}:{ctx.thread_ts}"
     if event_key in _responded_events:
         logger.warning(
@@ -930,27 +959,105 @@ async def _run_with_recovery(
             workspace_id=workspace_id,
             event_key=event_key,
         )
-        raise RuntimeError(f"Attempt 1 failed after responding: {last_error}")
+        raise RuntimeError(f"Attempt 1 failed after responding: {last_exc}")
 
-    await asyncio.sleep(_retry_delay(last_error))
-    try:
-        return await agent.run(
-            message=text,
-            ctx=ctx,
-            slack_client=slack_client,
-            failure_context=f"Previous attempt failed: {last_error}",
+    # Attempts 2-5: strategy-driven recovery
+    for attempt in range(1, MAX_RECOVERY_ATTEMPTS):
+        if last_classification and should_give_up(last_classification, attempt):
+            logger.info(
+                "recovery_giving_up_early",
+                attempt=attempt,
+                error_category=last_classification.category.value,
+                reason="should_give_up returned True",
+                workspace_id=workspace_id,
+            )
+            break
+
+        strategy = get_recovery_strategy(last_classification, attempt - 1)
+        logger.info(
+            "recovery_attempt",
+            attempt=attempt + 1,
+            strategy=strategy.name,
+            description=strategy.description,
+            model_override=strategy.model_override,
+            wait_seconds=strategy.wait_seconds,
+            workspace_id=workspace_id,
         )
-    except Exception as e:
-        last_exc = e
-        logger.warning("agent_attempt_2_error", error=str(e), workspace_id=workspace_id)
 
-    from lucy.pipeline.edge_cases import classify_error_for_degradation, get_degradation_message
-    error_type = classify_error_for_degradation(last_exc) if last_exc else "unknown"
-    degradation_msg = get_degradation_message(error_type)
+        # Wait per strategy
+        if strategy.wait_seconds > 0:
+            await asyncio.sleep(strategy.wait_seconds)
+
+        # Build run kwargs
+        run_kwargs: dict[str, Any] = {
+            "message": text,
+            "ctx": ctx,
+            "slack_client": slack_client,
+            "failure_context": strategy.failure_context,
+        }
+
+        # Model escalation
+        if strategy.model_override:
+            from lucy.pipeline.router import MODEL_TIERS
+            override_model = MODEL_TIERS.get(strategy.model_override)
+            if override_model:
+                run_kwargs["model_override"] = override_model
+
+        try:
+            return await agent.run(**run_kwargs)
+        except Exception as e:
+            last_exc = e
+            last_classification = classify_error(e)
+            logger.warning(
+                f"agent_attempt_{attempt + 1}_error",
+                error=str(e)[:300],
+                error_category=last_classification.category.value,
+                strategy_used=strategy.name,
+                workspace_id=workspace_id,
+            )
+            # Don't retry hard client errors even mid-recovery
+            if _is_hard_client_error(e):
+                break
+            continue
+
+    # All strategies exhausted — HIGH AGENCY FINAL CHECK
+    # One last attempt with the "10x agency" prompt on frontier model
+    if last_exc and last_classification:
+        logger.info(
+            "high_agency_final_attempt",
+            workspace_id=workspace_id,
+            total_attempts=MAX_RECOVERY_ATTEMPTS,
+        )
+        try:
+            from lucy.pipeline.router import MODEL_TIERS
+            frontier = MODEL_TIERS.get("frontier")
+            ha_context = high_agency_check(last_exc, MAX_RECOVERY_ATTEMPTS, text)
+            return await agent.run(
+                message=text,
+                ctx=ctx,
+                slack_client=slack_client,
+                failure_context=ha_context,
+                model_override=frontier,
+            )
+        except Exception as e:
+            logger.warning(
+                "high_agency_final_attempt_failed",
+                error=str(e)[:300],
+                workspace_id=workspace_id,
+            )
+            last_exc = e
+            last_classification = classify_error(e)
+
+    # Truly exhausted — generate actionable degradation message
+    degradation_msg = get_actionable_degradation_message(
+        last_classification,
+        partial_results=None,
+    )
     logger.error(
         "recovery_attempts_exhausted",
         workspace_id=workspace_id,
-        error_type=error_type,
+        error_category=last_classification.category.value if last_classification else "unknown",
+        total_attempts=MAX_RECOVERY_ATTEMPTS + 1,
     )
     raise RuntimeError(f"Recovery attempts exhausted: {degradation_msg}")
 

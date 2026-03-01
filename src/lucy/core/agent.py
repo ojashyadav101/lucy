@@ -1091,17 +1091,28 @@ class LucyAgent:
 
         # 5d. Inject failure context from previous attempt (replan-on-failure)
         if failure_context:
-            messages.insert(-1, {
-                "role": "system",
-                "content": (
-                    "<previous_attempt_failed>\n"
-                    f"{failure_context}\n"
-                    "You MUST take a different approach this time. "
-                    "Analyze what went wrong and fix the root cause. "
-                    "Do NOT repeat the same strategy.\n"
-                    "</previous_attempt_failed>"
-                ),
-            })
+            # High-agency recovery context already includes XML tags
+            if "<high_agency_final_attempt>" in failure_context:
+                messages.insert(-1, {
+                    "role": "system",
+                    "content": failure_context,
+                })
+            else:
+                messages.insert(-1, {
+                    "role": "system",
+                    "content": (
+                        "<previous_attempt_failed>\n"
+                        f"{failure_context}\n"
+                        "You MUST take a different approach this time. "
+                        "Analyze what went wrong and fix the root cause. "
+                        "Do NOT repeat the same strategy. "
+                        "Remember: every problem is solvable — there\'s always "
+                        "another approach. If tools fail, use your knowledge. "
+                        "If one path is blocked, find another. "
+                        "Deliver SOMETHING valuable to the user.\n"
+                        "</previous_attempt_failed>"
+                    ),
+                })
 
         # 5e. Thinking Model — explicit LLM planning step for complex tasks
         #
