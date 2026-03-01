@@ -1,5 +1,8 @@
-"""Three-layer output pipeline for Lucy's Slack messages.
+"""Five-layer output pipeline for Lucy's Slack messages.
 
+Layer 0: Internal content filter - strips planning, self-correction,
+         quality-gate critique, leaked XML tags, and meta-commentary
+         using structural classification (content_classifier.py)
 Layer 1: Sanitizer - strips paths, tool names, internal references
 Layer 2: Format converter - transforms Markdown to Slack mrkdwn
 Layer 3: Tone validator - catches robotic/error-dump patterns
@@ -28,6 +31,7 @@ import re
 import structlog
 
 from lucy.config import LLMPresets, settings
+from lucy.pipeline.content_classifier import strip_internal_content
 
 logger = structlog.get_logger()
 
@@ -665,12 +669,24 @@ async def _deai(text: str) -> str:
 async def process_output(text: str | None) -> str:
     """Run all output layers on a message before posting to Slack.
 
+    Pipeline order:
+      Layer 0: Strip internal content (planning, self-correction, XML tags)
+      Layer 1: Sanitize paths, tool names, internal references
+      Layer 2: Convert Markdown to Slack mrkdwn
+      Layer 3: Validate tone (catch robotic patterns)
+      Layer 4: De-AI engine (regex pass, LLM rewrite disabled)
+
     Now async: the de-AI engine may invoke a fast LLM call for contextual
     rewrites when significant AI tells are detected. Falls back to instant
     regex if the LLM is unavailable or the text is clean.
     """
     if not text or not text.strip():
         return text or ""
+
+    # Layer 0: Strip internal reasoning, self-correction, leaked XML tags
+    text = strip_internal_content(text)
+    if not text.strip():
+        return "I've completed the task."
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
@@ -688,6 +704,11 @@ def process_output_sync(text: str | None) -> str:
     """
     if not text or not text.strip():
         return text or ""
+
+    # Layer 0: Strip internal reasoning, self-correction, leaked XML tags
+    text = strip_internal_content(text)
+    if not text.strip():
+        return "I've completed the task."
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
