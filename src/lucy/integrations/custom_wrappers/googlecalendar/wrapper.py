@@ -16,236 +16,218 @@ import structlog
 
 logger = structlog.get_logger()
 
-# ── Tool Definitions ──────────────────────────────────────────────────
+# ── Tool Definitions (flat format — loader adds "lucy_custom_" prefix) ─
 
 TOOLS: list[dict] = [
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_list_events",
-            "description": (
-                "List events from Google Calendar for a date range. "
-                "Returns event titles, times, attendees, and meeting links."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "time_min": {
-                        "type": "string",
-                        "description": (
-                            "Start of date range in RFC3339 format "
-                            "(e.g. '2026-03-01T00:00:00+05:30'). "
-                            "REQUIRED."
-                        ),
-                    },
-                    "time_max": {
-                        "type": "string",
-                        "description": (
-                            "End of date range in RFC3339 format "
-                            "(e.g. '2026-03-01T23:59:59+05:30'). "
-                            "REQUIRED."
-                        ),
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "Maximum number of events to return (default: 20).",
-                    },
-                    "search_query": {
-                        "type": "string",
-                        "description": "Free-text search query to filter events.",
-                    },
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (default: 'primary').",
-                    },
+        "name": "googlecalendar_list_events",
+        "description": (
+            "List events from Google Calendar for a date range. "
+            "Returns event titles, times, attendees, and meeting links."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_min": {
+                    "type": "string",
+                    "description": (
+                        "Start of date range in RFC3339 format "
+                        "(e.g. '2026-03-01T00:00:00+05:30'). "
+                        "REQUIRED."
+                    ),
                 },
-                "required": ["time_min", "time_max"],
+                "time_max": {
+                    "type": "string",
+                    "description": (
+                        "End of date range in RFC3339 format "
+                        "(e.g. '2026-03-01T23:59:59+05:30'). "
+                        "REQUIRED."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of events to return (default: 20).",
+                },
+                "search_query": {
+                    "type": "string",
+                    "description": "Free-text search query to filter events.",
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary').",
+                },
             },
+            "required": ["time_min", "time_max"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_create_event",
-            "description": (
-                "Create a new event on Google Calendar. "
-                "Specify title, start time, duration, and optionally add "
-                "attendees and create a Google Meet link."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Event title/summary. REQUIRED.",
-                    },
-                    "start_datetime": {
-                        "type": "string",
-                        "description": (
-                            "Event start time as YYYY-MM-DDTHH:MM:SS "
-                            "(naive, uses calendar timezone). REQUIRED."
-                        ),
-                    },
-                    "event_duration_minutes": {
-                        "type": "integer",
-                        "description": "Duration in minutes (default: 60).",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Event description/notes.",
-                    },
-                    "location": {
-                        "type": "string",
-                        "description": "Event location.",
-                    },
-                    "attendees": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of attendee email addresses.",
-                    },
-                    "create_meeting_room": {
-                        "type": "boolean",
-                        "description": "Create a Google Meet link (default: false).",
-                    },
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (default: 'primary').",
-                    },
+        "name": "googlecalendar_create_event",
+        "description": (
+            "Create a new event on Google Calendar. "
+            "Specify title, start time, duration, and optionally add "
+            "attendees and create a Google Meet link."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Event title/summary. REQUIRED.",
                 },
-                "required": ["title", "start_datetime"],
+                "start_datetime": {
+                    "type": "string",
+                    "description": (
+                        "Event start time as YYYY-MM-DDTHH:MM:SS "
+                        "(naive, uses calendar timezone). REQUIRED."
+                    ),
+                },
+                "event_duration_minutes": {
+                    "type": "integer",
+                    "description": "Duration in minutes (default: 60).",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Event description/notes.",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Event location.",
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of attendee email addresses.",
+                },
+                "create_meeting_room": {
+                    "type": "boolean",
+                    "description": "Create a Google Meet link (default: false).",
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary').",
+                },
             },
+            "required": ["title", "start_datetime"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_quick_add",
-            "description": (
-                "Quickly add an event using natural language. "
-                "Example: 'Lunch with Sarah at noon tomorrow'"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": (
-                            "Natural language description of the event. REQUIRED."
-                        ),
-                    },
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (default: 'primary').",
-                    },
+        "name": "googlecalendar_quick_add",
+        "description": (
+            "Quickly add an event using natural language. "
+            "Example: 'Lunch with Sarah at noon tomorrow'"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "Natural language description of the event. REQUIRED."
+                    ),
                 },
-                "required": ["text"],
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary').",
+                },
             },
+            "required": ["text"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_find_free_slots",
-            "description": (
-                "Find free time slots for a set of people in a date range. "
-                "Useful for scheduling meetings."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "time_min": {
-                        "type": "string",
-                        "description": "Start of range (RFC3339). REQUIRED.",
-                    },
-                    "time_max": {
-                        "type": "string",
-                        "description": "End of range (RFC3339). REQUIRED.",
-                    },
-                    "attendee_emails": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": (
-                            "Email addresses to check availability for. "
-                            "REQUIRED."
-                        ),
-                    },
-                    "timezone": {
-                        "type": "string",
-                        "description": "Timezone (default: 'Asia/Kolkata').",
-                    },
+        "name": "googlecalendar_find_free_slots",
+        "description": (
+            "Find free time slots for a set of people in a date range. "
+            "Useful for scheduling meetings."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "time_min": {
+                    "type": "string",
+                    "description": "Start of range (RFC3339). REQUIRED.",
                 },
-                "required": ["time_min", "time_max", "attendee_emails"],
+                "time_max": {
+                    "type": "string",
+                    "description": "End of range (RFC3339). REQUIRED.",
+                },
+                "attendee_emails": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Email addresses to check availability for. "
+                        "REQUIRED."
+                    ),
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone (default: 'Asia/Kolkata').",
+                },
             },
+            "required": ["time_min", "time_max", "attendee_emails"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_delete_event",
-            "description": "Delete an event from Google Calendar by its event ID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "event_id": {
-                        "type": "string",
-                        "description": "The event ID to delete. REQUIRED.",
-                    },
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (default: 'primary').",
-                    },
+        "name": "googlecalendar_delete_event",
+        "description": "Delete an event from Google Calendar by its event ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The event ID to delete. REQUIRED.",
                 },
-                "required": ["event_id"],
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary').",
+                },
             },
+            "required": ["event_id"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "lucy_custom_googlecalendar_update_event",
-            "description": (
-                "Update an existing calendar event. Provide the event_id "
-                "and only the fields you want to change."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "event_id": {
-                        "type": "string",
-                        "description": "The event ID to update. REQUIRED.",
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "New event title.",
-                    },
-                    "start_datetime": {
-                        "type": "string",
-                        "description": "New start time (YYYY-MM-DDTHH:MM:SS).",
-                    },
-                    "event_duration_minutes": {
-                        "type": "integer",
-                        "description": "New duration in minutes.",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "New event description.",
-                    },
-                    "location": {
-                        "type": "string",
-                        "description": "New location.",
-                    },
-                    "attendees": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "New attendee list (replaces existing).",
-                    },
-                    "calendar_id": {
-                        "type": "string",
-                        "description": "Calendar ID (default: 'primary').",
-                    },
+        "name": "googlecalendar_update_event",
+        "description": (
+            "Update an existing calendar event. Provide the event_id "
+            "and only the fields you want to change."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_id": {
+                    "type": "string",
+                    "description": "The event ID to update. REQUIRED.",
                 },
-                "required": ["event_id"],
+                "title": {
+                    "type": "string",
+                    "description": "New event title.",
+                },
+                "start_datetime": {
+                    "type": "string",
+                    "description": "New start time (YYYY-MM-DDTHH:MM:SS).",
+                },
+                "event_duration_minutes": {
+                    "type": "integer",
+                    "description": "New duration in minutes.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "New event description.",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "New location.",
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "New attendee list (replaces existing).",
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary').",
+                },
             },
+            "required": ["event_id"],
         },
     },
 ]
@@ -330,7 +312,7 @@ def _format_events(raw: dict) -> dict:
     """Format raw Calendar API response into clean event list."""
     items = raw.get("items", [])
     if not items:
-        return {"events": [], "count": 0, "message": "No events found."}
+        return {"events": [], "count": 0, "message": "No events found for this time range."}
 
     events = []
     for ev in items:
