@@ -3,12 +3,13 @@
 Detects and corrects hallucination-prone content before it reaches the user.
 Runs as Layer 0.5 in process_output(): after strip_internal, before sanitize.
 
-Five verification strategies:
+Six verification strategies:
   1. Date/day-of-week: validate against system time (cheap, always runs)
   2. URL validation: async HEAD requests with timeout (fast, batch)
   3. Version hedging: flag stale version claims with uncertainty markers
   4. Pricing hedging: flag specific pricing that may be outdated
   5. Temporal claims: flag "as of" dates that are stale
+  6. Percentage sanity: flag percentages > 100% or obviously wrong
 
 Design constraints:
   - Must be fast (<500ms typical, <2s worst case)
@@ -16,6 +17,7 @@ Design constraints:
   - Must not require external API calls for basic claims
   - URL validation is best-effort with aggressive timeouts
   - Version/pricing hedging is additive (appends caveats), never destructive
+  - Code blocks are ALWAYS excluded from analysis
 """
 
 from __future__ import annotations
@@ -29,6 +31,39 @@ from typing import NamedTuple
 import structlog
 
 logger = structlog.get_logger()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CODE BLOCK PROTECTION
+# ═══════════════════════════════════════════════════════════════════════
+
+_CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_CODE_PLACEHOLDER = "\x00CODEBLOCK{}\x00"
+
+
+def _stash_code_blocks(text: str) -> tuple[str, list[str]]:
+    """Remove code blocks from text, returning stashed blocks for restoration.
+
+    This prevents false positives on version numbers, dates, and URLs
+    that appear inside code blocks (e.g., `npm install next@14.2.0`).
+    """
+    stash: list[str] = []
+
+    def _stash(m: re.Match[str]) -> str:
+        stash.append(m.group(0))
+        return _CODE_PLACEHOLDER.format(len(stash) - 1)
+
+    text = _CODE_BLOCK_RE.sub(_stash, text)
+    text = _INLINE_CODE_RE.sub(_stash, text)
+    return text, stash
+
+
+def _restore_code_blocks(text: str, stash: list[str]) -> str:
+    """Restore stashed code blocks to their original positions."""
+    for i, block in enumerate(stash):
+        text = text.replace(_CODE_PLACEHOLDER.format(i), block)
+    return text
 
 
 class VerificationResult(NamedTuple):
@@ -449,6 +484,40 @@ def _flag_temporal_claims(text: str, now: datetime) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# PERCENTAGE SANITY CHECK
+# ═══════════════════════════════════════════════════════════════════════
+
+_PERCENTAGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def _flag_suspicious_percentages(text: str) -> list[str]:
+    """Flag percentages that are mathematically impossible or suspicious.
+
+    Catches: >100% when context implies a proportion (not growth/increase),
+    obviously fabricated round numbers like "99.9% uptime" without source.
+    """
+    flagged: list[str] = []
+    for m in _PERCENTAGE_RE.finditer(text):
+        value = float(m.group(1))
+        # Get surrounding context (80 chars before and after)
+        start = max(0, m.start() - 80)
+        end = min(len(text), m.end() + 40)
+        context = text[start:end].lower()
+
+        # >100% is fine for growth, increase, improvement, etc.
+        growth_words = ("increase", "growth", "grew", "rise", "risen",
+                        "gain", "improvement", "improved", "more than",
+                        "over", "exceeded", "above", "beyond", "surpass",
+                        "spike", "jump", "boost")
+        if value > 100 and not any(w in context for w in growth_words):
+            flagged.append(
+                f"Suspicious percentage: '{m.group(0).strip()}' — "
+                f"exceeds 100% but context doesn't suggest growth/increase"
+            )
+    return flagged
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # FABRICATED CONTENT DETECTION
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -473,11 +542,14 @@ async def verify_claims(
     """Check text for potentially hallucinated claims and correct where possible.
 
     Pipeline:
-    1. Verify date/day-of-week claims against system time (always, instant)
-    2. Validate URLs with HEAD requests (optional, async, bounded timeout)
-    3. Flag version number claims for hedging (detection only)
-    4. Flag pricing claims (detection only)
-    5. Flag stale temporal claims (detection only)
+    1. Stash code blocks (protect from false positives)
+    2. Verify date/day-of-week claims against system time (always, instant)
+    3. Validate URLs with HEAD requests (optional, async, bounded timeout)
+    4. Flag version number claims for hedging (detection only)
+    5. Flag pricing claims (detection only)
+    6. Flag stale temporal claims (detection only)
+    7. Flag suspicious percentages (detection only)
+    8. Restore code blocks
 
     Returns VerificationResult with corrected text, list of corrections made,
     and list of flagged-but-uncorrected claims.
@@ -491,6 +563,9 @@ async def verify_claims(
     now = datetime.now(timezone.utc)
     corrections: list[str] = []
     flagged: list[str] = []
+
+    # 0. Stash code blocks to prevent false positives
+    text, code_stash = _stash_code_blocks(text)
 
     # 1. Date/day-of-week verification (always, instant)
     text, date_corrections = _verify_day_of_week_claims(text, now)
@@ -515,6 +590,13 @@ async def verify_claims(
     temporal_flags = _flag_temporal_claims(text, now)
     flagged.extend(temporal_flags)
 
+    # 6. Percentage sanity
+    pct_flags = _flag_suspicious_percentages(text)
+    flagged.extend(pct_flags)
+
+    # 7. Restore code blocks
+    text = _restore_code_blocks(text, code_stash)
+
     # Log results
     if corrections or flagged:
         logger.info(
@@ -533,7 +615,7 @@ async def verify_claims(
 
 
 def verify_claims_sync(text: str) -> VerificationResult:
-    """Synchronous version — only runs date verification (no URL checks).
+    """Synchronous version — runs all checks except URL validation.
 
     For use in sync contexts where async isn't available.
     """
@@ -543,6 +625,9 @@ def verify_claims_sync(text: str) -> VerificationResult:
     now = datetime.now(timezone.utc)
     corrections: list[str] = []
     flagged: list[str] = []
+
+    # Stash code blocks
+    text, code_stash = _stash_code_blocks(text)
 
     text, date_corrections = _verify_day_of_week_claims(text, now)
     corrections.extend(date_corrections)
@@ -555,6 +640,12 @@ def verify_claims_sync(text: str) -> VerificationResult:
 
     temporal_flags = _flag_temporal_claims(text, now)
     flagged.extend(temporal_flags)
+
+    pct_flags = _flag_suspicious_percentages(text)
+    flagged.extend(pct_flags)
+
+    # Restore code blocks
+    text = _restore_code_blocks(text, code_stash)
 
     if corrections or flagged:
         logger.info(

@@ -1,12 +1,14 @@
-"""Five-layer output pipeline for Lucy's Slack messages.
+"""Six-layer output pipeline for Lucy's Slack messages.
 
-Layer 0: Internal content filter - strips planning, self-correction,
-         quality-gate critique, leaked XML tags, and meta-commentary
-         using structural classification (content_classifier.py)
-Layer 1: Sanitizer - strips paths, tool names, internal references
-Layer 2: Format converter - transforms Markdown to Slack mrkdwn
-Layer 3: Tone validator - catches robotic/error-dump patterns
-Layer 4: De-AI engine - detects and strips AI-generated tells via regex
+Layer 0:   Internal content filter - strips planning, self-correction,
+           quality-gate critique, leaked XML tags, and meta-commentary
+           using structural classification (content_classifier.py)
+Layer 0.5: Fact verifier - corrects hallucinated dates, validates URLs,
+           flags stale version/pricing claims (fact_verifier.py) [W7-TRUTH]
+Layer 1:   Sanitizer - strips paths, tool names, internal references
+Layer 2:   Format converter - transforms Markdown to Slack mrkdwn
+Layer 3:   Tone validator - catches robotic/error-dump patterns
+Layer 4:   De-AI engine - detects and strips AI-generated tells via regex
 
 The de-AI engine has two tiers, but only Tier 1 is active:
   Tier 1 (instant): Regex detection + mechanical fixes for obvious patterns
@@ -32,7 +34,7 @@ import structlog
 
 from lucy.config import LLMPresets, settings
 from lucy.pipeline.content_classifier import strip_internal_content
-from lucy.pipeline.fact_verifier import verify_claims
+from lucy.pipeline.fact_verifier import verify_claims, verify_claims_sync
 
 logger = structlog.get_logger()
 
@@ -746,12 +748,26 @@ async def _deai(text: str) -> str:
 
 
 async def _verify_facts(text: str) -> str:
-    """Layer 0.5: Verify factual claims and correct hallucinations."""
+    """Layer 0.5: Verify factual claims and correct hallucinations.
+
+    Corrects: wrong day-of-week, broken URLs (404/410)
+    Flags (logged): stale version numbers, outdated pricing, stale temporal claims
+    """
     try:
-        result = await verify_claims(text)
-        return result if result else text
+        result = await verify_claims(text, validate_urls=True, url_timeout=2.0)
+        return result.corrected_text
+    except Exception as exc:
+        # Never let fact verification break the pipeline
+        logger.warning("fact_verification_failed", error=str(exc))
+        return text
+
+
+def _verify_facts_sync(text: str) -> str:
+    """Layer 0.5 sync: date/day-of-week verification only (no URL checks)."""
+    try:
+        result = verify_claims_sync(text)
+        return result.corrected_text
     except Exception:
-        # Fact verification is best-effort — never block output
         return text
 
 
@@ -759,11 +775,12 @@ async def process_output(text: str | None) -> str:
     """Run all output layers on a message before posting to Slack.
 
     Pipeline order:
-      Layer 0: Strip internal content (planning, self-correction, XML tags)
-      Layer 1: Sanitize paths, tool names, internal references
-      Layer 2: Convert Markdown to Slack mrkdwn
-      Layer 3: Validate tone (catch robotic patterns)
-      Layer 4: De-AI engine (regex pass, LLM rewrite disabled)
+      Layer 0:   Strip internal content (planning, self-correction, XML tags)
+      Layer 0.5: Fact verification — correct dates, validate URLs, flag stale claims
+      Layer 1:   Sanitize paths, tool names, internal references
+      Layer 2:   Convert Markdown to Slack mrkdwn
+      Layer 3:   Validate tone (catch robotic patterns)
+      Layer 4:   De-AI engine (regex pass, LLM rewrite disabled)
 
     Now async: the de-AI engine may invoke a fast LLM call for contextual
     rewrites when significant AI tells are detected. Falls back to instant
@@ -776,6 +793,10 @@ async def process_output(text: str | None) -> str:
     text = strip_internal_content(text)
     if not text.strip():
         return "I've completed the task."
+
+    # Layer 0.5: Fact verification — correct hallucinated dates, validate URLs,
+    # flag stale version/pricing claims (W7-TRUTH)
+    text = await _verify_facts(text)
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
@@ -798,6 +819,9 @@ def process_output_sync(text: str | None) -> str:
     text = strip_internal_content(text)
     if not text.strip():
         return "I've completed the task."
+
+    # Layer 0.5: Fact verification sync (dates only, no URL checks)
+    text = _verify_facts_sync(text)
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
