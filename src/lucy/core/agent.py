@@ -1206,9 +1206,9 @@ class LucyAgent:
         self._edit_attempts = 0
         self._400_recovery_count = 0
         self._504_frontier_retried = False
-        _last_visible_msg_time = time.monotonic()
-        _silence_update_sent = False
-        _SILENCE_THRESHOLD_S = settings.agent_silence_threshold_s
+        # Silence threshold removed — Lucy works silently until the
+        # result is ready, using emoji reactions for acknowledgment.
+        # No mid-work progress messages (they were always filler).
 
         # Supervisor state
         sv_turn_reports: list[TurnReport] = []
@@ -1495,12 +1495,18 @@ class LucyAgent:
                 _is_setup_intent = getattr(route, "intent", "") in (
                     "monitoring", "command",
                 )
+                # Check for data markers — if the response contains
+                # actual results (numbers, tables, bold, code blocks),
+                # it's not pure narration even if it matches the regex.
+                _has_data = bool(re.search(
+                    r'\d{2,}|[$€£]|\*[^*]+\*|```|\|.*\|', response_text
+                ))
                 if (
-                    turn <= 3
-                    and tools
+                    tools
                     and narration_retries < 1
                     and not _is_setup_intent
                     and _NARRATION_RE.search(response_text)
+                    and not _has_data
                 ):
                     self._narration_retries = narration_retries + 1
                     logger.warning(
@@ -1631,28 +1637,8 @@ class LucyAgent:
                 workspace_id=ctx.workspace_id,
             )
 
-            _elapsed_silent = time.monotonic() - _last_visible_msg_time
-            _remaining_turns = max_turns - turn
-            if (
-                _elapsed_silent > _SILENCE_THRESHOLD_S
-                and not _silence_update_sent
-                and slack_client
-                and ctx.channel_id
-                and ctx.thread_ts
-                and not ctx.is_cron_execution
-                and _remaining_turns > 2
-            ):
-                _silence_update_sent = True
-                all_messages.append({
-                    "role": "system",
-                    "content": (
-                        "You have been working for over 8 minutes. "
-                        "Send the user a brief 1-sentence progress update "
-                        "about what you've done so far and how much longer. "
-                        "Keep it casual and specific to the task — no generic "
-                        "filler. Then continue working."
-                    ),
-                })
+            # Silence threshold removed — no mid-work progress messages.
+            # Lucy works until the result is ready, acknowledged by emoji.
 
             # Append assistant message with tool_calls
             assistant_msg: dict[str, Any] = {
@@ -2285,6 +2271,33 @@ class LucyAgent:
 
             if name == "COMPOSIO_SEARCH_TOOLS":
                 search_query = params.get("query") or params.get("search") or ""
+                # Intercept: redirect if query targets a pre-loaded wrapper
+                from lucy.integrations.custom_wrappers import (
+                    get_wrapper_health,
+                    _INTENT_MAP,
+                )
+                _sq_lower = search_query.lower()
+                _redirect_slug = None
+                for _slug, _cfg in _INTENT_MAP.items():
+                    for _kw in _cfg.get("keywords", []):
+                        if _kw in _sq_lower:
+                            _redirect_slug = _slug
+                            break
+                    if _redirect_slug:
+                        break
+                if _redirect_slug and _redirect_slug in get_wrapper_health():
+                    _svc = _INTENT_MAP[_redirect_slug].get("service_name", _redirect_slug)
+                    result = {
+                        "_wrapper_redirect": True,
+                        "message": (
+                            f"STOP - do NOT use Composio for {_svc}. "
+                            f"You already have pre-loaded "
+                            f"lucy_custom_{_redirect_slug}_* tools. "
+                            f"Call them directly."
+                        ),
+                    }
+                    return call_id, json.dumps(result, default=str)
+
                 result = _filter_search_results(result)
                 result = _validate_search_relevance(
                     result, search_query, trace.user_message,
@@ -3222,29 +3235,20 @@ class LucyAgent:
         # Store task hint for progress messages
         self._current_task_hint = task[:80] if task else None
 
-        # Post delegation start message so user isn't left in silence
-        _DELEGATION_LABELS = {
-            "research": "Doing a deep dive on this",
-            "code": "Writing and testing the code",
-            "integrations": "Setting up the integration",
-            "document": "Putting the document together",
-        }
-        start_label = _DELEGATION_LABELS.get(agent_type, "Working on this")
-        task_hint = self._current_task_hint
-        start_msg = (
-            f"{start_label} — {task_hint[:60]}..." if task_hint
-            else f"{start_label}..."
-        )
+        # Acknowledge delegation with emoji only — no text narration.
+        # The user sees the result when the sub-agent finishes.
         slack_client = getattr(self, "_current_slack_client", None)
         channel_id = getattr(self, "_current_channel_id", None)
         thread_ts = getattr(self, "_current_thread_ts", None)
         if slack_client and channel_id and thread_ts:
             try:
-                await slack_client.chat_postMessage(
-                    channel=channel_id, thread_ts=thread_ts, text=start_msg,
+                await slack_client.reactions_add(
+                    channel=channel_id,
+                    name="brain",
+                    timestamp=thread_ts,
                 )
             except Exception as e:
-                logger.warning("component_failed", component="delegation_start_message", error=str(e))
+                logger.warning("component_failed", component="delegation_reaction", error=str(e))
 
         try:
             result = await asyncio.wait_for(

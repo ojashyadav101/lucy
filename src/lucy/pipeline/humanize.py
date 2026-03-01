@@ -77,22 +77,9 @@ POOL_CATEGORIES: dict[str, str] = {
         "Think of me as the teammate who handles the things you don't have time for.' "
         "Keep it conversational and personal, not a feature list."
     ),
-    "progress_early": (
-        "You just started working on someone's request. "
-        "Let them know you're on it. Max 1 sentence."
-    ),
-    "progress_mid": (
-        "You're making good progress on a task. "
-        "Give a brief update. Max 1 sentence."
-    ),
-    "progress_late": (
-        "A task is taking longer than usual but you're close. "
-        "Reassure them. Max 1 sentence."
-    ),
-    "progress_final": (
-        "A thorough task is almost done. "
-        "Let them know you're wrapping up. Max 1 sentence."
-    ),
+    # progress_early, progress_mid, progress_late, progress_final removed.
+    # Lucy acknowledges via emoji reactions, not text progress messages.
+    # The first message the user sees should be the actual result.
     "task_cancelled": (
         "Confirm you've stopped working on the task they cancelled. "
         "Max 1 sentence."
@@ -159,26 +146,7 @@ _FALLBACKS: dict[str, list[str]] = {
             "you don't have time for. Just tell me what you need."
         ),
     ],
-    "progress_early": [
-        "On it.",
-        "Working on this now.",
-        "Got it, give me a moment.",
-    ],
-    "progress_mid": [
-        "Making progress, will have something shortly.",
-        "Halfway through. Working on the details now.",
-        "Got the data, putting it together.",
-    ],
-    "progress_late": [
-        "Almost done, running a final check.",
-        "Wrapping this up now.",
-        "Nearly there, verifying everything.",
-    ],
-    "progress_final": [
-        "Done with the heavy lifting, packaging it up.",
-        "Last check before I share this.",
-        "Just making sure everything looks right.",
-    ],
+    # progress_early/mid/late/final fallbacks removed — no text progress messages.
     "task_cancelled": ["Got it, cancelled."],
     "task_background_ack": [
         "Working on this in the background. "

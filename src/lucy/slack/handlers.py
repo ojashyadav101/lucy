@@ -318,123 +318,13 @@ def register_handlers(app: AsyncApp) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# INITIAL ACKNOWLEDGMENT
+# ACKNOWLEDGMENT — emoji reactions only, no text messages
 # ═══════════════════════════════════════════════════════════════════════
-
-_ACK_SYSTEM_PROMPT = """\
-You are Lucy, a sharp AI coworker. The user just sent a request that will \
-take you a while to complete. Write a 1-2 sentence acknowledgment that:
-
-1. References the SPECIFIC task they asked for (not generic)
-2. Shows genuine enthusiasm or curiosity about the request
-3. Gives a rough time hint ("give me a few minutes", "should have this shortly")
-4. Sounds like a real colleague on Slack, not a bot
-
-RULES:
-- NEVER start with "Got it" or "On it"
-- NEVER use phrases like "working on this now" or "I'll get right on that"
-- Be specific to what they asked. If they want an app, mention what kind. \
-If they want data, mention what data.
-- Use 1 emoji max, only if it fits naturally
-- Keep it under 40 words
-- Use contractions. Sound human.
-- Match the energy: if they're excited, match it. If it's routine, be chill.
-- NEVER promise to "dive into" or "pull" data from a service unless that \
-service is listed in the CONNECTED INTEGRATIONS below. If the service isn't \
-listed, use hedging language like "Let me check if I have access to..." or \
-"Let me see what I can pull up..." instead of promising results.
-
-{connected_services_note}
-
-Examples of GOOD acknowledgments:
-- "Love this idea 🌙 Building you a lunar cycle tracker with a handcrafted feel. Give me a few minutes."
-- "Pulling your Stripe revenue data now, I'll have the breakdown with trends in a couple minutes."
-- "Interesting comparison. Let me dig into the latest pricing and features across all three."
-
-Examples of BAD acknowledgments (never do these):
-- "Got it, working on this now."
-- "On it — I'll build this for you."
-- "I'll get right on that!"
-- "Sure thing! Let me work on this."
-- "Ooh, I love analyzing X data! I'll dive in." (then failing because the service isn't connected)
-
-Output ONLY the acknowledgment text. Nothing else."""
-
-
-_SKIP_ACK_INTENTS = frozenset({"greeting", "conversational", "lookup"})
-
-_FAST_ACK_INTENTS = frozenset({
-    "code", "code_reasoning", "data", "document", "research",
-    "monitoring", "tool_use",
-})
-
-
-async def _build_acknowledgment(
-    text: str,
-    intent: str,
-    connected_services: list[str] | None = None,
-) -> str | None:
-    """Generate a context-aware acknowledgment via a fast LLM call.
-
-    Returns None for tasks that are likely <30s (no ack needed).
-    Falls back to a minimal static message if the LLM call fails.
-    """
-    if intent in _SKIP_ACK_INTENTS:
-        return None
-
-    word_count = len(text.split())
-    if word_count < 5 and intent == "tool_use":
-        return None
-
-    if intent not in _FAST_ACK_INTENTS:
-        return None
-
-    try:
-        from lucy.core.openclaw import ChatConfig, get_openclaw_client
-
-        client = await get_openclaw_client()
-
-        if connected_services:
-            services_note = (
-                f"CONNECTED INTEGRATIONS: {', '.join(connected_services)}\n"
-                f"Only these services are available. If the user asks about a "
-                f"service NOT in this list, do NOT promise to pull its data."
-            )
-        else:
-            services_note = (
-                "CONNECTED INTEGRATIONS: unknown — use hedging language like "
-                "'Let me check what I can access...' instead of promising results."
-            )
-
-        system_prompt = _ACK_SYSTEM_PROMPT.format(
-            connected_services_note=services_note,
-        )
-
-        user_msg = (
-            f"User's request (intent: {intent}):\n"
-            f"{text[:300]}"
-        )
-
-        response = await asyncio.wait_for(
-            client.chat_completion(
-                messages=[{"role": "user", "content": user_msg}],
-                config=ChatConfig(
-                    model=settings.model_tier_fast,
-                    system_prompt=system_prompt,
-                    max_tokens=LLMPresets.ACK.max_tokens,
-                    temperature=LLMPresets.ACK.temperature,
-                ),
-            ),
-            timeout=3.0,
-        )
-
-        result = (response.content or "").strip()
-        if result and 10 < len(result) < 200:
-            return result
-    except Exception as exc:
-        logger.debug("ack_llm_failed", error=str(exc))
-
-    return None
+# The old ack system generated a separate LLM-based text message before
+# the agent even started (e.g. "Let me check Clerk for you!").  This
+# created a double-message pattern (filler + answer) that felt robotic.
+# Now Lucy acknowledges with an emoji reaction only — the first message
+# the user sees is the actual result.
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -562,13 +452,10 @@ async def _handle_message(
                 thread_ts=effective_thread,
                 workspace_id=workspace_id,
             )
-            from lucy.pipeline.humanize import humanize
-            msg = await humanize(
-                "Let the user know you're still working on their "
-                "previous request in this thread and will get back "
-                "to them shortly. Be warm and brief.",
+            await say(
+                text="Still working on the previous request here. I'll get to this next.",
+                thread_ts=thread_ts,
             )
-            await say(text=msg, thread_ts=thread_ts)
             return
 
     # ── Full agent loop path ──────────────────────────────────────────
@@ -593,43 +480,8 @@ async def _handle_message(
     route = classify_and_route(text)
     priority = classify_priority(text, route.tier)
 
-    # ── Immediate acknowledgment for complex tasks ────────────────
-    is_thread_reply = thread_ts and event_ts and thread_ts != event_ts
-    is_short_followup = is_thread_reply and len(text.split()) < 12
-    should_ack = (
-        route.intent in _FAST_ACK_INTENTS
-        and client
-        and channel_id
-        and not is_short_followup
-    )
-
-    if should_ack:
-        async def _send_ack() -> None:
-            svc_names: list[str] | None = None
-            try:
-                from lucy.integrations.composio_client import get_composio_client
-                from lucy.integrations.wrapper_generator import (
-                    discover_saved_wrappers,
-                )
-                composio = get_composio_client()
-                svc_names = await asyncio.wait_for(
-                    composio.get_connected_app_names_reliable(workspace_id),
-                    timeout=2.0,
-                )
-                for w in discover_saved_wrappers():
-                    svc = w.get("service_name", "")
-                    if svc and svc_names and svc not in svc_names:
-                        svc_names.append(svc)
-            except Exception:
-                pass
-            ack_msg = await _build_acknowledgment(
-                text, route.intent, connected_services=svc_names,
-            )
-            if ack_msg:
-                await say(text=ack_msg, thread_ts=thread_ts)
-
-        ack_task = asyncio.create_task(_send_ack())
-        ack_task.add_done_callback(_log_task_exception)
+    # ── Acknowledgment is emoji-only (see reaction_task above) ──
+    # No text ack — the first message the user sees should be the result.
 
     # If queue is busy and this is a HIGH priority request, tell the user
     queue = get_request_queue()

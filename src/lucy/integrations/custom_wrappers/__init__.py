@@ -47,6 +47,11 @@ def get_healthy_wrappers() -> list[str]:
     return [slug for slug, h in _wrapper_health.items() if h.get("healthy")]
 
 
+def get_loaded_wrapper_services() -> dict[str, str]:
+    """Return mapping of slug -> service_name for all loaded wrappers."""
+    return {slug: h.get("service_name", slug) for slug, h in _wrapper_health.items()}
+
+
 # ─── Intent-Based Wrapper Detection ────────────────────────────────────────
 # Maps conceptual intents to wrapper slugs. When a user asks about a concept,
 # we match it to the wrapper that handles that domain — not just keyword

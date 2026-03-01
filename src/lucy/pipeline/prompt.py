@@ -212,12 +212,19 @@ async def build_system_prompt(
     if custom_wrappers:
         lines = [
             "<custom_integrations>",
-            "IMPORTANT: You have built the following custom integrations. "
-            "Their tools are in your tool list prefixed with lucy_custom_. "
-            "When a user asks about one of these services, call the "
-            "lucy_custom_* tools directly. Do NOT use COMPOSIO_MULTI_EXECUTE_TOOL "
-            "or COMPOSIO_MANAGE_CONNECTIONS for these services — Composio does not "
-            "know about them. Use the lucy_custom_* tools instead.",
+            "CRITICAL TOOL ROUTING — READ CAREFULLY:",
+            "The following integrations have PRE-LOADED tools in your tool list "
+            "(prefixed with lucy_custom_). These are deterministic, always-available, "
+            "and the ONLY correct path for these services.",
+            "",
+            "RULES:",
+            "- ALWAYS use lucy_custom_* tools for these services — no search needed.",
+            "- NEVER use COMPOSIO_SEARCH_TOOLS for these services (Composio doesn't know them).",
+            "- NEVER route lucy_custom_* through COMPOSIO_MULTI_EXECUTE_TOOL.",
+            "- Each service has a _proxy_request tool for raw HTTP to any endpoint.",
+            "- Use COMPOSIO_SEARCH_TOOLS ONLY for services NOT listed below.",
+            "",
+            "Pre-loaded integrations:",
         ]
         for w in custom_wrappers:
             svc = w.get("service_name", w.get("slug", "unknown"))
@@ -232,9 +239,17 @@ async def build_system_prompt(
             key_stored = bool(ci_keys.get("api_key"))
             status = "READY" if key_stored else "needs API key"
             lines.append(
-                f"- {svc} [{status}]: use lucy_custom_{slug}_* tools "
-                f"({tools_list})"
+                f"  -> {svc} [{status}]: lucy_custom_{slug}_* ({n} tools incl. proxy) "
+                f"-- {tools_list}"
             )
+        lines.append("")
+        lines.append(
+            "COMPOSIO_SEARCH_TOOLS is for NEW/unknown services only. "
+            "For " + ", ".join(
+                w.get("service_name", w.get("slug", ""))
+                for w in custom_wrappers
+            ) + " -> use lucy_custom_* tools directly."
+        )
         lines.append("</custom_integrations>")
         dynamic_parts.append("\n".join(lines))
 
