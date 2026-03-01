@@ -276,6 +276,13 @@ def classify_and_route(
     if light_matches and len(text) > 40:
         return _choice("chat", "default")
 
+    # 4b. Knowledge/educational questions — MUST be checked BEFORE code
+    #     keywords. "What is CI/CD?" or "Explain how Docker works" mention
+    #     code topics but are educational, not coding tasks. Route to chat
+    #     path so LLM answers from knowledge, no tools needed.
+    if _KNOWLEDGE_INTENT.search(text):
+        return _choice("chat", "default")
+
     # 5. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
     if has_code:
@@ -308,11 +315,7 @@ def classify_and_route(
         if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
             return _choice("lookup", "fast")
 
-    # 8b. Knowledge/educational questions — route to fast chat path
-    #     which now has full formatting rules + high token limit.
-    #     LLM answers from training knowledge, no tools needed.
-    if _KNOWLEDGE_INTENT.search(text):
-        return _choice("chat", "default")
+    # 8b. (Moved to 4b — knowledge intent now checked before code keywords)
 
     # 8c. Short conversational messages with no tool/data keywords
     if len(text) < 100 and not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text) and not _ACTION_VERBS.search(text):

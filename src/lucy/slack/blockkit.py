@@ -93,23 +93,13 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
             blocks.append({"type": "divider"})
             continue
 
-        # Header detection — bold-only lines or emoji+bold lines
-        header_match = _HEADER_RE.match(stripped) or _EMOJI_HEADER_RE.match(stripped)
-        if (
-            header_match
-            and len(stripped) < MAX_HEADER_LENGTH
-            and not _BULLET_RE.match(stripped)
-        ):
-            heading = header_match.group(1).strip()
-            # Allow headers with colons (e.g. "Products & Pricing Tiers")
-            # but skip lines that are clearly bullet content
-            if heading and not any(c in heading for c in ["\u2014", "\u2022"]):
-                _flush_section()
-                blocks.append({
-                    "type": "header",
-                    "text": {"type": "plain_text", "text": heading[:MAX_HEADING_DISPLAY_LENGTH]},
-                })
-                continue
+        # Header detection — DISABLED.
+        # Block Kit headers render as plain_text (no emoji, no bold, no links).
+        # Viktor-style formatting uses inline *bold* with emoji prefixes instead.
+        # Markdown ## headers from LLM output are kept as-is in mrkdwn sections
+        # where they render with full rich formatting.
+        # (Previously converted ## lines to Block Kit header blocks — removed
+        # because it stripped emojis and formatting from section titles.)
 
         current_section.append(line)
 
