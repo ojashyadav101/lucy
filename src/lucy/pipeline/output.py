@@ -39,6 +39,99 @@ from lucy.pipeline.fact_verifier import verify_claims, verify_claims_sync
 logger = structlog.get_logger()
 
 # ═══════════════════════════════════════════════════════════════════════
+# LAYER 0.9: EMOJI SHORTCODE → UNICODE CONVERTER
+# Converts Slack :shortcode: emoji to Unicode so they render correctly
+# in Block Kit section blocks (mrkdwn type doesn't expand shortcodes).
+# ═══════════════════════════════════════════════════════════════════════
+
+_EMOJI_MAP: dict[str, str] = {
+    ":rocket:": "🚀", ":zap:": "⚡", ":bulb:": "💡", ":dart:": "🎯",
+    ":fire:": "🔥", ":star:": "⭐", ":sparkles:": "✨", ":warning:": "⚠️",
+    ":white_check_mark:": "✅", ":x:": "❌", ":heavy_check_mark:": "✔️",
+    ":bar_chart:": "📊", ":chart_with_upwards_trend:": "📈",
+    ":chart_with_downwards_trend:": "📉", ":mag:": "🔍",
+    ":hammer_and_wrench:": "🛠️", ":gear:": "⚙️", ":lock:": "🔒",
+    ":key:": "🔑", ":shield:": "🛡️", ":globe_with_meridians:": "🌐",
+    ":package:": "📦", ":memo:": "📝", ":clipboard:": "📋",
+    ":link:": "🔗", ":email:": "📧", ":date:": "📅",
+    ":calendar:": "📅", ":clock:": "🕐", ":hourglass:": "⏳",
+    ":bell:": "🔔", ":mega:": "📣", ":loudspeaker:": "📢",
+    ":speech_balloon:": "💬", ":thought_balloon:": "💭",
+    ":thumbsup:": "👍", ":thumbsdown:": "👎", ":clap:": "👏",
+    ":tada:": "🎉", ":trophy:": "🏆", ":medal:": "🏅",
+    ":100:": "💯", ":gem:": "💎", ":moneybag:": "💰",
+    ":credit_card:": "💳", ":chart:": "📊",
+    ":small_blue_diamond:": "🔹", ":small_orange_diamond:": "🔸",
+    ":large_blue_diamond:": "🔷", ":large_orange_diamond:": "🔶",
+    ":red_circle:": "🔴", ":large_green_circle:": "🟢", ":yellow_circle:": "🟡",
+    ":point_right:": "👉", ":point_left:": "👈",
+    ":arrow_right:": "➡️", ":arrow_left:": "⬅️",
+    ":heavy_plus_sign:": "➕", ":heavy_minus_sign:": "➖",
+    ":brain:": "🧠", ":eyes:": "👀", ":muscle:": "💪",
+    ":pray:": "🙏", ":wave:": "👋", ":raised_hands:": "🙌",
+}
+
+# Build a single regex that matches any known shortcode
+_EMOJI_SHORTCODE_RE = re.compile(
+    "|".join(re.escape(k) for k in _EMOJI_MAP),
+)
+
+
+def _convert_emoji_shortcodes(text: str) -> str:
+    """Replace Slack :shortcode: emoji with Unicode equivalents.
+
+    Must run BEFORE blockkit conversion, because Block Kit section blocks
+    use mrkdwn type which does NOT auto-expand Slack shortcodes. Only
+    rich_text blocks expand them, but we want 100% section blocks.
+    """
+    if ":" not in text:
+        return text
+    return _EMOJI_SHORTCODE_RE.sub(lambda m: _EMOJI_MAP[m.group(0)], text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAYER 0.8: EMAIL CODE BLOCK STRIPPER
+# Detects email/composition drafts wrapped in ``` code blocks and
+# removes the code block markers so Slack renders formatting properly.
+# ═══════════════════════════════════════════════════════════════════════
+
+# Patterns that indicate content is an email draft
+_EMAIL_SUBJECT_RE = re.compile(r"^Subject:\s*.+", re.MULTILINE)
+_EMAIL_GREETING_RE = re.compile(r"^(?:Dear|Hi|Hey|Hello|Good (?:morning|afternoon|evening))\b", re.MULTILINE)
+_EMAIL_SIGNOFF_RE = re.compile(
+    r"(?:Best(?: regards)?|Kind regards|Regards|Sincerely|Thanks|Thank you|Cheers|Warm regards|"
+    r"All the best|Looking forward|Talk soon),?\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _strip_email_code_blocks(text: str) -> str:
+    """Remove ``` code block wrappers from email/composition drafts.
+
+    Email drafts wrapped in code blocks lose all formatting (bold, italic,
+    links). This detects the pattern and strips the markers while preserving
+    the content.
+    """
+    # Match a code block that contains email-like content
+    code_block_re = re.compile(r"```(?:\w*\n)?(.*?)```", re.DOTALL)
+
+    def _maybe_strip(m: re.Match[str]) -> str:
+        inner = m.group(1).strip()
+        # Check if the content looks like an email draft
+        has_subject = bool(_EMAIL_SUBJECT_RE.search(inner))
+        has_greeting = bool(_EMAIL_GREETING_RE.search(inner))
+        has_signoff = bool(_EMAIL_SIGNOFF_RE.search(inner))
+
+        # Need at least 2 of 3 signals to identify as email
+        signals = sum([has_subject, has_greeting, has_signoff])
+        if signals >= 2:
+            return inner
+        return m.group(0)  # Not an email, keep code block
+
+    return code_block_re.sub(_maybe_strip, text)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # LAYER 1: OUTPUT SANITIZER
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -798,11 +891,19 @@ async def process_output(text: str | None) -> str:
     # flag stale version/pricing claims (W7-TRUTH)
     text = await _verify_facts(text)
 
+    # Layer 0.8: Strip code blocks from email drafts (before markdown conversion)
+    text = _strip_email_code_blocks(text)
+
     text = _sanitize(text)
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     text = _validate_tone(text)
     text = await _deai(text)
+
+    # Layer 0.9: Convert emoji shortcodes to Unicode (after all text transforms,
+    # before blockkit conversion which uses mrkdwn that won't expand shortcodes)
+    text = _convert_emoji_shortcodes(text)
+
     return text.strip()
 
 
@@ -823,9 +924,17 @@ def process_output_sync(text: str | None) -> str:
     # Layer 0.5: Fact verification sync (dates only, no URL checks)
     text = _verify_facts_sync(text)
 
+    # Layer 0.8: Strip code blocks from email drafts (before markdown conversion)
+    text = _strip_email_code_blocks(text)
+
     text = _sanitize(text)
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     text = _validate_tone(text)
     text = _regex_deai(text)
+
+    # Layer 0.9: Convert emoji shortcodes to Unicode (after all text transforms,
+    # before blockkit conversion which uses mrkdwn that won't expand shortcodes)
+    text = _convert_emoji_shortcodes(text)
+
     return text.strip()
