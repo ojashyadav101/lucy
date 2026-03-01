@@ -218,9 +218,9 @@ _IMPOSSIBLE_REQUESTS = re.compile(
     r"(?:what(?:'s| is) the )?(?:weather|temperature|forecast|humidity)"
     r"|(?:current |today'?s? )?(?:stock price|share price|stock market|nasdaq|dow jones)"
     r"|live score|match score|game score|sports? score"
-    r"|(?:send|write) (?:a )?(?:text|sms|text message)"
+    r"|(?:send|write) (?:a |an )?(?:text|sms|text message)"
     r"|(?:call|phone|ring|dial) (?:me|them|him|her|this number|\d)"
-    r"|(?:post|tweet|publish|share) (?:on|to) (?:twitter|x\.com|linkedin|instagram|tiktok|facebook)"
+    r"|(?:post|tweet|publish|share) (?:\w+ )?(?:on|to) (?:twitter|x\.com|linkedin|instagram|tiktok|facebook)"
     r"|(?:buy|purchase|order|pay for|checkout|add to cart)"
     r"|(?:crypto|bitcoin|ethereum|btc|eth) (?:price|value|rate)"
     r")\b",
