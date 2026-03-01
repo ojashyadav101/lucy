@@ -318,18 +318,18 @@ def classify_and_route(
     if _KNOWLEDGE_INTENT.search(text):
         return _choice("chat", "default")
 
-    # 5. Coding tasks (removed "build" — "build me a report" is not code)
+    # 5. Composition tasks — user wants content written, not data fetched.
+    #     MUST fire before code keywords so "write a product description
+    #     for a code review tool" doesn't misroute as coding.
+    if _COMPOSITION_INTENT.search(text) or _COMPOSITION_BROAD.search(text):
+        return _choice("chat", "default")
+
+    # 5b. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
     if has_code:
         if _CHECK_PATTERNS.search(text) and len(text) < 80:
             return _choice("tool_use", "default")
         return _choice("code", "code")
-
-    # 5b. Composition tasks — user wants content written, not data fetched.
-    #     Must fire BEFORE data-source check so "write a product update
-    #     mentioning 3000 users" doesn't route as tool_use.
-    if _COMPOSITION_INTENT.search(text) or _COMPOSITION_BROAD.search(text):
-        return _choice("chat", "default")
 
     # 5c. Broad composition — "help me write", "can you draft", etc.
     #     Route to default model (not lightweight path) because these need
