@@ -21,21 +21,51 @@ logger = structlog.get_logger()
 # ═══════════════════════════════════════════════════════════════════════════
 
 _SECTION_EMOJI: dict[str, str] = {
+    # Data & metrics
     "summary": "\U0001f4ca",
+    "metrics": "\U0001f4ca",
+    "analytics": "\U0001f4ca",
+    "data": "\U0001f4ca",
+    "breakdown": "\U0001f4ca",
+    "report": "\U0001f4ca",
+    # Status
     "result": "\u2705",
-    "finding": "\U0001f50d",
-    "warning": "\u26a0\ufe0f",
-    "error": "\U0001f534",
     "success": "\u2705",
-    "next step": "\u27a1\ufe0f",
+    "complete": "\u2705",
+    "done": "\u2705",
+    # Recommendations & actions
+    "recommendation": "\U0001f3af",
     "action": "\U0001f3af",
-    "recommendation": "\U0001f4a1",
+    "next step": "\U0001f3af",
+    "strategy": "\U0001f3af",
+    # Insights
     "tip": "\U0001f4a1",
+    "insight": "\U0001f4a1",
+    "takeaway": "\U0001f4a1",
+    "key finding": "\U0001f4a1",
+    # Investigation
+    "finding": "\U0001f50d",
+    "analysis": "\U0001f50d",
+    # Warnings & issues
+    "warning": "\u26a0\ufe0f",
+    "caution": "\u26a0\ufe0f",
+    "issue": "\u26a0\ufe0f",
+    "error": "\U0001f534",
+    # Calendar & time
+    "schedule": "\U0001f4c5",
+    "calendar": "\U0001f4c5",
+    "meeting": "\U0001f4c5",
+    # Money & revenue
+    "revenue": "\U0001f4b0",
+    "pricing": "\U0001f4b0",
+    "billing": "\U0001f4b0",
+    # Other
     "overview": "\U0001f4cb",
     "detail": "\U0001f4c4",
     "update": "\U0001f4cc",
     "change": "\U0001f504",
     "note": "\U0001f4dd",
+    "highlight": "\U0001f3c6",
 }
 
 _SECTION_EMOJI_RE = re.compile(
@@ -83,6 +113,11 @@ _DOMAIN_NAMES: dict[str, str] = {
     "connect.composio.dev": "Connect here",
     "auth.composio.dev": "Connect here",
     "zeeya.app": "Live App",
+    "polar.sh": "Polar",
+    "app.polar.sh": "Polar Dashboard",
+    "getviktor.com": "Viktor",
+    "app.getviktor.com": "Viktor Settings",
+    "serprisingly.com": "Serprisingly",
 }
 
 
@@ -142,7 +177,13 @@ def format_links(text: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def enhance_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Post-process Block Kit blocks for richer formatting."""
+    """Post-process Block Kit blocks for richer formatting.
+
+    Enhancements:
+    - Adds emoji prefixes to header blocks based on content keywords
+    - Converts raw URLs to anchor-text links in section blocks
+    - Detects footer/context lines and converts to context blocks
+    """
     enhanced = []
     for block in blocks:
         block_type = block.get("type")
@@ -157,13 +198,54 @@ def enhance_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif block_type == "section":
             text_obj = block.get("text", {})
             if text_obj.get("type") == "mrkdwn":
-                text_obj["text"] = format_links(text_obj.get("text", ""))
-            enhanced.append(block)
+                content = text_obj.get("text", "")
+                content = format_links(content)
+                # Detect context footer lines (e.g. "Live from Polar API • ...")
+                content, footer = _extract_context_footer(content)
+                text_obj["text"] = content
+                enhanced.append(block)
+                if footer:
+                    enhanced.append({
+                        "type": "context",
+                        "elements": [
+                            {"type": "mrkdwn", "text": footer},
+                        ],
+                    })
+            else:
+                enhanced.append(block)
 
         else:
             enhanced.append(block)
 
     return enhanced
+
+
+def _extract_context_footer(text: str) -> tuple[str, str | None]:
+    """Extract a context footer from the end of a section.
+
+    Detects patterns like:
+    - "Live from Polar API • Read-only • Feb 14, 2026"
+    - "_Data from Clerk • Last synced 2 min ago_"
+
+    Returns (main_text, footer_or_none).
+    """
+    lines = text.rstrip().split("\n")
+    if len(lines) < 2:
+        return text, None
+
+    last_line = lines[-1].strip()
+    # Match lines that look like metadata footers
+    footer_patterns = [
+        r"^_?(?:Live from|Data from|Source:|Last (?:synced|updated)|Pulled from|From) .+_?$",
+        r"^_?.+\s+\u2022\s+.+\s+\u2022\s+.+_?$",  # "X • Y • Z" format
+    ]
+    for pattern in footer_patterns:
+        if re.match(pattern, last_line, re.IGNORECASE):
+            main_text = "\n".join(lines[:-1]).rstrip()
+            footer = last_line.strip("_").strip()
+            return main_text, f"_{footer}_"
+
+    return text, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -140,7 +140,7 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = re.sub(r"```.*?```", _stash_code, text, flags=re.DOTALL)
     text = re.sub(r"`[^`]+`", _stash_code, text)
 
-    text = _convert_tables_to_lists(text)
+    text = _convert_tables_to_code_blocks(text)
     # Convert markdown links FIRST (before bold conversion touches them)
     text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text,
@@ -164,7 +164,13 @@ def _convert_markdown_to_slack(text: str) -> str:
     return text
 
 
-def _convert_tables_to_lists(text: str) -> str:
+def _convert_tables_to_code_blocks(text: str) -> str:
+    """Convert markdown pipe-tables to aligned code block tables.
+
+    Viktor-style: tables become code blocks with box-drawing chars
+    for separators and properly aligned columns. This preserves
+    tabular data as actual tables instead of converting to bullets.
+    """
     lines = text.split("\n")
     result: list[str] = []
     i = 0
@@ -179,17 +185,30 @@ def _convert_tables_to_lists(text: str) -> str:
             ):
                 table_lines.append(lines[i].strip())
                 i += 1
-            result.extend(_table_to_bullets(table_lines))
+            result.extend(_table_to_code_block(table_lines))
         else:
             result.append(lines[i])
             i += 1
     return "\n".join(result)
 
 
-def _table_to_bullets(table_lines: list[str]) -> list[str]:
+def _table_to_code_block(table_lines: list[str]) -> list[str]:
+    """Convert markdown table rows to an aligned code block table.
+
+    Input:  | Product | Subs | MRR |
+            |---------|------|-----|
+            | Pro     | 84   | $8K |
+
+    Output: ```
+            Product     Subs   MRR
+            ─────────────────────────
+            Pro          84    $8K
+            ```
+    """
     rows: list[list[str]] = []
     for line in table_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
+        # Skip separator rows (---|---|---)
         if cells and not all(
             c.replace("-", "").replace(":", "").strip() == "" for c in cells
         ):
@@ -198,20 +217,58 @@ def _table_to_bullets(table_lines: list[str]) -> list[str]:
     if len(rows) < 2:
         return table_lines
 
-    headers = rows[0]
-    bullets: list[str] = []
+    # Calculate column widths
+    col_count = max(len(row) for row in rows)
+    col_widths = [0] * col_count
+    for row in rows:
+        for j, cell in enumerate(row):
+            if j < col_count:
+                col_widths[j] = max(col_widths[j], len(cell))
+
+    # Add padding (min 2 spaces between columns)
+    col_widths = [w + 2 for w in col_widths]
+
+    # Build aligned table
+    output: list[str] = ["```"]
+
+    # Header row
+    header = "".join(
+        rows[0][j].ljust(col_widths[j]) if j < len(rows[0]) else " " * col_widths[j]
+        for j in range(col_count)
+    )
+    output.append(header.rstrip())
+
+    # Separator with box-drawing chars
+    separator = "\u2500" * sum(col_widths)
+    output.append(separator)
+
+    # Data rows
     for row in rows[1:]:
-        if len(headers) >= 2 and len(row) >= 2:
-            label = row[0]
-            details = " | ".join(
-                f"{headers[j]}: {row[j]}"
-                for j in range(1, min(len(headers), len(row)))
-                if row[j].strip()
-            )
-            bullets.append(f"• *{label}*: {details}" if details else f"• *{label}*")
-        else:
-            bullets.append(f"• {' | '.join(row)}")
-    return [""] + bullets + [""]
+        line_str = "".join(
+            _align_cell(row[j] if j < len(row) else "", col_widths[j])
+            for j in range(col_count)
+        )
+        output.append(line_str.rstrip())
+
+    output.append("```")
+    return [""] + output + [""]
+
+
+def _align_cell(cell: str, width: int) -> str:
+    """Align a cell value. Right-align numbers/currency, left-align text."""
+    stripped = cell.strip()
+    if not stripped:
+        return " " * width
+    # Right-align if it looks like a number, currency, or percentage
+    if (
+        stripped.replace(",", "").replace(".", "").replace("-", "").isdigit()
+        or stripped.startswith("$")
+        or stripped.endswith("%")
+        or stripped.endswith("/mo")
+        or stripped.endswith("/yr")
+    ):
+        return stripped.rjust(width)
+    return stripped.ljust(width)
 
 
 # ═══════════════════════════════════════════════════════════════════════
