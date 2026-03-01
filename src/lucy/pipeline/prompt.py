@@ -42,6 +42,37 @@ _CAPABILITIES_PATH = _PROMPTS_DIR / "CAPABILITIES.md"
 _SECTION_SEP = "\n\n---\n\n"
 
 
+
+def _load_capabilities_summary() -> str:
+    """Load a condensed capability summary for lightweight prompts."""
+    try:
+        caps_path = Path(__file__).parent.parent.parent / "prompts" / "CAPABILITIES.md"
+        if caps_path.exists():
+            # Return condensed summary (first paragraph of each section)
+            text = caps_path.read_text()
+            return (
+                "CAPABILITY AWARENESS: You can help with email, calendar, search, "
+                "code execution, file generation, web browsing, and data analysis. "
+                "You CANNOT do: real-time weather/stock prices, send SMS, make calls, "
+                "access social media accounts, or make purchases. When asked about "
+                "things you cannot do, say so immediately and suggest alternatives."
+            )
+    except Exception:
+        pass
+    return ""
+
+
+def _load_capabilities_full() -> str:
+    """Load full capabilities manifest for system prompts."""
+    try:
+        caps_path = Path(__file__).parent.parent.parent / "prompts" / "CAPABILITIES.md"
+        if caps_path.exists():
+            return caps_path.read_text()
+    except Exception:
+        pass
+    return ""
+
+
 def _load_soul(*, compact: bool = False) -> str:
     if compact and _SOUL_COMPACT_PATH.exists():
         return _SOUL_COMPACT_PATH.read_text(encoding="utf-8")
