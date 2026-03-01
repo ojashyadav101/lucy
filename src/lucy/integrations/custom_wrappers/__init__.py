@@ -52,58 +52,10 @@ def get_healthy_wrappers() -> list[str]:
 # we match it to the wrapper that handles that domain — not just keyword
 # matching on tool names.
 
-_INTENT_MAP: dict[str, dict[str, Any]] = {
-    "polarsh": {
-        "service_name": "Polar.sh",
-        "keywords": [
-            "polar", "polarsh", "polar.sh",
-        ],
-        "intents": [
-            # Revenue / billing domain
-            "revenue", "sales", "mrr", "arr", "income", "earnings",
-            "billing", "invoice", "invoices", "payment", "payments",
-            # Subscription domain
-            "subscription", "subscriptions", "subscriber", "subscribers",
-            "recurring", "churn", "renewal", "renewals",
-            # Product / pricing domain
-            "product", "products", "pricing", "price", "prices",
-            "discount", "discounts", "coupon", "coupons",
-            # Customer domain
-            "customer", "customers", "buyer", "buyers",
-            # Order domain
-            "order", "orders", "purchase", "purchases", "checkout",
-            # Benefit domain
-            "benefit", "benefits", "perk", "perks",
-            # Metrics
-            "metrics", "analytics dashboard", "polar dashboard",
-        ],
-    },
-    "clerk": {
-        "service_name": "Clerk",
-        "keywords": [
-            "clerk", "clerk.com", "clerkjs",
-        ],
-        "intents": [
-            # User / auth domain
-            "user", "users", "signup", "signups", "sign-up", "sign up",
-            "authentication", "auth", "login", "logins", "log in",
-            "registration", "registrations", "registered",
-            # Session domain
-            "session", "sessions", "active sessions", "logged in",
-            # Organization domain
-            "organization", "organizations", "org", "orgs", "team member",
-            "membership", "memberships",
-            # Identity domain
-            "email address", "phone number", "identity", "profile",
-            "ban user", "unban",
-            # Domain / instance
-            "domain", "domains", "instance settings",
-        ],
-    },
-}
+# Intent mapping is handled by _STRONG_KEYWORDS and _CONTEXT_KEYWORDS in detect_relevant_wrappers().
 
 
-def load_custom_wrapper_tools(relevant_slugs: list[str] | None = None) -> list[dict[str, Any]]:
+def load_custom_wrapper_tools(relevant_slugs: list[str] | None = None, message: str = "") -> list[dict[str, Any]]:
     """Scan all custom wrapper directories, validate, and return tool defs.
 
     Each wrapper must have:
@@ -173,6 +125,20 @@ def load_custom_wrapper_tools(relevant_slugs: list[str] | None = None) -> list[d
             continue
 
         raw_tools: list[dict[str, Any]] = getattr(mod, "TOOLS", [])
+        # Tiered loading: some wrappers have TOOLS_ADVANCED for rarely-used tools.
+        # Only load these when the message explicitly mentions advanced features
+        # (webhooks, benefits, etc.) to save ~2-3K tokens on typical requests.
+        advanced_tools: list[dict[str, Any]] = getattr(mod, "TOOLS_ADVANCED", [])
+        if advanced_tools:
+            _msg = (message or "").lower()
+            _ADVANCED_KW = {"webhook", "benefit", "benefit_grant", "manage endpoint"}
+            if any(kw in _msg for kw in _ADVANCED_KW):
+                raw_tools = list(raw_tools) + list(advanced_tools)
+                logger.info(
+                    "custom_wrapper_advanced_tools_loaded",
+                    slug=slug,
+                    advanced_count=len(advanced_tools),
+                )
         execute_fn = getattr(mod, "execute", None)
         has_execute = callable(execute_fn)
 
@@ -356,7 +322,13 @@ def detect_relevant_wrappers(
     # If the user is asking about tools/integrations broadly, load everything
     if allow_load_all:
         _LOAD_ALL = re.compile(
-            r"\b(?:integrations?|tools?|what can you|capabilities|services?|connected)\b",
+            r"(?:"
+            r"(?:my|your|our|connected|available|installed|enabled)\s+(?:integrations?|tools?|services?|apps?)"
+            r"|what\s+(?:integrations?|tools?|services?|apps?)\s+(?:do|can|are)"
+            r"|what\s+can\s+you\s+(?:do|connect|integrate)"
+            r"|capabilities"
+            r"|(?:list|show|manage)\s+(?:integrations?|tools?|services?)"
+            r")",
             re.IGNORECASE,
         )
         if _LOAD_ALL.search(msg):
@@ -399,9 +371,10 @@ def detect_relevant_wrappers(
     # Tier 1: Strong signals (always trigger) - explicit service mentions
     _STRONG_KEYWORDS: dict[str, list[str]] = {
         "clerk": ["clerk", "authentication", "sign up", "signup", "login"],
-        "polarsh": ["polar", "polar.sh", "subscription", "checkout",
+        "polarsh": ["polar", "polar.sh", "subscription", "subscriptions",
+                     "subscriber", "subscribers", "checkout",
                      "billing", "payment", "benefit", "discount",
-                     "revenue", "mrr", "arr"],
+                     "revenue", "mrr", "arr", "earnings"],
         "googlecalendar": ["calendar", "meeting", "meetings", "schedule",
                            "event", "events", "free time", "free slot",
                            "am i free", "are you free", "i free",

@@ -185,9 +185,9 @@ class LLMPresets:
     """
 
     ACK = LLMPreset(temperature=0.9, max_tokens=80)
-    SUPERVISOR = LLMPreset(temperature=0.2, max_tokens=1000)
+    SUPERVISOR = LLMPreset(temperature=0.2, max_tokens=4096)
     SUPERVISOR_TERSE = LLMPreset(temperature=0.1, max_tokens=200)
-    HUMANIZE = LLMPreset(temperature=0.9, max_tokens=500)
+    HUMANIZE = LLMPreset(temperature=0.9, max_tokens=16384)
     HUMANIZE_POOL = LLMPreset(temperature=0.9, max_tokens=8000)
     CLASSIFIER = LLMPreset(temperature=0.1, max_tokens=500)
     CODE_GEN = LLMPreset(temperature=0.2, max_tokens=16384)

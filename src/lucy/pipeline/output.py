@@ -1,12 +1,14 @@
-"""Five-layer output pipeline for Lucy's Slack messages.
+"""Six-layer output pipeline for Lucy's Slack messages.
 
-Layer 0: Internal content filter - strips planning, self-correction,
-         quality-gate critique, leaked XML tags, and meta-commentary
-         using structural classification (content_classifier.py)
-Layer 1: Sanitizer - strips paths, tool names, internal references
-Layer 2: Format converter - transforms Markdown to Slack mrkdwn
-Layer 3: Tone validator - catches robotic/error-dump patterns
-Layer 4: De-AI engine - detects and strips AI-generated tells via regex
+Layer 0:   Internal content filter - strips planning, self-correction,
+           quality-gate critique, leaked XML tags, and meta-commentary
+           using structural classification (content_classifier.py)
+Layer 0.5: Fact verifier - corrects hallucinated dates, validates URLs,
+           flags stale version/pricing claims (fact_verifier.py) [W7-TRUTH]
+Layer 1:   Sanitizer - strips paths, tool names, internal references
+Layer 2:   Format converter - transforms Markdown to Slack mrkdwn
+Layer 3:   Tone validator - catches robotic/error-dump patterns
+Layer 4:   De-AI engine - detects and strips AI-generated tells via regex
 
 The de-AI engine has two tiers, but only Tier 1 is active:
   Tier 1 (instant): Regex detection + mechanical fixes for obvious patterns
@@ -32,6 +34,7 @@ import structlog
 
 from lucy.config import LLMPresets, settings
 from lucy.pipeline.content_classifier import strip_internal_content
+from lucy.pipeline.fact_verifier import verify_claims, verify_claims_sync
 
 logger = structlog.get_logger()
 
@@ -140,7 +143,11 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = re.sub(r"```.*?```", _stash_code, text, flags=re.DOTALL)
     text = re.sub(r"`[^`]+`", _stash_code, text)
 
-    text = _convert_tables_to_lists(text)
+    # Strip stray Unicode box-drawing lines outside code blocks
+    # (LLM sometimes outputs ─────── or ═══════ as raw separators)
+    text = re.sub(r"^[─━═╌╍┄┅]{4,}$", "", text, flags=re.MULTILINE)
+
+    text = _convert_tables_to_code_blocks(text)
     # Convert markdown links FIRST (before bold conversion touches them)
     text = re.sub(
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text,
@@ -164,7 +171,13 @@ def _convert_markdown_to_slack(text: str) -> str:
     return text
 
 
-def _convert_tables_to_lists(text: str) -> str:
+def _convert_tables_to_code_blocks(text: str) -> str:
+    """Convert markdown pipe-tables to aligned code block tables.
+
+    Viktor-style: tables become code blocks with box-drawing chars
+    for separators and properly aligned columns. This preserves
+    tabular data as actual tables instead of converting to bullets.
+    """
     lines = text.split("\n")
     result: list[str] = []
     i = 0
@@ -179,17 +192,33 @@ def _convert_tables_to_lists(text: str) -> str:
             ):
                 table_lines.append(lines[i].strip())
                 i += 1
-            result.extend(_table_to_bullets(table_lines))
+            result.extend(_table_to_code_block(table_lines))
         else:
             result.append(lines[i])
             i += 1
     return "\n".join(result)
 
 
-def _table_to_bullets(table_lines: list[str]) -> list[str]:
+def _table_to_code_block(table_lines: list[str]) -> list[str]:
+    """Convert markdown table rows to an aligned code block table.
+
+    Input:  | Product | Subs | MRR |
+            |---------|------|-----|
+            | Pro     | 84   | $8K |
+
+    Output: ```
+            Product     Subs   MRR
+            ─────────────────────────
+            Pro          84    $8K
+            ```
+
+    Tables are capped at ~58 chars wide to prevent overflow in Slack.
+    Column headers are truncated if needed to fit.
+    """
     rows: list[list[str]] = []
     for line in table_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
+        # Skip separator rows (---|---|---)
         if cells and not all(
             c.replace("-", "").replace(":", "").strip() == "" for c in cells
         ):
@@ -198,20 +227,71 @@ def _table_to_bullets(table_lines: list[str]) -> list[str]:
     if len(rows) < 2:
         return table_lines
 
-    headers = rows[0]
-    bullets: list[str] = []
+    # Calculate column widths
+    col_count = max(len(row) for row in rows)
+    col_widths = [0] * col_count
+    for row in rows:
+        for j, cell in enumerate(row):
+            if j < col_count:
+                col_widths[j] = max(col_widths[j], len(cell))
+
+    # Add padding (min 2 spaces between columns)
+    col_widths = [w + 2 for w in col_widths]
+
+    # Cap total table width at ~58 chars to prevent Slack overflow
+    _MAX_TABLE_WIDTH = 58
+    total_width = sum(col_widths)
+    if total_width > _MAX_TABLE_WIDTH:
+        # Proportionally shrink columns, but keep minimum of 4 chars each
+        scale = _MAX_TABLE_WIDTH / total_width
+        col_widths = [max(4, int(w * scale)) for w in col_widths]
+        # Truncate cell values that exceed their column width
+        for row_idx, row in enumerate(rows):
+            for col_idx, cell in enumerate(row):
+                if col_idx < len(col_widths) and len(cell) > col_widths[col_idx] - 1:
+                    rows[row_idx][col_idx] = cell[:col_widths[col_idx] - 2] + "…"
+
+    # Build aligned table
+    output: list[str] = ["```"]
+
+    # Header row
+    header = "".join(
+        rows[0][j].ljust(col_widths[j]) if j < len(rows[0]) else " " * col_widths[j]
+        for j in range(col_count)
+    )
+    output.append(header.rstrip())
+
+    # Separator with simple dashes (avoids wide Unicode rendering issues)
+    separator = "-" * min(sum(col_widths), 55)
+    output.append(separator)
+
+    # Data rows
     for row in rows[1:]:
-        if len(headers) >= 2 and len(row) >= 2:
-            label = row[0]
-            details = " | ".join(
-                f"{headers[j]}: {row[j]}"
-                for j in range(1, min(len(headers), len(row)))
-                if row[j].strip()
-            )
-            bullets.append(f"• *{label}*: {details}" if details else f"• *{label}*")
-        else:
-            bullets.append(f"• {' | '.join(row)}")
-    return [""] + bullets + [""]
+        line_str = "".join(
+            _align_cell(row[j] if j < len(row) else "", col_widths[j])
+            for j in range(col_count)
+        )
+        output.append(line_str.rstrip())
+
+    output.append("```")
+    return [""] + output + [""]
+
+
+def _align_cell(cell: str, width: int) -> str:
+    """Align a cell value. Right-align numbers/currency, left-align text."""
+    stripped = cell.strip()
+    if not stripped:
+        return " " * width
+    # Right-align if it looks like a number, currency, or percentage
+    if (
+        stripped.replace(",", "").replace(".", "").replace("-", "").isdigit()
+        or stripped.startswith("$")
+        or stripped.endswith("%")
+        or stripped.endswith("/mo")
+        or stripped.endswith("/yr")
+    ):
+        return stripped.rjust(width)
+    return stripped.ljust(width)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -666,15 +746,41 @@ async def _deai(text: str) -> str:
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
+
+async def _verify_facts(text: str) -> str:
+    """Layer 0.5: Verify factual claims and correct hallucinations.
+
+    Corrects: wrong day-of-week, broken URLs (404/410)
+    Flags (logged): stale version numbers, outdated pricing, stale temporal claims
+    """
+    try:
+        result = await verify_claims(text, validate_urls=True, url_timeout=2.0)
+        return result.corrected_text
+    except Exception as exc:
+        # Never let fact verification break the pipeline
+        logger.warning("fact_verification_failed", error=str(exc))
+        return text
+
+
+def _verify_facts_sync(text: str) -> str:
+    """Layer 0.5 sync: date/day-of-week verification only (no URL checks)."""
+    try:
+        result = verify_claims_sync(text)
+        return result.corrected_text
+    except Exception:
+        return text
+
+
 async def process_output(text: str | None) -> str:
     """Run all output layers on a message before posting to Slack.
 
     Pipeline order:
-      Layer 0: Strip internal content (planning, self-correction, XML tags)
-      Layer 1: Sanitize paths, tool names, internal references
-      Layer 2: Convert Markdown to Slack mrkdwn
-      Layer 3: Validate tone (catch robotic patterns)
-      Layer 4: De-AI engine (regex pass, LLM rewrite disabled)
+      Layer 0:   Strip internal content (planning, self-correction, XML tags)
+      Layer 0.5: Fact verification — correct dates, validate URLs, flag stale claims
+      Layer 1:   Sanitize paths, tool names, internal references
+      Layer 2:   Convert Markdown to Slack mrkdwn
+      Layer 3:   Validate tone (catch robotic patterns)
+      Layer 4:   De-AI engine (regex pass, LLM rewrite disabled)
 
     Now async: the de-AI engine may invoke a fast LLM call for contextual
     rewrites when significant AI tells are detected. Falls back to instant
@@ -687,6 +793,10 @@ async def process_output(text: str | None) -> str:
     text = strip_internal_content(text)
     if not text.strip():
         return "I've completed the task."
+
+    # Layer 0.5: Fact verification — correct hallucinated dates, validate URLs,
+    # flag stale version/pricing claims (W7-TRUTH)
+    text = await _verify_facts(text)
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)
@@ -709,6 +819,9 @@ def process_output_sync(text: str | None) -> str:
     text = strip_internal_content(text)
     if not text.strip():
         return "I've completed the task."
+
+    # Layer 0.5: Fact verification sync (dates only, no URL checks)
+    text = _verify_facts_sync(text)
 
     text = _sanitize(text)
     text = _fix_broken_urls(text)

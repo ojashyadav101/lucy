@@ -44,6 +44,18 @@ _RESEARCH_LIGHT = re.compile(
     re.IGNORECASE,
 )
 
+# Advisory / planning questions — "help me plan the tech stack",
+# "review this architecture". These are educational/advisory, not research.
+_ADVISORY_INTENT = re.compile(
+    r"(?:"
+    r"help\s+me\s+(?:plan|create|design|choose|decide|pick|figure\s+out|think\s+(?:about|through))"
+    r"|review\s+(?:this|my|the|our|a)\s+(?:architect|design|stack|code|setup|approach|system|plan|infra)"
+    r"|(?:suggest|recommend)\s+(?:a\s+)?(?:tech\s+)?(?:stack|approach|architecture|strategy|plan|framework)"
+    r"|I'm\s+(?:building|creating|starting|launching)\s+.{5,40}\s+(?:help|what|how|which|should)"
+    r")",
+    re.IGNORECASE,
+)
+
 _RESEARCH_HEAVY = re.compile(
     r"\b(deep dive|deep analysis|comprehensive|thorough|investigate|audit|"
     r"benchmark|detailed analysis|competitive analysis|full report|"
@@ -117,8 +129,8 @@ _DATA_SOURCE_KEYWORDS = re.compile(
 _COMPOSITION_INTENT = re.compile(
     r"^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\s+"
     r"(?:me\s+|us\s+)?(?:a\s+|an\s+|the\s+|some\s+)?"
-    r"(?:short\s+|brief\s+|quick\s+|long\s+|detailed\s+)?"
-    r"(?:product\s+)?(?:update|announcement|email|message|memo|"
+    r"(?:\w+\s+){0,3}"  # flexible: up to 3 words before noun (e.g. "cold outreach")
+    r"(?:update|announcement|email|message|memo|"
     r"report|summary|brief|newsletter|post|blog|note|copy|text|"
     r"description|blurb|paragraph|response|reply|answer|"
     r"letter|proposal|pitch|tweet|thread|caption|tagline|headline)",
@@ -127,6 +139,7 @@ _COMPOSITION_INTENT = re.compile(
 
 # Broad composition intent: catches "help me write", "can you draft",
 # "I need a post about", etc. These are writing tasks, NOT data fetches.
+# Route to full pipeline (not lightweight) for proper token limits.
 _COMPOSITION_BROAD = re.compile(
     r"(?:help\s+me\s+|can\s+you\s+|could\s+you\s+|please\s+|I\s+need\s+(?:you\s+to\s+)?)"
     r"(?:write|draft|compose|create|come up with|put together|craft)\s+"
@@ -145,18 +158,37 @@ _COMPOSITION_BROAD = re.compile(
 # system prompt, NOT the lightweight 500-token path.
 _KNOWLEDGE_INTENT = re.compile(
     r"(?:"
+    # Explicit educational patterns
     r"walk\s+me\s+through"
-    r"|explain\s+(?:how|what|why|the|to\s+me)"
+    r"|explain\s+(?:how|what|why|the|to\s+me|(?:\w+\s+){0,3}(?:vs\.?|versus|and|architecture|concept|pattern|model|component))"
+    # "What is X" / "What are X" — educational questions.
+    # Negative lookahead excludes possessive/data lookups:
+    # "what is MY mrr", "what is OUR user count", "what is THE CURRENT plan"
+    r"|what\s+(?:is|are)\s+(?!my\b|our\b|your\b|his\b|her\b|their\b|its\b"
+    r"|the\s+(?:current|latest|status|total|number|count))"
+    r"(?:\w+\s+){0,2}\w+"
+    # "How does X work"
     r"|how\s+does\s+\w+\s+(?:work|function)"
-    r"|how\s+do\s+(?:you|I|we)\s+(?:build|implement|set\s+up|design|architect)"
+    # "How do I set up / build / implement" — allow words between verb parts
+    # so "how do I set IT up" still matches (not just "how do I set up")
+    r"|how\s+do\s+(?:you|I|we)\s+(?:\w+\s+){0,2}(?:build|implement|set\s+\w*\s*up|design|architect|configure|deploy|use|start)"
+    # "What is the best / key / common"
     r"|what\s+(?:is|are)\s+(?:the\s+)?(?:best|top|main|key|common|different|recommended)"
     r"|(?:give|tell)\s+me\s+(?:a\s+)?(?:overview|breakdown|rundown|summary)\s+(?:of|on)"
-    r"|compare\s+\w+\s+(?:vs|versus|and|or|with)\s+\w+"
-    r"|(?:pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?)\s+of"
+    r"|compare\s+.+?\s+(?:vs\.?|versus|and|or|with)\s+.+"
+    r"|^\s*compare\b"
+    r"|(?:pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?)(?:\s+of)?"
     r"|what\s+are\s+(?:some|the|good|best)\s+(?:ways?|approaches?|strategies?|practices?|tips?)"
     r"|(?:guide|teach)\s+me\s+(?:through|on|about|how)"
     r"|break\s+(?:down|it\s+down)"
     r"|deep\s+dive\s+(?:into|on)"
+    # "When should I use X" — educational choice question
+    r"|when\s+should\s+I\s+(?:use|choose|pick|go\s+with|prefer)"
+    r"|should\s+I\s+(?:use|choose|pick|go\s+with)\s+\w+"
+    # "Difference(s) between X and Y"
+    r"|differences?\s+between"
+    # "How to / How can I set up / implement / use"
+    r"|how\s+(?:to|can\s+I)\s+(?:set\s+up|implement|use|configure|deploy|get\s+started)"
     r")",
     re.IGNORECASE,
 )
@@ -263,6 +295,11 @@ def classify_and_route(
     if _DOCUMENT_KEYWORDS.search(text) and _ACTION_VERBS.search(text):
         return _choice("document", "document")
 
+    # 3c. Advisory / planning questions — "help me plan", "review my architecture"
+    #     These are educational/advisory, not research tasks. Route to chat.
+    if _ADVISORY_INTENT.search(text):
+        return _choice("chat", "default")
+
     # 4. Deep research / analysis — check before code to avoid
     #    "research code tools" being classified as coding.
     has_heavy = bool(_RESEARCH_HEAVY.search(text))
@@ -272,21 +309,33 @@ def classify_and_route(
     if len(light_matches) >= 2 and len(text) > 50:
         return _choice("reasoning", "research")
     if light_matches and len(text) > 40:
-        return _choice("tool_use", "default")
+        return _choice("chat", "default")
 
-    # 5. Coding tasks (removed "build" — "build me a report" is not code)
+    # 4b. Knowledge/educational questions — MUST be checked BEFORE code
+    #     keywords. "What is CI/CD?" or "Explain how Docker works" mention
+    #     code topics but are educational, not coding tasks. Route to chat
+    #     path so LLM answers from knowledge, no tools needed.
+    if _KNOWLEDGE_INTENT.search(text):
+        return _choice("chat", "default")
+
+    # 5. Composition tasks — user wants content written, not data fetched.
+    #     MUST fire before code keywords so "write a product description
+    #     for a code review tool" doesn't misroute as coding.
+    if _COMPOSITION_INTENT.search(text) or _COMPOSITION_BROAD.search(text):
+        return _choice("chat", "default")
+
+    # 5b. Coding tasks (removed "build" — "build me a report" is not code)
     has_code = _CODE_KEYWORDS.search(text)
     if has_code:
         if _CHECK_PATTERNS.search(text) and len(text) < 80:
             return _choice("tool_use", "default")
         return _choice("code", "code")
 
-    # 5b. Composition tasks — user wants content written, not data fetched.
-    #     Must fire BEFORE data-source check so "write a product update
-    #     mentioning 3000 users" doesn't route as tool_use.
-    #     Includes broad pattern for "help me write", "can you draft", etc.
-    if _COMPOSITION_INTENT.search(text) or _COMPOSITION_BROAD.search(text):
-        return _choice("chat", "fast")
+    # 5c. Broad composition — "help me write", "can you draft", etc.
+    #     Route to default model (not lightweight path) because these need
+    #     the full system prompt and higher token limits for quality content.
+    if _COMPOSITION_BROAD.search(text):
+        return _choice("tool_use", "default")
 
     # 6. Messages referencing external data sources always need tools
     if _DATA_SOURCE_KEYWORDS.search(text):
@@ -301,12 +350,7 @@ def classify_and_route(
         if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
             return _choice("lookup", "fast")
 
-    # 8b. Knowledge/educational questions — need full prompt depth, not
-    #     lightweight 500-token path. Route to tool_use so LLM gets the
-    #     complete system prompt with depth instructions + high token limit.
-    #     LLM will answer from knowledge without using tools.
-    if _KNOWLEDGE_INTENT.search(text):
-        return _choice("tool_use", "default")
+    # 8b. (Moved to 4b — knowledge intent now checked before code keywords)
 
     # 8c. Short conversational messages with no tool/data keywords
     if len(text) < 100 and not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text) and not _ACTION_VERBS.search(text):

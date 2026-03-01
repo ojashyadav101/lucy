@@ -1,32 +1,34 @@
-"""Internal tool: code execution with pre-execution validation and auto-fix.
+"""Internal tool: code execution with pre-execution validation and auto-fix — V2.
 
 Wraps the existing executor.py infrastructure as lucy_* internal tools.
 Every Python code execution goes through a validation → fix → execute → analyze
 pipeline that catches the vast majority of LLM code errors before they waste
 execution time.
 
+V2 changes:
+- Package auto-install on ModuleNotFoundError
+- File output detection (new files created during execution)
+- Local-first execution (no Composio dependency for code)
+- Improved error analysis with install suggestions
+
 Architecture:
-    lucy_execute_python → validate → auto-fix? → execute → analyze error? → retry?
+    lucy_execute_python → validate → auto-fix? → execute → auto-install? → retry? → analyze
     lucy_execute_bash   → execute (no validation — bash is too dynamic)
     lucy_run_script     → validate → execute
 
 Pipeline for Python:
     1. Pre-validate (syntax, scope, imports) via code_validator
     2. If fixable issues found, auto-fix (add missing imports)
-    3. Execute in sandbox
-    4. If execution fails, analyze error and return structured hint
-    5. If auto-retriable (max 2), fix and retry automatically
-    6. Return formatted result with hints for the LLM
-
-Benefits over fire-and-forget:
-    - Catches ~70% of LLM code errors before execution
-    - Auto-fixes missing imports (pd, np, json, etc.)
-    - Structured error hints help the LLM self-correct faster
-    - Reduces wasted execution turns from ~40% to ~10%
+    3. Execute in LOCAL sandbox (subprocess)
+    4. If ModuleNotFoundError, auto-install package and retry
+    5. If execution fails, analyze error and return structured hint
+    6. If auto-retriable (max 2), fix and retry automatically
+    7. Return formatted result with hints + file outputs
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -39,6 +41,7 @@ from lucy.tools.code_validator import (
 )
 from lucy.workspace.executor import (
     ExecutionResult,
+    auto_install_package,
     execute_bash,
     execute_python,
     execute_workspace_script,
@@ -55,6 +58,7 @@ logger = structlog.get_logger()
 _MAX_RESULT_CHARS = 4000  # Truncate output for LLM context window
 _MAX_TIMEOUT = 300
 _MAX_AUTO_RETRIES = 2  # Max automatic retry attempts after failure
+_MAX_AUTO_INSTALLS = 3  # Max package auto-installs per execution
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -78,10 +82,12 @@ def get_code_tool_definitions() -> list[dict[str, Any]]:
                     "variables from previous executions.\n\n"
                     "Available packages: requests, httpx, json, csv, re, math, "
                     "datetime, collections, itertools, pathlib, os, sys, "
-                    "hashlib, base64, uuid, statistics, sqlite3, and more "
-                    "standard library modules. pandas, numpy, and matplotlib "
-                    "may be available.\n\n"
-                    "Use print() for all output — only stdout is captured."
+                    "hashlib, base64, uuid, statistics, sqlite3, pandas, numpy, "
+                    "matplotlib, beautifulsoup4, pyyaml, tabulate, "
+                    "and more standard library modules. "
+                    "Missing packages are auto-installed on first use.\n\n"
+                    "Use print() for all output — only stdout is captured.\n\n"
+                    "PREFER THIS over COMPOSIO_REMOTE_WORKBENCH for faster execution."
                 ),
                 "parameters": {
                     "type": "object",
@@ -114,7 +120,8 @@ def get_code_tool_definitions() -> list[dict[str, Any]]:
                 "description": (
                     "Execute a bash command in a sandboxed environment. "
                     "Use this for: shell operations, file manipulation, "
-                    "system info, package installation, or piped commands."
+                    "system info, package installation, or piped commands.\n\n"
+                    "PREFER THIS over COMPOSIO_REMOTE_BASH_TOOL for faster execution."
                 ),
                 "parameters": {
                     "type": "object",
@@ -195,7 +202,7 @@ async def execute_code_tool(
     1. Validate code (Python only)
     2. Auto-fix if possible
     3. Execute
-    4. On failure: analyze error, retry if auto-fixable
+    4. On failure: auto-install missing packages, analyze error, retry
     5. Return formatted result with hints
     """
     timeout = min(parameters.get("timeout", 60), _MAX_TIMEOUT)
@@ -243,7 +250,7 @@ async def _execute_python_with_validation(
     description: str,
     t0: float,
 ) -> dict[str, Any]:
-    """Execute Python code with pre-validation, auto-fix, and error analysis."""
+    """Execute Python code with pre-validation, auto-fix, auto-install, and error analysis."""
     code = parameters.get("code", "")
     if not code.strip():
         return {"error": "No code provided."}
@@ -288,8 +295,9 @@ async def _execute_python_with_validation(
             description=description,
         )
 
-    # ── Step 3: Execute (with retry loop) ──
+    # ── Step 3: Execute (with retry loop including auto-install) ──
     retries = 0
+    auto_installs = 0
     last_result: ExecutionResult | None = None
     last_error_hint = ""
 
@@ -307,6 +315,13 @@ async def _execute_python_with_validation(
                 formatted["note"] = (
                     "Code was auto-fixed before execution (added missing imports)."
                 )
+            if result.files_created:
+                formatted["files_created"] = result.files_created
+                formatted["note"] = (
+                    (formatted.get("note", "") + " " if formatted.get("note") else "")
+                    + f"Created {len(result.files_created)} file(s): "
+                    + ", ".join(result.files_created[:5])
+                )
 
             await _log_execution(
                 workspace_id, "lucy_execute_python", description, result, elapsed_ms,
@@ -319,16 +334,32 @@ async def _execute_python_with_validation(
                 elapsed_ms=elapsed_ms,
                 retries=retries,
                 auto_fixed=was_auto_fixed,
+                auto_installs=auto_installs,
                 description=description,
             )
             return formatted
 
-        # ── Execution failed — analyze and maybe retry ──
+        # ── Execution failed — check for auto-installable packages ──
         last_result = result
         error_text = result.error or f"Exit code: {result.exit_code}"
-        last_error_hint = analyze_execution_error(error_text, execute_code)
 
-        # Check if the error is auto-retriable
+        # Try auto-install for ModuleNotFoundError
+        if auto_installs < _MAX_AUTO_INSTALLS:
+            package = _extract_missing_package(error_text)
+            if package:
+                installed = await auto_install_package(package)
+                if installed:
+                    auto_installs += 1
+                    logger.info(
+                        "code_auto_install_retry",
+                        package=package,
+                        install_count=auto_installs,
+                        description=description,
+                    )
+                    continue  # Retry with same code after installing
+
+        # Try auto-fix from error
+        last_error_hint = analyze_execution_error(error_text, execute_code)
         retry_fix = _try_auto_fix_from_error(execute_code, error_text)
         if retry_fix and retries < _MAX_AUTO_RETRIES:
             execute_code = retry_fix
@@ -350,10 +381,16 @@ async def _execute_python_with_validation(
 
     formatted = _format_result(last_result, elapsed_ms, description)
     formatted["error_analysis"] = last_error_hint
-    if retries > 0:
+    if retries > 0 or auto_installs > 0:
+        parts = []
+        if retries > 0:
+            parts.append(f"{retries} automatic fix(es)")
+        if auto_installs > 0:
+            parts.append(f"{auto_installs} package install(s)")
         formatted["auto_retries"] = retries
+        formatted["auto_installs"] = auto_installs
         formatted["note"] = (
-            f"Attempted {retries} automatic fix(es), but the error persists. "
+            f"Attempted {' and '.join(parts)}, but the error persists. "
             f"See error_analysis for guidance."
         )
 
@@ -367,7 +404,8 @@ async def _execute_python_with_validation(
         method=last_result.method,
         elapsed_ms=elapsed_ms,
         retries=retries,
-        error_preview=last_result.error[:100],
+        auto_installs=auto_installs,
+        error_preview=last_result.error[:100] if last_result.error else "",
         description=description,
     )
     return formatted
@@ -467,7 +505,7 @@ async def _execute_script_tool(
     if not result.success:
         formatted["error_analysis"] = analyze_execution_error(
             result.error or f"Exit code: {result.exit_code}",
-            "",  # Don't have the code in scope for analysis
+            "",
         )
 
     await _log_execution(
@@ -488,22 +526,53 @@ async def _execute_script_tool(
 # AUTO-RETRY FIXERS (post-execution)
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _extract_missing_package(error_text: str) -> str | None:
+    """Extract the missing package name from a ModuleNotFoundError.
+
+    Returns the package name to install, or None.
+    """
+    if "modulenotfounderror" not in error_text.lower():
+        return None
+
+    match = re.search(r"no module named ['\"]?([\w.]+)['\"]?", error_text, re.IGNORECASE)
+    if match:
+        module_name = match.group(1).split(".")[0]  # Top-level module
+
+        # Skip stdlib modules (they shouldn't be missing)
+        _STDLIB = {
+            "os", "sys", "json", "csv", "re", "math", "random", "time",
+            "datetime", "collections", "itertools", "functools", "pathlib",
+            "io", "typing", "dataclasses", "enum", "abc", "contextlib",
+            "logging", "warnings", "traceback", "inspect", "unittest",
+            "hashlib", "base64", "uuid", "secrets", "statistics",
+            "sqlite3", "subprocess", "asyncio", "threading",
+            "urllib", "http", "email", "html", "xml",
+            "copy", "shutil", "tempfile", "glob", "struct",
+            "argparse", "textwrap", "string", "operator",
+            "heapq", "bisect", "array", "queue", "calendar",
+            "gzip", "zipfile", "tarfile", "pickle",
+        }
+        if module_name in _STDLIB:
+            return None
+
+        return module_name
+
+    return None
+
+
 def _try_auto_fix_from_error(code: str, error_text: str) -> str | None:
     """Try to fix code based on a runtime error.
 
     Only fixes unambiguous, safe issues:
     - Missing import (NameError for known modules)
-    - Missing import (ModuleNotFoundError with known alternatives)
-
-    Returns fixed code or None.
     """
-    import re as _re
+    import ast
 
     error_lower = error_text.lower()
 
     # ── NameError → add missing import ──
     if "nameerror" in error_lower:
-        match = _re.search(r"name '(\w+)' is not defined", error_text)
+        match = re.search(r"name '(\w+)' is not defined", error_text)
         if match:
             var_name = match.group(1)
             from lucy.tools.code_validator import _COMMON_MISSING_IMPORTS
@@ -511,16 +580,11 @@ def _try_auto_fix_from_error(code: str, error_text: str) -> str | None:
                 import_line = _COMMON_MISSING_IMPORTS[var_name]
                 if import_line not in code:
                     fixed = f"{import_line}\n{code}"
-                    # Verify fix doesn't break syntax
                     try:
-                        import ast
                         ast.parse(fixed)
                         return fixed
                     except SyntaxError:
                         return None
-
-    # ── ModuleNotFoundError → can't auto-fix, but could suggest ──
-    # (We don't auto-fix these — the alternatives are too different)
 
     return None
 
@@ -564,17 +628,15 @@ def _format_result(
 
 
 def _check_dangerous_code(code: str) -> str | None:
-    """Check Python code for obviously dangerous operations.
-
-    Lightweight check — actual sandboxing is done by Composio Docker
-    or the local subprocess with restricted cwd.
-    """
+    """Check Python code for obviously dangerous operations."""
     code_lower = code.lower()
 
     dangerous_patterns = [
         ("os.system('rm -rf", "destructive system command"),
         ("shutil.rmtree('/'", "destructive file operation"),
         ("subprocess.call(['rm'", "destructive subprocess"),
+        ("os.remove('/'", "destructive file operation"),
+        ("open('/etc/", "system file access"),
     ]
 
     for pattern, reason in dangerous_patterns:
@@ -594,6 +656,8 @@ def _check_dangerous_bash(command: str) -> str | None:
         "mkfs",
         ":(){:|:&};:",  # fork bomb
         "chmod -R 777 /",
+        "wget -O- | sh",
+        "curl | sh",
     ]
 
     for prefix in dangerous_prefixes:
@@ -642,13 +706,10 @@ import json
 import urllib.request
 import urllib.parse
 
-# ── Configuration ──
 API_URL = "https://api.example.com/endpoint"
 HEADERS = {{"Authorization": "Bearer YOUR_TOKEN"}}
 
-# ── Fetch data (with pagination if needed) ──
 def fetch_all(url, headers=None):
-    """Fetch all pages from a paginated API."""
     all_data = []
     page = 1
     while True:
@@ -656,7 +717,6 @@ def fetch_all(url, headers=None):
         req = urllib.request.Request(page_url, headers=headers or {{}})
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read().decode())
-
         if isinstance(data, list):
             if not data:
                 break
@@ -671,12 +731,9 @@ def fetch_all(url, headers=None):
         page += 1
     return all_data
 
-# ── Process ──
 results = fetch_all(API_URL, HEADERS)
 print(f"Fetched {{len(results)}} items")
-
-# ── Transform and output ──
-for item in results[:5]:  # Preview first 5
+for item in results[:5]:
     print(json.dumps(item, indent=2))
 ''',
 
@@ -688,8 +745,6 @@ import statistics
 from collections import Counter, defaultdict
 from io import StringIO
 
-# ── Load data ──
-# Option A: From JSON string
 raw_data = """[
     {{"name": "Alice", "department": "Engineering", "score": 92}},
     {{"name": "Bob", "department": "Marketing", "score": 85}},
@@ -697,25 +752,15 @@ raw_data = """[
 ]"""
 data = json.loads(raw_data)
 
-# Option B: From CSV string
-# csv_data = """name,department,score\\nAlice,Engineering,92\\nBob,Marketing,85"""
-# reader = csv.DictReader(StringIO(csv_data))
-# data = list(reader)
-
-# ── Transform ──
 scores = [item["score"] for item in data]
 by_dept = defaultdict(list)
 for item in data:
     by_dept[item["department"]].append(item["score"])
 
-# ── Analyze ──
 print(f"Total records: {{len(data)}}")
 print(f"Average score: {{statistics.mean(scores):.1f}}")
 print(f"Median score: {{statistics.median(scores):.1f}}")
-print(f"Std deviation: {{statistics.stdev(scores):.1f}}" if len(scores) > 1 else "")
-print()
 
-# ── Group analysis ──
 for dept, dept_scores in sorted(by_dept.items()):
     avg = statistics.mean(dept_scores)
     print(f"{{dept}}: {{len(dept_scores)}} people, avg={{avg:.1f}}")
@@ -726,10 +771,8 @@ for dept, dept_scores in sorted(by_dept.items()):
 import json
 import os
 
-# ── Configuration ──
-OUTPUT_PATH = "output.json"  # Relative to workspace
+OUTPUT_PATH = "output.json"
 
-# ── Generate content ──
 content = {{
     "title": "Generated Report",
     "timestamp": __import__("datetime").datetime.now().isoformat(),
@@ -737,24 +780,14 @@ content = {{
         {{"key": "metric_1", "value": 42}},
         {{"key": "metric_2", "value": 99}},
     ],
-    "summary": "Report generated successfully.",
 }}
 
-# ── Write file ──
 with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
     json.dump(content, f, indent=2)
 
-# ── Verify ──
 if os.path.isfile(OUTPUT_PATH):
     size = os.path.getsize(OUTPUT_PATH)
     print(f"✅ File written: {{OUTPUT_PATH}} ({{size}} bytes)")
-
-    # Read back and verify
-    with open(OUTPUT_PATH, "r", encoding="utf-8") as f:
-        verify = json.load(f)
-    print(f"✅ Verified: {{len(verify['data'])}} data entries")
-else:
-    print("❌ File was not created")
 ''',
 
     "http_request": '''\
@@ -763,44 +796,32 @@ import json
 import urllib.request
 import urllib.error
 
-# ── Configuration ──
 URL = "https://httpbin.org/get"
 HEADERS = {{"User-Agent": "Lucy/1.0", "Accept": "application/json"}}
 
-# ── Make request ──
 try:
     req = urllib.request.Request(URL, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=30) as resp:
         status = resp.status
         body = resp.read().decode("utf-8")
-
     print(f"Status: {{status}}")
-
-    # Parse JSON response
-    try:
-        data = json.loads(body)
-        print(json.dumps(data, indent=2))
-    except json.JSONDecodeError:
-        print(f"Raw response (not JSON): {{body[:500]}}")
-
+    data = json.loads(body)
+    print(json.dumps(data, indent=2))
 except urllib.error.HTTPError as e:
     print(f"HTTP Error {{e.code}}: {{e.reason}}")
-    print(f"Response: {{e.read().decode()[:500]}}")
 except urllib.error.URLError as e:
     print(f"Connection error: {{e.reason}}")
-except Exception as e:
-    print(f"Error: {{e}}")
 ''',
 }
 
 
 def get_code_template(template_name: str) -> str | None:
-    """Get a code template by name. Returns None if not found."""
+    """Get a code template by name."""
     return CODE_TEMPLATES.get(template_name)
 
 
 def list_code_templates() -> list[dict[str, str]]:
-    """List available code templates with descriptions."""
+    """List available code templates."""
     descriptions = {
         "api_data_processing": "Fetch → paginate → process → output from an API",
         "data_analysis": "Load → transform → analyze → format data with statistics",

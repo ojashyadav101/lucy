@@ -481,6 +481,12 @@ async def clerk_delete_organization_membership(api_key: str, organization_id: st
     """
     return await _make_request("DELETE", f"organizations/{organization_id}/memberships/{user_id}", api_key)
 
+# --- Webhook Management (Simulated - Clerk's backend API doesn't directly manage webhooks via API) ---
+# Note: Clerk's webhooks are typically configured in the dashboard.
+# These tools are illustrative for an AI to understand the *concept* of webhooks
+# and to potentially interact with a *hypothetical* webhook management API if it existed.
+# Webhook management: not available via Clerk API — use the Clerk Dashboard.
+
 # --- Session Management ---
 
 async def clerk_list_sessions(api_key: str, query_params: Dict = None) -> Dict:
@@ -996,7 +1002,7 @@ TOOLS: List[Dict[str, Any]] = [
             "type": "object",
             "properties": {}
         }
-    },
+    }
 ]
 
 async def execute(tool_name: str, args: Dict, api_key: str) -> Dict:
