@@ -278,7 +278,11 @@ def _execute_composio_action(
         if data.get("error"):
             return {"error": data["error"]}
 
-        return data.get("data", data)
+        result = data.get("data", data)
+        # Some Composio actions nest results in response_data
+        if isinstance(result, dict) and "response_data" in result:
+            result = result["response_data"]
+        return result
 
     except httpx.TimeoutException:
         return {"error": "Gmail request timed out. Please try again."}
