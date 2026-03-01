@@ -111,6 +111,20 @@ _DATA_SOURCE_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Composition tasks: user wants content WRITTEN, not data fetched.
+# "write me a product update" mentions "product" and "update" but
+# shouldn't be routed as a data task. Must check BEFORE _DATA_SOURCE_KEYWORDS.
+_COMPOSITION_INTENT = re.compile(
+    r"^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\s+"
+    r"(?:me\s+|us\s+)?(?:a\s+|an\s+|the\s+|some\s+)?"
+    r"(?:short\s+|brief\s+|quick\s+|long\s+|detailed\s+)?"
+    r"(?:product\s+)?(?:update|announcement|email|message|memo|"
+    r"report|summary|brief|newsletter|post|blog|note|copy|text|"
+    r"description|blurb|paragraph|response|reply|answer|"
+    r"letter|proposal|pitch)",
+    re.IGNORECASE,
+)
+
 _DOCUMENT_KEYWORDS = re.compile(
     r"\b(pdf|report|document|spreadsheet|excel|csv|"
     r"create a (?:report|pdf|document|spreadsheet))\b",
@@ -226,6 +240,12 @@ def classify_and_route(
         if _CHECK_PATTERNS.search(text) and len(text) < 80:
             return _choice("tool_use", "default")
         return _choice("code", "code")
+
+    # 5b. Composition tasks — user wants content written, not data fetched.
+    #     Must fire BEFORE data-source check so "write a product update
+    #     mentioning 3000 users" doesn't route as tool_use.
+    if _COMPOSITION_INTENT.search(text):
+        return _choice("chat", "fast")
 
     # 6. Messages referencing external data sources always need tools
     if _DATA_SOURCE_KEYWORDS.search(text):
