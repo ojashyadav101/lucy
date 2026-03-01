@@ -21,6 +21,7 @@ import structlog
 from lucy.config import settings
 from lucy.workspace.filesystem import WorkspaceFS
 from lucy.workspace.skills import (
+    find_relevant_skills,
     get_key_skill_content,
     get_skill_descriptions_for_prompt,
     load_relevant_skill_content,
@@ -94,7 +95,7 @@ def _load_prompt_modules(names: list[str], *, compact: bool = False) -> str:
 
 
 # Modules loaded into the static prefix for all non-chat intents.
-_COMMON_MODULES = ["tool_use", "memory"]
+_COMMON_MODULES = ["tool_use", "memory", "skill_system"]
 
 
 
@@ -405,15 +406,24 @@ async def build_system_prompt(
 
     relevant_skills = ""
     if user_message:
-        relevant_skills = await load_relevant_skill_content(ws, user_message)
-        if relevant_skills:
+        # Two-stage skill retrieval: regex triggers + keyword matching
+        # Capped at ~1000 tokens total to keep prompt lean
+        skill_bodies = await find_relevant_skills(
+            user_message, ws.workspace_id, ws=ws,
+        )
+        if skill_bodies:
+            combined = "\n\n".join(skill_bodies)
+            # Hard cap at ~1000 tokens (~4000 chars)
+            if len(combined) > 4000:
+                combined = combined[:4000] + "\n\n[... truncated for brevity]"
+            relevant_skills = combined
             dynamic_parts.append(
-                "<relevant_skill_details>\n"
-                "The following skill details are relevant to the current "
-                "request. Use these implementation details, code patterns, "
-                "and best practices to deliver high-quality output.\n\n"
+                "<relevant_knowledge>\n"
+                "The following knowledge is relevant to the current "
+                "request. Use these details, patterns, and best "
+                "practices to deliver high-quality output.\n\n"
                 f"{relevant_skills}\n"
-                "</relevant_skill_details>"
+                "</relevant_knowledge>"
             )
 
     if key_content:
