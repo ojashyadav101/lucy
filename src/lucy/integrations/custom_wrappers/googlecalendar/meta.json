@@ -1,0 +1,18 @@
+{
+  "service_name": "Google Calendar",
+  "slug": "googlecalendar",
+  "auth_method": "composio",
+  "composio_app": "googlecalendar",
+  "tools": [
+    "googlecalendar_list_events",
+    "googlecalendar_create_event",
+    "googlecalendar_quick_add",
+    "googlecalendar_find_free_slots",
+    "googlecalendar_delete_event",
+    "googlecalendar_update_event"
+  ],
+  "total_tools": 6,
+  "api_docs": "https://developers.google.com/calendar/api/v3/reference",
+  "api_base_url": "https://backend.composio.dev/api/v2/actions",
+  "created_at": "2026-03-01T01:30:00Z"
+}

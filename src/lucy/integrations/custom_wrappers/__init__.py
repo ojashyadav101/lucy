@@ -205,6 +205,10 @@ def detect_relevant_wrappers(
         "clerk": ["clerk", "authentication", "sign up", "signup", "login"],
         "polarsh": ["polar", "polar.sh", "subscription", "checkout",
                      "billing", "payment", "benefit", "discount"],
+        "googlecalendar": ["calendar", "meeting", "meetings", "schedule",
+                           "event", "events", "free time", "free slot",
+                           "am i free", "are you free", "i free",
+                           "busy", "appointment", "block time"],
     }
 
     # Tier 2: Ambiguous keywords that need data-action context

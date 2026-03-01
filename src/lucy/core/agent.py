@@ -59,6 +59,31 @@ _AUTH_URL_RE = re.compile(
     r"https?://(?:connect|auth|app)\.composio\.(?:dev|io)/[^\s\"',}\]]+",
 )
 
+# Backend platform names that should never appear in user-facing output.
+# These sometimes leak through the company skill or model hallucination.
+# Patterns clean up surrounding punctuation so "Google Gemini, MiniMax, and"
+# doesn't become "Google Gemini, , and".
+_BACKEND_NAMES_RE = re.compile(
+    r"\b(?:Composio|OpenRouter|OpenClaw|MiniMax|minimax)\b",
+    re.IGNORECASE,
+)
+_DANGLING_COMMA_RE = re.compile(r",\s*,")
+_DANGLING_AND_RE = re.compile(r",\s+and\b")
+
+
+def _strip_backend_names(text: str) -> str:
+    """Remove leaked backend platform names from user-facing text."""
+    if not _BACKEND_NAMES_RE.search(text):
+        return text
+    text = _BACKEND_NAMES_RE.sub("", text)
+    # Clean up punctuation artifacts: ", , and" → ", and" → natural
+    text = _DANGLING_COMMA_RE.sub(",", text)
+    # Clean empty list items: "Gemini,  and models" → "Gemini models"
+    text = re.sub(r",\s+and\s+", " and ", text)
+    text = re.sub(r"\s{2,}", " ", text)  # collapse double spaces
+    return text
+
+
 _DELEGATION_DESCRIPTIONS: dict[str, str] = {
     "research": (
         "Delegate research, analysis, or information gathering to a "
@@ -142,6 +167,7 @@ def _strip_control_tokens(text: str) -> str:
     text = _TOOL_CALL_BLOCK_RE.sub("", text)
     text = _CONTROL_TOKEN_RE.sub("", text)
     text = _mask_composio_urls(text)
+    text = _strip_backend_names(text)
     return text.strip()
 
 
@@ -298,10 +324,20 @@ class LucyAgent:
             "chat", "lookup", "confirmation", "followup",
         })
         if route.intent in _NO_TOOLS_INTENTS and not failure_context:
+            # Detect if this is a composition/writing request (vs simple
+            # chat). Composition needs higher token limits and different
+            # prompt framing.
+            _is_composition = bool(re.search(
+                r"^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\b",
+                message, re.IGNORECASE,
+            ))
+            max_tok = 1500 if _is_composition else 500
+
             logger.info(
                 "fast_intent_no_tools",
                 intent=route.intent,
                 model=model,
+                is_composition=_is_composition,
                 workspace_id=ctx.workspace_id,
             )
             from lucy.pipeline.prompt import build_lightweight_prompt
@@ -310,6 +346,7 @@ class LucyAgent:
                     ws,
                     user_slack_id=ctx.user_slack_id,
                     workspace_id=str(ctx.workspace_id),
+                    is_composition=_is_composition,
                 )
 
             messages = await self._build_thread_messages(
@@ -323,7 +360,7 @@ class LucyAgent:
                     config=ChatConfig(
                         model=model,
                         temperature=0.8,
-                        max_tokens=500,
+                        max_tokens=max_tok,
                     ),
                 )
             trace.model_used = model
@@ -333,7 +370,7 @@ class LucyAgent:
                 response_length=len(response.content or ""),
                 workspace_id=ctx.workspace_id,
             )
-            return response.content or ""
+            return _strip_control_tokens(response.content or "")
 
         # 3. Fetch connected services + meta-tools in parallel
         from lucy.pipeline.prompt import build_system_prompt
@@ -3254,20 +3291,55 @@ class LucyAgent:
 
         from lucy.integrations.custom_wrappers import execute_custom_tool
 
-        keys_path = Path(settings.workspace_root).parent / "keys.json"
-        api_key = ""
-        if keys_path.exists():
+        slug = stripped.split("_", 1)[0]
+
+        # Check if this wrapper uses Composio auth (OAuth services like Calendar)
+        meta_path = (
+            Path(settings.workspace_root).parent
+            / "lucy"
+            / "integrations"
+            / "custom_wrappers"
+            / slug
+            / "meta.json"
+        )
+        auth_method = "bearer_token"
+        if not meta_path.exists():
+            # Try the installed package path
+            import lucy.integrations.custom_wrappers as cw_pkg
+            cw_dir = Path(cw_pkg.__file__).parent
+            meta_path = cw_dir / slug / "meta.json"
+        if meta_path.exists():
             try:
-                keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
-                slug = stripped.split("_", 1)[0]
-                api_key = (
-                    keys_data
-                    .get("custom_integrations", {})
-                    .get(slug, {})
-                    .get("api_key", "")
-                )
-            except Exception as e:
-                logger.warning("component_failed", component="custom_wrapper_key_load", error=str(e))
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                auth_method = meta.get("auth_method", "bearer_token")
+            except Exception:
+                pass
+
+        api_key = ""
+        if auth_method == "composio":
+            # Use Composio API key for OAuth-based services
+            api_key = settings.composio_api_key
+            if not api_key:
+                return {
+                    "error": (
+                        "Composio API key not configured. "
+                        "Cannot access Google Calendar."
+                    ),
+                }
+        else:
+            # Use custom API key from keys.json for bearer_token services
+            keys_path = Path(settings.workspace_root).parent / "keys.json"
+            if keys_path.exists():
+                try:
+                    keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+                    api_key = (
+                        keys_data
+                        .get("custom_integrations", {})
+                        .get(slug, {})
+                        .get("api_key", "")
+                    )
+                except Exception as e:
+                    logger.warning("component_failed", component="custom_wrapper_key_load", error=str(e))
 
         if not api_key:
             return {
@@ -3899,100 +3971,4 @@ class LucyAgent:
             phrase in lower
             for phrase in (
                 "don't have access",
-                "do not have access",
-                "not connected",
-                "need to connect",
-                "no access to",
-            )
-        )
-
-    @staticmethod
-    def _is_simple_greeting(text: str) -> bool:
-        """Check if response is a simple greeting/acknowledgment."""
-        lower = text.strip().lower()
-        return len(lower) < 80 and any(
-            w in lower
-            for w in ("hey", "hi", "hello", "how can i help", "what do you need")
-        )
-
-    @staticmethod
-    def _is_history_reference(message: str) -> bool:
-        """Check if a message references past context or discussions."""
-        lower = message.lower()
-        return any(phrase in lower for phrase in (
-            "what did we", "last time", "remember", "you mentioned",
-            "we discussed", "earlier", "previously", "follow up",
-            "didn't we", "wasn't there", "what about the",
-            "we agreed", "we decided", "you said", "that conversation",
-            "that decision", "status of",
-        ))
-
-    @staticmethod
-    def _extract_search_terms(message: str) -> list[str]:
-        """Extract meaningful search terms from a message."""
-        cleaned = re.sub(
-            r"\b(what|did|we|the|about|you|remember|last|time|earlier|"
-            r"previously|that|this|when|where)\b",
-            "",
-            message.lower(),
-        )
-        words = [w.strip() for w in cleaned.split() if len(w.strip()) > 3]
-        return words[:3]
-
-    @staticmethod
-    def _call_signature(tool_calls: list[dict[str, Any]]) -> str:
-        parts = []
-        for tc in tool_calls:
-            name = tc.get("name", "")
-            params = tc.get("parameters", {}) or {}
-            try:
-                p = json.dumps(params, sort_keys=True, separators=(",", ":"))
-            except Exception:
-                p = str(params)
-            parts.append(f"{name}:{p}")
-        return "||".join(sorted(parts))
-
-    @staticmethod
-    def _serialize_result(result: Any) -> str:
-        """Serialize a tool result, compacting if too large.
-
-        Auth/redirect URLs are extracted and preserved even when the
-        result body is truncated.  For dict/list results that exceed
-        the limit, strip verbose nested fields before falling back
-        to hard truncation so the LLM sees more useful data.
-        """
-        raw = result
-
-        if isinstance(raw, (dict, list)):
-            text = json.dumps(raw, ensure_ascii=False, default=str)
-        else:
-            text = str(raw)
-
-        if len(text) > TOOL_RESULT_MAX_CHARS and isinstance(raw, (dict, list)):
-            compact = _compact_data(raw)
-            text = json.dumps(compact, ensure_ascii=False, default=str)
-
-        if len(text) > TOOL_RESULT_MAX_CHARS:
-            auth_urls = _AUTH_URL_RE.findall(text)
-            text = text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
-            if auth_urls:
-                preserved = "\n".join(
-                    f"AUTH_URL: {url}" for url in auth_urls
-                )
-                text += f"\n{preserved}"
-
-        text = _sanitize_tool_output(text)
-        return text
-
-
-# ── Singleton ───────────────────────────────────────────────────────────
-
-_agent: LucyAgent | None = None
-
-
-def get_agent() -> LucyAgent:
-    """Get or create the singleton agent."""
-    global _agent
-    if _agent is None:
-        _agent = LucyAgent()
-    return _agent
+                "do not have acces
