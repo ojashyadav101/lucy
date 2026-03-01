@@ -1,24 +1,24 @@
 """Response quality assessment — zero-cost heuristic checks.
 
-Extracted from agent.py (Phase 3) to keep the god file lean.
-All functions here are standalone (no class dependencies) and
-run zero LLM calls — purely pattern matching and heuristics.
+Standalone functions with no class dependencies. Zero LLM calls.
+Pure pattern matching and heuristics for quality gating.
+
+Sections:
+1. Service name matching (prevents Composio fuzzy-search confusion)
+2. Search/connection result validation
+3. Response quality assessment (confidence scoring)
+4. Response depth assessment (data-dump detection, depth scoring)
+5. Stuck-state detection
+6. Output verification
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
-import time
 from typing import Any
 
 import structlog
-
-from lucy.core.openclaw import (
-    ChatConfig,
-    get_openclaw_client,
-)
 
 logger = structlog.get_logger()
 
@@ -168,14 +168,12 @@ def validate_connection_relevance(
     if not isinstance(result, dict) or not toolkits_requested:
         return result
 
-    user_lower = user_message.lower()
     connections = result.get("connections") or result.get("results") or []
     if not isinstance(connections, list):
         return result
 
     corrections: list[str] = []
     for req in toolkits_requested:
-        req_norm = normalize_service_name(req)
         for conn in connections:
             if not isinstance(conn, dict):
                 continue
@@ -228,8 +226,6 @@ def assess_response_quality(
     user_lower = user_message.lower()
 
     # 0. Connection link for already-connected services
-    # If the response contains composio.dev connect links or says
-    # "not connected" for services we know ARE connected, that's wrong.
     if connected_services:
         _connect_link_re = re.compile(
             r"composio\.dev/connect|connect here|connect (?:your |the )?(?:"
@@ -301,7 +297,6 @@ def assess_response_quality(
             confidence -= 1
 
     # 4. Response is very short for a complex question
-    # But: short confirmations are fine for commands (save, delete, create, etc.)
     _COMMAND_WORDS = {"save", "delete", "remove", "create", "set", "update",
                       "write", "store", "add", "send", "deploy", "start",
                       "stop", "trigger", "schedule", "cancel"}
@@ -309,6 +304,16 @@ def assess_response_quality(
     if len(user_message) > 80 and len(response_text) < 80 and not is_command:
         issues.append("Suspiciously short response for complex question")
         confidence -= 4
+
+    # 5. Depth check — data dump without analysis
+    depth_result = compute_depth_score(user_message, response_text)
+    if depth_result["is_shallow"]:
+        issues.append(
+            f"Shallow response detected (depth {depth_result['depth_score']}/10). "
+            f"Missing: {', '.join(depth_result['missing_layers'])}. "
+            f"Add interpretation, comparison, or recommendations."
+        )
+        confidence -= 2
 
     confidence = max(1, min(10, confidence))
     should_escalate = confidence <= 6 and len(issues) > 0
@@ -327,6 +332,148 @@ def assess_response_quality(
         "reason": "; ".join(issues) if issues else "",
         "issues": issues,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Response depth assessment (NEW — data-dump detection + depth scoring)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Signals that the response contains data/numbers
+_DEPTH_DATA_PATTERNS = [
+    re.compile(r"\b\d{1,3}(?:,\d{3})+\b"),              # formatted numbers
+    re.compile(r"\$[\d,.]+[KkMmBb]?"),                   # currency
+    re.compile(r"\b\d+(?:\.\d+)?%"),                     # percentages
+    re.compile(r"\b\d+\s*(?:users?|customers?|subscribers?|records?)\b", re.I),
+    re.compile(r"\b(?:MRR|ARR|LTV|CAC|NPS|DAU|MAU)\b"),
+]
+
+# Signals of interpretation/analysis
+_DEPTH_INTERPRETATION_PATTERNS = [
+    re.compile(r"\b(?:this (?:means|suggests|indicates|shows)|trend|pattern|shift)\b", re.I),
+    re.compile(r"\b(?:because|driven by|likely due to|caused by|correlat)\b", re.I),
+    re.compile(r"\b(?:compared to|vs\.?|versus|up from|down from|MoM|YoY)\b", re.I),
+    re.compile(r"\b(?:up|down|increased|decreased|grew|fell|rose|dropped)\s+(?:by\s+)?\d", re.I),
+]
+
+# Signals of actionable recommendations
+_DEPTH_RECOMMENDATION_PATTERNS = [
+    re.compile(r"\b(?:recommend|suggest|consider|should|want me to)\b", re.I),
+    re.compile(r"\b(?:next step|action item|follow[- ]?up|set (?:this |it )?up)\b", re.I),
+    re.compile(r"\b(?:dig(?:ging)? deeper|look(?:ing)? into|investigate|automate)\b", re.I),
+]
+
+# Signals that user expects analysis
+_DEPTH_ANALYSIS_INTENT = [
+    re.compile(r"\b(?:how (?:is|are|was|were)|how's)\b", re.I),
+    re.compile(r"\b(?:analyze|analysis|insight|trend|breakdown|report)\b", re.I),
+    re.compile(r"\b(?:pull|show|get|fetch)\s+(?:my|our|the)\b", re.I),
+]
+
+# Data-dump signals (data without analysis wrapper)
+_DEPTH_DUMP_PATTERNS = [
+    re.compile(r"(?:here (?:is|are)|here's) (?:the|your)\s+(?:data|list|report|breakdown)", re.I),
+    re.compile(r"(?:^|\n)\s*•\s*\*?\w[^:]*\*?:\s*[\$\d]", re.MULTILINE),
+]
+
+
+def compute_depth_score(
+    user_message: str,
+    response_text: str,
+    tool_calls_count: int = 0,
+) -> dict[str, Any]:
+    """Compute a depth score (1-10) for a response.
+
+    Integrated into assess_response_quality as an additional quality signal.
+    Also usable standalone for depth-specific checks.
+
+    Returns:
+        {
+            "depth_score": int (1-10),
+            "is_shallow": bool,
+            "has_data": bool,
+            "has_interpretation": bool,
+            "has_recommendations": bool,
+            "missing_layers": list[str],
+        }
+    """
+    if not response_text or len(response_text) < 50:
+        return {
+            "depth_score": 5,
+            "is_shallow": False,
+            "has_data": False,
+            "has_interpretation": False,
+            "has_recommendations": False,
+            "missing_layers": [],
+        }
+
+    has_data = sum(1 for p in _DEPTH_DATA_PATTERNS if p.search(response_text)) >= 1
+    has_interpretation = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2
+    has_recommendations = sum(1 for p in _DEPTH_RECOMMENDATION_PATTERNS if p.search(response_text)) >= 1
+    is_dump = (
+        has_data
+        and sum(1 for p in _DEPTH_DUMP_PATTERNS if p.search(response_text)) >= 1
+        and not has_interpretation
+    )
+    user_wants_analysis = sum(1 for p in _DEPTH_ANALYSIS_INTENT if p.search(user_message)) >= 1
+
+    # Score calculation
+    score = 3
+    if has_data:
+        score += 1
+    if has_interpretation:
+        score += 2
+    if has_recommendations:
+        score += 1
+    if len(response_text) > 500 and has_data:
+        score += 1
+    if is_dump:
+        score -= 2
+    if tool_calls_count >= 3 and score < 6:
+        score -= 1
+    score = max(1, min(10, score))
+
+    # Missing layers
+    missing: list[str] = []
+    if has_data and not has_interpretation:
+        missing.append("interpretation")
+    if (has_data or user_wants_analysis) and not has_recommendations:
+        missing.append("recommendations")
+
+    # Shallow determination: data response missing 2+ layers, or data dump
+    is_shallow = (
+        (has_data and len(missing) >= 2)
+        or (user_wants_analysis and score <= 5)
+        or is_dump
+    )
+
+    return {
+        "depth_score": score,
+        "is_shallow": is_shallow,
+        "has_data": has_data,
+        "has_interpretation": has_interpretation,
+        "has_recommendations": has_recommendations,
+        "missing_layers": missing,
+    }
+
+
+def detect_data_dump(response_text: str) -> bool:
+    """Quick check: is this a data dump without interpretation?
+
+    Fast gate for use in output pipeline before full depth assessment.
+    """
+    if not response_text or len(response_text) < 80:
+        return False
+
+    has_data = sum(1 for p in _DEPTH_DATA_PATTERNS if p.search(response_text)) >= 2
+    has_dump = sum(1 for p in _DEPTH_DUMP_PATTERNS if p.search(response_text)) >= 1
+    has_interp = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2
+
+    return has_data and has_dump and not has_interp
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Stuck-state detection
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 def detect_stuck_state(
@@ -520,6 +667,16 @@ def verify_output(
             "Break the task into steps and execute each one."
         )
 
+    # Depth check: flag data dumps that lack analysis
+    depth = compute_depth_score(user_message, response_text)
+    if depth["is_shallow"]:
+        missing_str = ", ".join(depth["missing_layers"])
+        issues.append(
+            f"Response lacks analytical depth (score: {depth['depth_score']}/10). "
+            f"Missing: {missing_str}. Every data response needs: "
+            f"the data + what it means + what to do about it."
+        )
+
     # High-agency check: detect surrender/dead-end patterns
     low_agency_patterns = [
         "i can't access",
@@ -569,61 +726,3 @@ def verify_output(
         "issues": issues,
         "should_retry": len(issues) > 0,
     }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Tool result trimming
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-async def trim_tool_results(
-    messages: list[dict[str, Any]],
-    max_result_chars: int = 2000,
-) -> list[dict[str, Any]]:
-    """Trim old tool results to reduce payload size.
-
-    Uses the fast tier model to summarize older tool outputs if large.
-    """
-    trimmed: list[dict[str, Any]] = []
-    total_tool_results = sum(1 for m in messages if m.get("role") == "tool")
-    keep_last_n = min(2, total_tool_results)
-    trim_threshold = total_tool_results - keep_last_n
-    tool_idx = 0
-
-    from lucy.config import settings
-
-    for msg in messages:
-        if msg.get("role") == "tool":
-            if tool_idx < trim_threshold:
-                content = msg.get("content", "")
-                if len(content) > max_result_chars:
-                    try:
-                        prompt = (
-                            f"Summarize this tool output concisely, preserving "
-                            f"key errors, file paths, and success/fail signals. "
-                            f"Keep it under {max_result_chars} characters."
-                            f"\n\n{content[:10000]}"
-                        )
-                        client = await get_openclaw_client()
-                        result = await asyncio.wait_for(
-                            client.chat_completion(
-                                messages=[{"role": "user", "content": prompt}],
-                                config=ChatConfig(
-                                    model=settings.model_tier_fast,
-                                    system_prompt="You are a concise summarizer.",
-                                    max_tokens=500,
-                                ),
-                            ),
-                            timeout=10.0,
-                        )
-                        summary = result.content or ""
-                        msg = {**msg, "content": f"[LLM SUMMARIZED]: {summary}"}
-                    except Exception as e:
-                        logger.warning("llm_condensation_failed", error=str(e))
-                        msg = {**msg, "content": content[:max_result_chars] + "...(summarized)"}
-            tool_idx += 1
-            trimmed.append(msg)
-        else:
-            trimmed.append(msg)
-
-    return trimmed
