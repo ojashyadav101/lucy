@@ -125,6 +125,44 @@ _COMPOSITION_INTENT = re.compile(
     re.IGNORECASE,
 )
 
+# Broad composition intent: catches "help me write", "can you draft",
+# "I need a post about", etc. These are writing tasks, NOT data fetches.
+# Route to full pipeline (not lightweight) for proper token limits.
+_COMPOSITION_BROAD = re.compile(
+    r"(?:help\s+me\s+|can\s+you\s+|could\s+you\s+|please\s+|I\s+need\s+(?:you\s+to\s+)?)"
+    r"(?:write|draft|compose|create|come up with|put together|craft)\s+"
+    r"(?:me\s+|us\s+)?(?:a\s+|an\s+|the\s+|some\s+)?"
+    r"(?:short\s+|brief\s+|quick\s+|long\s+|detailed\s+|professional\s+)?"
+    r"(?:linkedin\s+|twitter\s+|blog\s+|marketing\s+|sales\s+|product\s+)?"
+    r"(?:post|email|message|announcement|update|newsletter|blog|article|"
+    r"copy|pitch|proposal|brief|memo|letter|tweet|thread|caption|"
+    r"tagline|headline|bio|intro|description|outline|summary|script|"
+    r"press\s+release|job\s+(?:description|posting)|content)",
+    re.IGNORECASE,
+)
+
+# Knowledge/educational questions: user wants explanation, not data fetch.
+# Route to full model path so they get thorough answers with the complete
+# system prompt, NOT the lightweight 500-token path.
+_KNOWLEDGE_INTENT = re.compile(
+    r"(?:"
+    r"walk\s+me\s+through"
+    r"|explain\s+(?:how|what|why|the|to\s+me)"
+    r"|how\s+does\s+\w+\s+(?:work|function)"
+    r"|how\s+do\s+(?:you|I|we)\s+(?:build|implement|set\s+up|design|architect)"
+    r"|what\s+(?:is|are)\s+(?:the\s+)?(?:best|top|main|key|common|different|recommended)"
+    r"|(?:give|tell)\s+me\s+(?:a\s+)?(?:overview|breakdown|rundown|summary)\s+(?:of|on)"
+    r"|compare\s+.+?\s+(?:vs\.?|versus|and|or|with)\s+.+"
+    r"|^\s*compare\b"
+    r"|(?:pros?\s+(?:and|&)\s+cons?|advantages?\s+(?:and|&)\s+disadvantages?)\s+of"
+    r"|what\s+are\s+(?:some|the|good|best)\s+(?:ways?|approaches?|strategies?|practices?|tips?)"
+    r"|(?:guide|teach)\s+me\s+(?:through|on|about|how)"
+    r"|break\s+(?:down|it\s+down)"
+    r"|deep\s+dive\s+(?:into|on)"
+    r")",
+    re.IGNORECASE,
+)
+
 _DOCUMENT_KEYWORDS = re.compile(
     r"\b(pdf|report|document|spreadsheet|excel|csv|"
     r"create a (?:report|pdf|document|spreadsheet))\b",
@@ -248,8 +286,14 @@ def classify_and_route(
     # 5b. Composition tasks — user wants content written, not data fetched.
     #     Must fire BEFORE data-source check so "write a product update
     #     mentioning 3000 users" doesn't route as tool_use.
-    if _COMPOSITION_INTENT.search(text):
-        return _choice("chat", "fast")
+    if _COMPOSITION_INTENT.search(text) or _COMPOSITION_BROAD.search(text):
+        return _choice("chat", "default")
+
+    # 5c. Broad composition — "help me write", "can you draft", etc.
+    #     Route to default model (not lightweight path) because these need
+    #     the full system prompt and higher token limits for quality content.
+    if _COMPOSITION_BROAD.search(text):
+        return _choice("tool_use", "default")
 
     # 6. Messages referencing external data sources always need tools
     if _DATA_SOURCE_KEYWORDS.search(text):
@@ -264,7 +308,14 @@ def classify_and_route(
         if not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text):
             return _choice("lookup", "fast")
 
-    # 8b. Short conversational messages with no tool/data keywords
+    # 8b. Knowledge/educational questions — need full prompt depth, not
+    #     lightweight 500-token path. Route to tool_use so LLM gets the
+    #     complete system prompt with depth instructions + high token limit.
+    #     LLM will answer from knowledge without using tools.
+    if _KNOWLEDGE_INTENT.search(text):
+        return _choice("tool_use", "default")
+
+    # 8c. Short conversational messages with no tool/data keywords
     if len(text) < 100 and not _CHECK_PATTERNS.search(text) and not _DATA_SOURCE_KEYWORDS.search(text) and not _ACTION_VERBS.search(text):
         return _choice("chat", "fast")
 

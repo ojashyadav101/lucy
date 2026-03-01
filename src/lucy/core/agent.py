@@ -342,10 +342,10 @@ class LucyAgent:
             # chat). Composition needs higher token limits and different
             # prompt framing.
             _is_composition = bool(re.search(
-                r"^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\b",
+                r"(?:^\s*(?:write|draft|compose|summarize|rewrite|edit|proofread)\b|(?:help\s+me|can\s+you|could\s+you|please|I\s+need\s+(?:you\s+to\s+)?)(?:write|draft|compose|create|craft)\b)",
                 message, re.IGNORECASE,
             ))
-            max_tok = 1500 if _is_composition else 500
+            max_tok = 4096 if _is_composition else 1000
 
             logger.info(
                 "fast_intent_no_tools",
@@ -422,6 +422,10 @@ class LucyAgent:
 
             from lucy.tools.web_search import get_web_search_tool_definitions
             tools.extend(get_web_search_tool_definitions())
+
+            # Code execution tools (local-first, with validation pipeline)
+            from lucy.tools.code_executor import get_code_tool_definitions
+            tools.extend(get_code_tool_definitions())
 
             # File generation, email, spaces, services — skip for crons
             if not ctx.is_cron_execution:
@@ -3030,6 +3034,11 @@ class LucyAgent:
         from lucy.workspace.filesystem import get_workspace
 
         ws = get_workspace(workspace_id)
+
+        # ── Code execution tools (validated pipeline) ──
+        from lucy.tools.code_executor import is_code_tool, execute_code_tool
+        if is_code_tool(tool_name):
+            return await execute_code_tool(tool_name, parameters, workspace_id)
 
         try:
             if tool_name == "lucy_list_crons":
