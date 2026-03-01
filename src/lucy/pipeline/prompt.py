@@ -225,12 +225,12 @@ async def build_lightweight_prompt(
             "- NEVER wide Unicode box-drawing lines\n"
             "- Sections: *bold* with emoji, NOT Block Kit headers\n\n"
             "Be thorough. Reward users trust with complete, insightful response."
+        )
 
     # Inject capability awareness so Lucy knows what she can/cannot do
     capability_summary = _load_capabilities_summary()
     if capability_summary:
         core += "\n\n" + capability_summary
-        )
 
     # Current date/time — critical for "what day is it?" type questions
     # NOTE: Must be VERY prominent. Models sometimes hallucinate dates
