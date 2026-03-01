@@ -104,20 +104,7 @@ def classify_error(error: Exception) -> ErrorClassification:
             service_name=service_name,
         )
 
-    # Timeout
-    if "timeout" in error_lower or "timed out" in error_lower or status_code == 408:
-        return ErrorClassification(
-            category=ErrorCategory.TIMEOUT,
-            is_transient=True,
-            is_client_fault=False,
-            severity=2,
-            raw_error=error_str,
-            status_code=status_code,
-            service_name=service_name,
-            suggested_wait=3.0,
-        )
-
-    # Service down: 502, 503, 504
+    # Service down: 502, 503, 504 (check BEFORE timeout — 504 is server-side)
     if status_code in (502, 503, 504) or any(
         kw in error_lower for kw in ("service unavailable", "bad gateway", "gateway timeout")
     ):
@@ -130,6 +117,19 @@ def classify_error(error: Exception) -> ErrorClassification:
             status_code=status_code,
             service_name=service_name,
             suggested_wait=5.0,
+        )
+
+    # Timeout (client-side — not 502/503/504 which are server-side above)
+    if "timeout" in error_lower or "timed out" in error_lower or status_code == 408:
+        return ErrorClassification(
+            category=ErrorCategory.TIMEOUT,
+            is_transient=True,
+            is_client_fault=False,
+            severity=2,
+            raw_error=error_str,
+            status_code=status_code,
+            service_name=service_name,
+            suggested_wait=3.0,
         )
 
     # Context overflow

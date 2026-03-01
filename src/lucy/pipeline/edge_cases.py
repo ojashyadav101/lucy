@@ -251,7 +251,7 @@ def should_deduplicate_tool_call(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# GRACEFUL DEGRADATION
+# GRACEFUL DEGRADATION — HIGH AGENCY
 # ═══════════════════════════════════════════════════════════════════════════
 
 _ERROR_TYPE_TO_POOL: dict[str, str] = {
@@ -259,32 +259,104 @@ _ERROR_TYPE_TO_POOL: dict[str, str] = {
     "tool_timeout": "error_connection",
     "service_unavailable": "error_connection",
     "context_overflow": "error_generic",
+    "auth_error": "error_auth",
+    "tool_error": "error_tool",
+    "model_error": "error_generic",
+    "data_error": "error_data",
+    "parse_error": "error_generic",
 }
 
 
-def get_degradation_message(error_type: str) -> str:
+def classify_error_for_degradation(error: Exception) -> str:
+    """Classify an exception into a degradation category.
+
+    Uses error_strategy.classify_error for richer analysis when available,
+    but returns the same string format for backward compatibility.
+    """
+    try:
+        from lucy.pipeline.error_strategy import classify_error, ErrorCategory
+        classification = classify_error(error)
+        _CATEGORY_TO_LEGACY = {
+            ErrorCategory.RATE_LIMIT: "rate_limited",
+            ErrorCategory.TIMEOUT: "tool_timeout",
+            ErrorCategory.SERVICE_DOWN: "service_unavailable",
+            ErrorCategory.CONTEXT_OVERFLOW: "context_overflow",
+            ErrorCategory.AUTH_ERROR: "auth_error",
+            ErrorCategory.TOOL_ERROR: "tool_error",
+            ErrorCategory.MODEL_ERROR: "model_error",
+            ErrorCategory.DATA_ERROR: "data_error",
+            ErrorCategory.PARSE_ERROR: "parse_error",
+            ErrorCategory.UNKNOWN: "unknown",
+        }
+        return _CATEGORY_TO_LEGACY.get(classification.category, "unknown")
+    except ImportError:
+        # Fallback to original logic
+        error_str = str(error).lower()
+        if "429" in error_str or "rate limit" in error_str:
+            return "rate_limited"
+        if "timeout" in error_str or "timed out" in error_str:
+            return "tool_timeout"
+        if any(code in error_str for code in ("502", "503", "504", "unavailable")):
+            return "service_unavailable"
+        if "context" in error_str and ("length" in error_str or "token" in error_str):
+            return "context_overflow"
+        return "unknown"
+
+
+def get_degradation_message(error_type: str, error: Exception | None = None) -> str:
     """Get a user-friendly degradation message for an error type.
 
-    Draws from LLM-generated message pools (pre-warmed at startup).
-    Never exposes internal details — just warm, actionable framing.
+    Returns specific, actionable messages instead of generic fluff.
+    Tells the user what went wrong and suggests a concrete next step.
     """
-    from lucy.pipeline.humanize import pick
+    if error is not None:
+        try:
+            from lucy.pipeline.error_strategy import (
+                classify_error,
+                get_actionable_degradation_message,
+            )
+            classification = classify_error(error)
+            return get_actionable_degradation_message(classification)
+        except ImportError:
+            pass
 
-    category = _ERROR_TYPE_TO_POOL.get(error_type, "error_generic")
-    return pick(category)
-
-
-def classify_error_for_degradation(error: Exception) -> str:
-    """Classify an exception into a degradation category."""
-    error_str = str(error).lower()
-
-    if "429" in error_str or "rate limit" in error_str:
-        return "rate_limited"
-    if "timeout" in error_str or "timed out" in error_str:
-        return "tool_timeout"
-    if any(code in error_str for code in ("502", "503", "504", "unavailable")):
-        return "service_unavailable"
-    if "context" in error_str and ("length" in error_str or "token" in error_str):
-        return "context_overflow"
-
-    return "unknown"
+    # Actionable fallback messages (no humanize dependency needed)
+    _ACTIONABLE_MESSAGES: dict[str, str] = {
+        "rate_limited": (
+            "I'm being rate limited right now. "
+            "This usually clears up in a minute or two — want me to try again shortly?"
+        ),
+        "tool_timeout": (
+            "The service I was reaching out to is responding slowly. "
+            "Want me to try again, or would a simpler approach work?"
+        ),
+        "service_unavailable": (
+            "One of the services I need seems to be having issues. "
+            "I can try again in a moment, or work with what I know. "
+            "What would you prefer?"
+        ),
+        "context_overflow": (
+            "Our conversation has gotten quite long. "
+            "Could you restate what you need in a fresh message? "
+            "I'll be able to focus better."
+        ),
+        "auth_error": (
+            "I'm having trouble authenticating with a connected service. "
+            "The connection may need refreshing — "
+            "try saying *connect [service name]* to set up a fresh link."
+        ),
+        "tool_error": (
+            "I tried multiple approaches but ran into tool issues. "
+            "Want me to try a different way to get this done?"
+        ),
+        "data_error": (
+            "I couldn't find the specific data I was looking for. "
+            "Could you double-check the details? "
+            "Sometimes a slightly different search term helps."
+        ),
+        "unknown": (
+            "I ran into an unexpected issue after trying several approaches. "
+            "Want me to take another crack at it?"
+        ),
+    }
+    return _ACTIONABLE_MESSAGES.get(error_type, _ACTIONABLE_MESSAGES["unknown"])
