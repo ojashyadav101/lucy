@@ -141,6 +141,10 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = re.sub(r"```.*?```", _stash_code, text, flags=re.DOTALL)
     text = re.sub(r"`[^`]+`", _stash_code, text)
 
+    # Strip stray Unicode box-drawing lines outside code blocks
+    # (LLM sometimes outputs ─────── or ═══════ as raw separators)
+    text = re.sub(r"^[─━═╌╍┄┅]{4,}$", "", text, flags=re.MULTILINE)
+
     text = _convert_tables_to_code_blocks(text)
     # Convert markdown links FIRST (before bold conversion touches them)
     text = re.sub(
@@ -205,6 +209,9 @@ def _table_to_code_block(table_lines: list[str]) -> list[str]:
             ─────────────────────────
             Pro          84    $8K
             ```
+
+    Tables are capped at ~58 chars wide to prevent overflow in Slack.
+    Column headers are truncated if needed to fit.
     """
     rows: list[list[str]] = []
     for line in table_lines:
@@ -228,6 +235,19 @@ def _table_to_code_block(table_lines: list[str]) -> list[str]:
 
     # Add padding (min 2 spaces between columns)
     col_widths = [w + 2 for w in col_widths]
+
+    # Cap total table width at ~58 chars to prevent Slack overflow
+    _MAX_TABLE_WIDTH = 58
+    total_width = sum(col_widths)
+    if total_width > _MAX_TABLE_WIDTH:
+        # Proportionally shrink columns, but keep minimum of 4 chars each
+        scale = _MAX_TABLE_WIDTH / total_width
+        col_widths = [max(4, int(w * scale)) for w in col_widths]
+        # Truncate cell values that exceed their column width
+        for row_idx, row in enumerate(rows):
+            for col_idx, cell in enumerate(row):
+                if col_idx < len(col_widths) and len(cell) > col_widths[col_idx] - 1:
+                    rows[row_idx][col_idx] = cell[:col_widths[col_idx] - 2] + "…"
 
     # Build aligned table
     output: list[str] = ["```"]
