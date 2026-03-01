@@ -17,7 +17,8 @@ Tier 3 — Multi-LLM Consensus (Perplexity + Gemini + GPT-4o)
     strategic research where multiple perspectives add value.
     Cost: ~$0.02-0.05/search
 
-Tier selection is automatic based on query analysis.
+Tier selection is automatic based on query analysis, with graceful
+fallbacks: Tier 3 → Tier 2 → Tier 1 if any tier fails.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ import re
 import time
 from typing import Any
 
-import httpx
 import structlog
 
 from lucy.config import settings
@@ -35,10 +35,6 @@ from lucy.infra.circuit_breaker import openrouter_breaker
 logger = structlog.get_logger()
 
 _WEB_SEARCH_TOOL_NAME = "lucy_web_search"
-
-# ── Perplexity models ────────────────────────────────────────────────────
-_PERPLEXITY_FAST = "perplexity/sonar"
-_PERPLEXITY_PRO = "perplexity/sonar-pro"
 
 
 def get_web_search_tool_definitions() -> list[dict[str, Any]]:
@@ -124,21 +120,21 @@ _TIER3_PATTERNS = [
 def _classify_tier(query: str) -> int:
     """Classify a query into search tier (1, 2, or 3).
 
-    Uses pattern matching on the query text. Fast and deterministic.
+    Uses regex pattern matching. Fast and deterministic — no LLM call.
     """
     query_lower = query.lower().strip()
 
-    # Check Tier 3 patterns first (more specific)
+    # Check Tier 3 first (more specific patterns)
     for pattern in _TIER3_PATTERNS:
         if re.search(pattern, query_lower, re.IGNORECASE):
             return 3
 
-    # Check Tier 2 patterns
+    # Check Tier 2
     for pattern in _TIER2_PATTERNS:
         if re.search(pattern, query_lower, re.IGNORECASE):
             return 2
 
-    # Default: Tier 1
+    # Default: Tier 1 (fast, handles 70%+ of queries well)
     return 1
 
 
@@ -147,14 +143,43 @@ def _classify_tier(query: str) -> int:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _tier1_search(query: str) -> dict[str, Any]:
-    """Tier 1: Quick web search via Perplexity on OpenRouter.
+    """Tier 1: Quick web search via Perplexity sonar-pro.
 
-    Uses Perplexity's native web search capability for grounded answers
-    with citations. Fast and accurate for most queries.
+    Uses Perplexity's native web search for grounded answers with
+    citations. Fast (~2-3s) and accurate for most queries.
     """
+    try:
+        from lucy.tools.perplexity_search import search as perplexity_search
+
+        result = await perplexity_search(query)
+
+        if "error" in result:
+            return {"error": result["error"], "query": query}
+
+        return {
+            "query": query,
+            "answer": result["answer"],
+            "citations": result.get("citations", []),
+            "tier": 1,
+            "model": result.get("model", "perplexity/sonar-pro"),
+        }
+
+    except ImportError:
+        # Fallback: inline Perplexity call if module not deployed yet
+        return await _tier1_search_inline(query)
+
+    except Exception as e:
+        logger.warning("tier1_search_failed", query=query[:80], error=str(e))
+        return {"error": f"Search failed: {e}", "query": query}
+
+
+async def _tier1_search_inline(query: str) -> dict[str, Any]:
+    """Inline Tier 1 fallback when perplexity_search module is unavailable."""
+    import httpx
+
     api_key = settings.openrouter_api_key
     if not api_key:
-        return {"error": "Search not available (no API key configured)."}
+        return {"error": "Search not available (no API key configured).", "query": query}
 
     try:
         async with httpx.AsyncClient(timeout=40.0) as client:
@@ -166,7 +191,7 @@ async def _tier1_search(query: str) -> dict[str, Any]:
                     "X-Title": "Lucy Web Search",
                 },
                 json={
-                    "model": _PERPLEXITY_PRO,
+                    "model": "perplexity/sonar-pro",
                     "messages": [
                         {
                             "role": "system",
@@ -200,31 +225,32 @@ async def _tier1_search(query: str) -> dict[str, Any]:
                 "answer": answer,
                 "citations": citations,
                 "tier": 1,
-                "model": _PERPLEXITY_PRO,
+                "model": "perplexity/sonar-pro",
             }
 
     except Exception as e:
-        logger.warning("tier1_search_failed", query=query[:80], error=str(e))
+        logger.warning("tier1_inline_failed", query=query[:80], error=str(e))
         return {"error": f"Search failed: {e}", "query": query}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TIER 2 & 3: DELEGATE TO SPECIALIZED MODULES
+# TIER 2: DEEP SEARCH WITH SOURCE VERIFICATION
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _tier2_search(query: str) -> dict[str, Any]:
-    """Tier 2: Deep search with source verification."""
+    """Tier 2: Deep search with page scraping + source verification.
+
+    Delegates to bright_data_search module. Falls back to Tier 1 on error.
+    """
     try:
         from lucy.tools.bright_data_search import deep_search
 
         result = await deep_search(query)
 
         if "error" in result:
-            # Fallback to Tier 1 on error
             logger.warning("tier2_fallback_to_tier1", query=query[:80], error=result["error"])
             return await _tier1_search(query)
 
-        # Format the result for the agent
         answer = result.get("verified_answer") or result.get("initial_answer", "")
         citations = result.get("citations", [])
 
@@ -244,15 +270,21 @@ async def _tier2_search(query: str) -> dict[str, Any]:
         return await _tier1_search(query)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# TIER 3: MULTI-LLM CONSENSUS RESEARCH
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def _tier3_search(query: str) -> dict[str, Any]:
-    """Tier 3: Multi-LLM consensus research."""
+    """Tier 3: Multi-LLM consensus research.
+
+    Delegates to deep_research module. Falls back to Tier 2 → Tier 1 on error.
+    """
     try:
         from lucy.tools.deep_research import multi_llm_research
 
         result = await multi_llm_research(query)
 
         if "error" in result:
-            # Fallback to Tier 2 on error
             logger.warning("tier3_fallback_to_tier2", query=query[:80], error=result["error"])
             return await _tier2_search(query)
 
@@ -261,7 +293,7 @@ async def _tier3_search(query: str) -> dict[str, Any]:
         agreements = result.get("key_agreements", [])
         disagreements = result.get("key_disagreements", [])
 
-        # Append consensus metadata to answer
+        # Append consensus metadata so the agent knows about disagreements
         if disagreements:
             answer += "\n\n⚠️ *Note: Models disagreed on:*\n"
             for d in disagreements[:3]:
@@ -293,10 +325,11 @@ async def execute_web_search(
 ) -> dict[str, Any]:
     """Execute a web search with automatic tier selection.
 
-    This is the main entry point called by the agent. It:
-    1. Classifies the query complexity
-    2. Routes to the appropriate search tier
-    3. Returns the result with graceful fallbacks
+    This is the main entry point called by the agent tool dispatcher.
+    It classifies the query, routes to the right tier, and handles
+    circuit breaker + graceful fallbacks.
+
+    Fallback chain: Tier 3 → Tier 2 → Tier 1
     """
     query = parameters.get("query", "").strip()
     if not query:
@@ -309,7 +342,7 @@ async def execute_web_search(
     if not api_key:
         return {"error": "Search not available (no API key configured)."}
 
-    # Classify query
+    # Classify query complexity → select tier
     tier = _classify_tier(query)
     t0 = time.monotonic()
 
@@ -323,7 +356,7 @@ async def execute_web_search(
     else:
         result = await _tier1_search(query)
 
-    # Record success/failure for circuit breaker
+    # Update circuit breaker
     if "error" in result:
         openrouter_breaker.record_failure()
     else:

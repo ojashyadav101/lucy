@@ -1,21 +1,22 @@
-"""Tier 2: Deep web search with page scraping and source verification.
+"""Tier 2: Deep web search with source scraping and verification.
 
 Combines Perplexity web search (for URL discovery + initial answer) with
-direct page scraping (for source verification and detailed content extraction).
+direct page scraping (for source verification and content extraction).
 
-Also includes Bright Data SERP/Unlocker integration that activates when
-zones are configured in the Bright Data dashboard.
+Also integrates Bright Data SERP/Unlocker APIs when configured — these
+provide reliable Google SERP results and anti-bot page scraping for
+sites that block direct requests.
 
 Workflow:
     1. Perplexity search → answer + citation URLs
-    2. Scrape cited URLs → extract full page content
-    3. Synthesize verified answer from scraped sources + Perplexity result
+    2. (Optional) Bright Data SERP → additional Google results
+    3. Scrape top cited URLs → extract page content
+    4. Synthesize verified answer from sources + Perplexity result
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import re
 import time
@@ -30,7 +31,8 @@ from lucy.config import settings
 
 logger = structlog.get_logger()
 
-# ── Bright Data configuration (activates when zones exist) ──────────────
+# ── Bright Data configuration ───────────────────────────────────────────
+# Activates automatically when zones are configured via env or API discovery.
 BRIGHT_DATA_API_KEY = os.environ.get(
     "LUCY_BRIGHT_DATA_API_KEY",
     "db753300-891e-4cac-8989-10084f1582d5",
@@ -39,18 +41,31 @@ BRIGHT_DATA_BASE_URL = "https://api.brightdata.com"
 BRIGHT_DATA_SERP_ZONE = os.environ.get("LUCY_BRIGHT_DATA_SERP_ZONE", "")
 BRIGHT_DATA_UNLOCKER_ZONE = os.environ.get("LUCY_BRIGHT_DATA_UNLOCKER_ZONE", "")
 
-# Perplexity model for web-grounded search
-_PERPLEXITY_MODEL = "perplexity/sonar-pro"
-_PERPLEXITY_MODEL_FAST = "perplexity/sonar"
-
-# Page scraping limits
+# ── Scraping limits ─────────────────────────────────────────────────────
 _MAX_PAGES_TO_SCRAPE = 3
 _MAX_PAGE_CHARS = 15_000
 _SCRAPE_TIMEOUT = 20.0
+_SYNTHESIS_CONTEXT_PER_SOURCE = 6000
+
+# Domains we skip (social media, auth walls, etc.)
+_SKIP_DOMAINS = frozenset({
+    "youtube.com", "twitter.com", "x.com", "facebook.com",
+    "instagram.com", "linkedin.com", "reddit.com",
+    "tiktok.com", "pinterest.com",
+})
+
+_HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# BRIGHT DATA (activates when zones are configured)
+# BRIGHT DATA ZONE DISCOVERY
 # ═══════════════════════════════════════════════════════════════════════════
 
 _bd_zones_checked = False
@@ -58,7 +73,11 @@ _bd_zones_available = False
 
 
 async def _check_bright_data_zones() -> bool:
-    """Check if Bright Data zones are configured and usable."""
+    """Check if Bright Data zones are configured and usable.
+
+    Caches result after first call. Discovers zones from API if not set
+    in environment variables.
+    """
     global _bd_zones_checked, _bd_zones_available
     global BRIGHT_DATA_SERP_ZONE, BRIGHT_DATA_UNLOCKER_ZONE
 
@@ -75,7 +94,7 @@ async def _check_bright_data_zones() -> bool:
         _bd_zones_available = True
         return True
 
-    # Try to discover zones from API
+    # Try to discover zones from Bright Data API
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -84,7 +103,7 @@ async def _check_bright_data_zones() -> bool:
             )
             if resp.status_code == 200:
                 zones = resp.json()
-                if isinstance(zones, list) and zones:
+                if isinstance(zones, list):
                     for zone in zones:
                         name = zone.get("name", "").lower()
                         if "serp" in name and not BRIGHT_DATA_SERP_ZONE:
@@ -94,10 +113,9 @@ async def _check_bright_data_zones() -> bool:
 
                     _bd_zones_available = bool(BRIGHT_DATA_SERP_ZONE)
                     logger.info(
-                        "bright_data_zones",
+                        "bright_data_zones_discovered",
                         serp=BRIGHT_DATA_SERP_ZONE or "none",
                         unlocker=BRIGHT_DATA_UNLOCKER_ZONE or "none",
-                        available=_bd_zones_available,
                     )
     except Exception as e:
         logger.debug("bright_data_zone_check_failed", error=str(e))
@@ -105,10 +123,15 @@ async def _check_bright_data_zones() -> bool:
     return _bd_zones_available
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# BRIGHT DATA SERP & UNLOCKER
+# ═══════════════════════════════════════════════════════════════════════════
+
 async def bright_data_serp(query: str, num_results: int = 8) -> dict[str, Any]:
     """Search Google via Bright Data SERP API.
 
-    Returns structured search results. Only works when SERP zone is configured.
+    Returns structured search results with titles, URLs, and snippets.
+    Only works when a SERP zone is configured.
     """
     if not BRIGHT_DATA_SERP_ZONE:
         return {"error": "No SERP zone configured"}
@@ -130,14 +153,20 @@ async def bright_data_serp(query: str, num_results: int = 8) -> dict[str, Any]:
                 },
             )
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            logger.info("bright_data_serp_ok", query=query[:80], results=len(data.get("organic", [])))
+            return data
     except Exception as e:
-        logger.warning("bright_data_serp_failed", error=str(e))
+        logger.warning("bright_data_serp_failed", query=query[:60], error=str(e))
         return {"error": str(e)}
 
 
 async def bright_data_scrape(url: str) -> dict[str, Any]:
-    """Scrape a URL via Bright Data Web Unlocker (markdown output)."""
+    """Scrape a URL via Bright Data Web Unlocker.
+
+    Handles anti-bot protections that block direct requests.
+    Falls back gracefully if unlocker zone isn't configured.
+    """
     if not BRIGHT_DATA_UNLOCKER_ZONE:
         return {"error": "No unlocker zone configured", "url": url}
 
@@ -164,24 +193,8 @@ async def bright_data_scrape(url: str) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DIRECT SCRAPING (httpx + BeautifulSoup fallback)
+# DIRECT SCRAPING (httpx + BeautifulSoup)
 # ═══════════════════════════════════════════════════════════════════════════
-
-_SKIP_DOMAINS = {
-    "youtube.com", "twitter.com", "x.com", "facebook.com",
-    "instagram.com", "linkedin.com", "reddit.com",
-    "tiktok.com", "pinterest.com",
-}
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
-
 
 def _should_skip_url(url: str) -> bool:
     """Check if a URL is from a domain we shouldn't scrape."""
@@ -193,16 +206,22 @@ def _should_skip_url(url: str) -> bool:
 
 
 def _extract_text_from_html(html: str, url: str = "") -> str:
-    """Extract readable text content from HTML using BeautifulSoup."""
+    """Extract readable text from HTML using BeautifulSoup.
+
+    Focuses on main content area, strips boilerplate (nav, footer, ads).
+    Returns markdown-ish text with headers and code blocks preserved.
+    """
     try:
         soup = BeautifulSoup(html, "html.parser")
 
-        # Remove scripts, styles, nav, footer, etc.
-        for tag in soup.find_all(["script", "style", "nav", "footer", "header",
-                                   "aside", "noscript", "iframe", "svg"]):
+        # Remove noise elements
+        for tag in soup.find_all([
+            "script", "style", "nav", "footer", "header",
+            "aside", "noscript", "iframe", "svg", "form",
+        ]):
             tag.decompose()
 
-        # Try to find the main content area
+        # Try to find the main content area (prefer specific containers)
         main = (
             soup.find("main")
             or soup.find("article")
@@ -212,8 +231,8 @@ def _extract_text_from_html(html: str, url: str = "") -> str:
 
         target = main if main else soup.body if soup.body else soup
 
-        # Extract text with structure
-        lines = []
+        # Extract text with structure preservation
+        lines: list[str] = []
         for element in target.find_all(["h1", "h2", "h3", "h4", "p", "li", "td", "pre", "code"]):
             text = element.get_text(separator=" ", strip=True)
             if not text or len(text) < 3:
@@ -230,7 +249,7 @@ def _extract_text_from_html(html: str, url: str = "") -> str:
 
         result = "\n".join(lines)
 
-        # Fallback: if very little structured content, just get all text
+        # Fallback: if structured extraction yielded very little, get all text
         if len(result) < 200:
             result = target.get_text(separator="\n", strip=True)
 
@@ -250,33 +269,25 @@ async def scrape_url_direct(url: str) -> dict[str, Any]:
         async with httpx.AsyncClient(
             timeout=_SCRAPE_TIMEOUT,
             follow_redirects=True,
-            headers=_HEADERS,
+            headers=_HTTP_HEADERS,
         ) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 return {
-                    "url": url,
-                    "content": "",
-                    "source": "direct",
-                    "error": f"HTTP {resp.status_code}",
+                    "url": url, "content": "",
+                    "source": "direct", "error": f"HTTP {resp.status_code}",
                 }
 
             ct = resp.headers.get("content-type", "")
             if "json" in ct:
-                # JSON response — return as-is (truncated)
                 return {
                     "url": url,
                     "content": resp.text[:_MAX_PAGE_CHARS],
                     "source": "direct_json",
                 }
 
-            # HTML response — extract text
             content = _extract_text_from_html(resp.text, url)
-            return {
-                "url": url,
-                "content": content,
-                "source": "direct",
-            }
+            return {"url": url, "content": content, "source": "direct"}
 
     except httpx.TimeoutException:
         return {"url": url, "content": "", "source": "direct", "error": "Timeout"}
@@ -285,93 +296,42 @@ async def scrape_url_direct(url: str) -> dict[str, Any]:
 
 
 async def scrape_url(url: str) -> dict[str, Any]:
-    """Scrape a URL using Bright Data (if available) or direct httpx."""
+    """Scrape a URL — tries Bright Data first, falls back to direct.
+
+    This is the primary scraping entry point. It:
+    1. Checks if Bright Data Unlocker is available
+    2. If yes, uses it (handles anti-bot protections)
+    3. If not, falls back to direct httpx + BeautifulSoup
+    """
     if await _check_bright_data_zones() and BRIGHT_DATA_UNLOCKER_ZONE:
         result = await bright_data_scrape(url)
         if not result.get("error"):
             return result
+        # Bright Data failed → fall through to direct
 
-    # Fallback to direct scraping
     return await scrape_url_direct(url)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PERPLEXITY WEB SEARCH
-# ═══════════════════════════════════════════════════════════════════════════
-
-async def perplexity_search(
-    query: str,
-    model: str = _PERPLEXITY_MODEL,
-) -> dict[str, Any]:
-    """Search the web via Perplexity on OpenRouter.
-
-    Returns answer text + citation URLs for source verification.
-    """
-    api_key = settings.openrouter_api_key
-    if not api_key:
-        return {"error": "No OpenRouter API key configured"}
-
-    try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(
-                f"{settings.openrouter_base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "X-Title": "Lucy Deep Search",
-                },
-                json={
-                    "model": model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a precise research assistant. "
-                                "Answer with specific facts, numbers, and dates. "
-                                "Always cite your sources with [1], [2] etc. "
-                                "If information is uncertain, say so explicitly."
-                            ),
-                        },
-                        {"role": "user", "content": query},
-                    ],
-                    "max_tokens": 4096,
-                    "temperature": 0.1,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-            answer = data["choices"][0]["message"]["content"]
-            citations = data.get("citations", [])
-
-            return {
-                "answer": answer,
-                "citations": citations,
-                "model": model,
-            }
-    except Exception as e:
-        logger.warning("perplexity_search_failed", error=str(e))
-        return {"error": str(e)}
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TIER 2: COMBINED DEEP SEARCH
+# URL EXTRACTION
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _extract_urls_from_answer(answer: str, citations: list[str]) -> list[str]:
-    """Extract URLs from Perplexity answer text and citations."""
+    """Extract unique URLs from Perplexity citations and answer text."""
     urls = list(citations) if citations else []
 
-    # Also extract URLs from markdown links in the answer
-    url_pattern = r'https?://[^\s\)\]>"]+'
+    # Also extract inline URLs from markdown links
+    url_pattern = r'https?://[^\s\)\]>"\']+'
     found = re.findall(url_pattern, answer)
     for u in found:
+        # Clean trailing punctuation
+        u = u.rstrip(".,;:!?)")
         if u not in urls:
             urls.append(u)
 
-    # Deduplicate while preserving order
-    seen = set()
-    unique = []
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
     for u in urls:
         if u not in seen:
             seen.add(u)
@@ -380,92 +340,9 @@ def _extract_urls_from_answer(answer: str, citations: list[str]) -> list[str]:
     return unique
 
 
-async def deep_search(
-    query: str,
-    scrape_sources: bool = True,
-    max_scrape: int = _MAX_PAGES_TO_SCRAPE,
-) -> dict[str, Any]:
-    """Execute Tier 2 deep search.
-
-    1. Perplexity web search → answer + citations
-    2. Optionally scrape cited sources for verification
-    3. If Bright Data SERP is available, also get Google SERP results
-    4. Synthesize verified answer
-
-    Returns:
-        {
-            "query": str,
-            "tier": "deep_search",
-            "initial_answer": str,        # Perplexity's web-searched answer
-            "citations": [...],            # Source URLs
-            "scraped_sources": [...],      # Content from scraped pages
-            "verified_answer": str,        # Final synthesized answer
-        }
-    """
-    t0 = time.monotonic()
-
-    # Step 1: Perplexity web search
-    search_result = await perplexity_search(query)
-
-    if "error" in search_result:
-        return {
-            "query": query,
-            "tier": "deep_search",
-            "error": search_result["error"],
-        }
-
-    initial_answer = search_result["answer"]
-    citations = search_result.get("citations", [])
-
-    # Step 2: Optionally use Bright Data SERP for additional results
-    bd_results = None
-    if await _check_bright_data_zones() and BRIGHT_DATA_SERP_ZONE:
-        bd_results = await bright_data_serp(query)
-
-    # Step 3: Extract URLs and scrape sources
-    urls = _extract_urls_from_answer(initial_answer, citations)
-    scraped_sources = []
-
-    if scrape_sources and urls:
-        # Scrape top N URLs in parallel
-        scrape_tasks = [scrape_url(u) for u in urls[:max_scrape] if not _should_skip_url(u)]
-        if scrape_tasks:
-            results = await asyncio.gather(*scrape_tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, dict) and r.get("content"):
-                    scraped_sources.append(r)
-
-    # Step 4: Synthesize verified answer
-    verified_answer = await _synthesize_verified_answer(
-        query=query,
-        initial_answer=initial_answer,
-        scraped_sources=scraped_sources,
-        bd_results=bd_results,
-    )
-
-    duration = round((time.monotonic() - t0) * 1000, 1)
-    logger.info(
-        "deep_search_complete",
-        query=query[:80],
-        citations=len(citations),
-        scraped=len(scraped_sources),
-        bright_data_used=bd_results is not None and "error" not in (bd_results or {}),
-        duration_ms=duration,
-    )
-
-    return {
-        "query": query,
-        "tier": "deep_search",
-        "initial_answer": initial_answer,
-        "citations": citations,
-        "scraped_sources": [
-            {"url": s["url"], "source": s.get("source", ""), "content_length": len(s.get("content", ""))}
-            for s in scraped_sources
-        ],
-        "verified_answer": verified_answer,
-        "duration_ms": duration,
-    }
-
+# ═══════════════════════════════════════════════════════════════════════════
+# SYNTHESIS (cross-reference sources with initial answer)
+# ═══════════════════════════════════════════════════════════════════════════
 
 async def _synthesize_verified_answer(
     query: str,
@@ -473,26 +350,37 @@ async def _synthesize_verified_answer(
     scraped_sources: list[dict],
     bd_results: dict | None = None,
 ) -> str:
-    """Synthesize a verified answer from all available sources.
+    """Synthesize a verified answer from Perplexity + scraped sources.
 
-    If we have scraped source content, uses it to verify and enhance
-    the initial Perplexity answer. Otherwise returns the initial answer.
+    Cross-references the web search answer against actual source page
+    content. Prefers source content for specific facts (versions, dates,
+    prices) since it's from the primary source.
     """
     if not scraped_sources:
-        # No scraped content — return Perplexity answer as-is
         return initial_answer
 
-    # Build source context
-    source_context = []
+    # Build source context for the synthesizer
+    source_context: list[str] = []
     for src in scraped_sources:
-        content = src.get("content", "")[:6000]
+        content = src.get("content", "")[:_SYNTHESIS_CONTEXT_PER_SOURCE]
         if content:
-            source_context.append(
-                f"--- Source: {src['url']} ---\n{content}\n"
-            )
+            source_context.append(f"--- Source: {src['url']} ---\n{content}\n")
 
     if not source_context:
         return initial_answer
+
+    # Add Bright Data SERP snippets if available
+    bd_context = ""
+    if bd_results and "organic" in bd_results:
+        snippets = []
+        for r in bd_results.get("organic", [])[:5]:
+            title = r.get("title", "")
+            snippet = r.get("description", r.get("snippet", ""))
+            url = r.get("link", r.get("url", ""))
+            if title and snippet:
+                snippets.append(f"• [{title}]({url}): {snippet}")
+        if snippets:
+            bd_context = "\n\nGOOGLE SEARCH SNIPPETS:\n" + "\n".join(snippets)
 
     sources_text = "\n".join(source_context)
 
@@ -505,12 +393,12 @@ INITIAL WEB SEARCH ANSWER:
 {initial_answer}
 
 ACTUAL SOURCE CONTENT:
-{sources_text}
+{sources_text}{bd_context}
 
 INSTRUCTIONS:
 - Cross-reference the web search answer against the actual source content
-- If the source content has more specific/current data (version numbers, dates, prices), USE THOSE instead
-- If the web search answer and sources disagree, note the discrepancy  
+- If the source content has more specific/current data (version numbers, dates, prices), USE THOSE
+- If the web search answer and sources disagree, note the discrepancy
 - Cite specific URLs when quoting facts
 - Be concise but comprehensive
 - If the sources don't contain relevant info, rely on the web search answer"""
@@ -541,3 +429,162 @@ INSTRUCTIONS:
     except Exception as e:
         logger.warning("synthesis_failed", error=str(e))
         return initial_answer
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TIER 2: COMBINED DEEP SEARCH (main entry point)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def deep_search(
+    query: str,
+    scrape_sources: bool = True,
+    max_scrape: int = _MAX_PAGES_TO_SCRAPE,
+) -> dict[str, Any]:
+    """Execute Tier 2 deep search with source verification.
+
+    1. Perplexity web search → answer + citation URLs
+    2. (If available) Bright Data SERP → additional Google results
+    3. Scrape top cited URLs → extract full page content
+    4. Cross-reference and synthesize verified answer
+
+    Returns:
+        {
+            "query": str,
+            "tier": "deep_search",
+            "initial_answer": str,
+            "citations": [str],
+            "scraped_sources": [{url, source, content_length}],
+            "verified_answer": str,
+            "duration_ms": float,
+        }
+    """
+    t0 = time.monotonic()
+
+    # Step 1: Perplexity web search (using the standalone module)
+    try:
+        from lucy.tools.perplexity_search import search as perplexity_search
+        search_result = await perplexity_search(query)
+    except ImportError:
+        # Fallback: inline Perplexity call if module not available yet
+        search_result = await _inline_perplexity_search(query)
+
+    if "error" in search_result:
+        return {
+            "query": query,
+            "tier": "deep_search",
+            "error": search_result["error"],
+        }
+
+    initial_answer = search_result["answer"]
+    citations = search_result.get("citations", [])
+
+    # Step 2: Optionally query Bright Data SERP for additional results
+    bd_results = None
+    if await _check_bright_data_zones() and BRIGHT_DATA_SERP_ZONE:
+        bd_results = await bright_data_serp(query)
+        if "error" in (bd_results or {}):
+            bd_results = None
+
+    # Step 3: Extract URLs and scrape source pages
+    urls = _extract_urls_from_answer(initial_answer, citations)
+
+    # Add URLs from Bright Data SERP if available
+    if bd_results and "organic" in bd_results:
+        for r in bd_results.get("organic", [])[:5]:
+            url = r.get("link", r.get("url", ""))
+            if url and url not in urls:
+                urls.append(url)
+
+    scraped_sources: list[dict] = []
+    if scrape_sources and urls:
+        scrape_candidates = [u for u in urls[:max_scrape] if not _should_skip_url(u)]
+        if scrape_candidates:
+            tasks = [scrape_url(u) for u in scrape_candidates]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for r in results:
+                if isinstance(r, dict) and r.get("content"):
+                    scraped_sources.append(r)
+
+    # Step 4: Synthesize verified answer
+    verified_answer = await _synthesize_verified_answer(
+        query=query,
+        initial_answer=initial_answer,
+        scraped_sources=scraped_sources,
+        bd_results=bd_results,
+    )
+
+    duration = round((time.monotonic() - t0) * 1000, 1)
+    logger.info(
+        "deep_search_complete",
+        query=query[:80],
+        citations=len(citations),
+        scraped=len(scraped_sources),
+        bright_data_used=bd_results is not None,
+        duration_ms=duration,
+    )
+
+    return {
+        "query": query,
+        "tier": "deep_search",
+        "initial_answer": initial_answer,
+        "citations": citations,
+        "scraped_sources": [
+            {
+                "url": s["url"],
+                "source": s.get("source", ""),
+                "content_length": len(s.get("content", "")),
+            }
+            for s in scraped_sources
+        ],
+        "verified_answer": verified_answer,
+        "duration_ms": duration,
+    }
+
+
+async def _inline_perplexity_search(query: str) -> dict[str, Any]:
+    """Fallback Perplexity search when perplexity_search module isn't available.
+
+    This ensures bright_data_search.py works even before perplexity_search.py
+    is deployed, maintaining backwards compatibility.
+    """
+    api_key = settings.openrouter_api_key
+    if not api_key:
+        return {"error": "No OpenRouter API key configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            resp = await client.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "X-Title": "Lucy Deep Search",
+                },
+                json={
+                    "model": "perplexity/sonar-pro",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a precise research assistant. "
+                                "Answer with specific facts, numbers, and dates. "
+                                "Always cite your sources with [1], [2] etc. "
+                                "If information is uncertain, say so explicitly."
+                            ),
+                        },
+                        {"role": "user", "content": query},
+                    ],
+                    "max_tokens": 4096,
+                    "temperature": 0.1,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                "answer": data["choices"][0]["message"]["content"],
+                "citations": data.get("citations", []),
+                "model": "perplexity/sonar-pro",
+            }
+    except Exception as e:
+        logger.warning("inline_perplexity_failed", error=str(e))
+        return {"error": str(e)}
