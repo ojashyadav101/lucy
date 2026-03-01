@@ -1584,9 +1584,11 @@ class LucyAgent:
                     if "name" in tc:
                         tc["name"] = tc["name"].strip()
 
-            # Empty response recovery: if the LLM returns nothing
-            # after tool results, escalate model then nudge.
-            if not tool_calls and not response_text.strip() and turn > 0:
+            # Empty response recovery: if the LLM returns nothing,
+            # retry with a nudge. Works at any turn — API errors and
+            # rate limits can cause empty responses at turn 0 too
+            # (especially after planning steps inject system messages).
+            if not tool_calls and not response_text.strip():
                 empty_retries = getattr(self, "_empty_retries", 0)
                 if empty_retries < 2:
                     self._empty_retries = empty_retries + 1
