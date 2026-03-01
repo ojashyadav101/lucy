@@ -1673,8 +1673,12 @@ class LucyAgent:
                 _is_setup_intent = getattr(route, "intent", "") in (
                     "monitoring", "command",
                 )
+                # Only catch narration BEFORE any tool use (turn 0).
+                # After tools have been called, the model is explaining
+                # results — forcing a retry produces garbage like
+                # "I understand. My apologies." instead of actual answers.
                 if (
-                    turn <= 3
+                    turn == 0
                     and tools
                     and narration_retries < 1
                     and not _is_setup_intent
@@ -1689,29 +1693,10 @@ class LucyAgent:
                     all_messages.append(
                         {"role": "assistant", "content": response_text}
                     )
-                    # Check if previous tool calls included COMPOSIO_SEARCH_TOOLS
-                    # — if so, the model needs to follow up with MULTI_EXECUTE
-                    _used_search = any(
-                        (tc.get("function", {}).get("name") or "")
-                        == "COMPOSIO_SEARCH_TOOLS"
-                        for tc in (prev_tool_calls or [])
-                    ) if prev_tool_calls else False
-
-                    if _used_search:
-                        redirect_content = (
-                            "Don't narrate or describe what you're going to do. "
-                            "You already searched for tools with COMPOSIO_SEARCH_TOOLS. "
-                            "Now call COMPOSIO_MULTI_EXECUTE_TOOL with the action name "
-                            "from the search results. The service IS connected — do NOT "
-                            "suggest connecting it. Execute the action and give me results."
-                        )
-                    else:
-                        redirect_content = (
-                            "Don't narrate or describe what you're going to do. "
-                            "Just call the tools silently, then give me the final "
-                            "answer with the actual data. No preamble like "
-                            "'I'll check' or 'Let me look into'. Start with the result."
-                        )
+                    redirect_content = (
+                        "Skip the preamble. Use the tools now to get the "
+                        "data, then give me the answer directly."
+                    )
                     all_messages.append({
                         "role": "user",
                         "content": redirect_content,

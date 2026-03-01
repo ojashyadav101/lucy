@@ -168,8 +168,11 @@ async def execute_service_tool(
             return {"error": f"Failed to stop service: {e}"}
 
     elif tool_name == "lucy_list_services":
+        import asyncio
         try:
-            processes = await client.list_processes()
+            processes = await asyncio.wait_for(
+                client.list_processes(), timeout=8.0,
+            )
             services = []
             for proc in processes:
                 services.append({
@@ -179,9 +182,12 @@ async def execute_service_tool(
                     "started_at": proc.get("startedAt", ""),
                 })
             return {"services": services, "count": len(services)}
+        except asyncio.TimeoutError:
+            logger.warning("service_list_timeout")
+            return {"services": [], "count": 0, "note": "Service listing timed out — gateway may be unreachable"}
         except Exception as e:
-            logger.error("service_list_error", error=str(e))
-            return {"error": f"Failed to list services: {e}"}
+            logger.warning("service_list_error", error=str(e))
+            return {"services": [], "count": 0, "note": f"Could not reach service gateway: {e}"}
 
     elif tool_name == "lucy_service_logs":
         service_id = parameters.get("service_id", "")

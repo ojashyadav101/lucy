@@ -259,10 +259,14 @@ async def build_system_prompt(
             "• These services are ALREADY CONNECTED. Do NOT offer connection links.\n"
             "• To use them: call COMPOSIO_SEARCH_TOOLS to find the right action, "
             "then call COMPOSIO_MULTI_EXECUTE_TOOL with the action name and params.\n"
-            "• For calendar/meetings: search for 'googlemeet' actions. "
-            "Common actions: GOOGLEMEET_LIST_EVENTS, GOOGLEMEET_FIND_EVENT.\n"
+            "• For calendar/meetings: call COMPOSIO_SEARCH_TOOLS with use_case "
+            "'list calendar events for today' (app='googlemeet'). Then execute "
+            "the found action via COMPOSIO_MULTI_EXECUTE_TOOL. Do NOT narrate — "
+            "search, execute, return results.\n"
             "• For email: use the built-in lucy_send_email / lucy_read_emails tools.\n"
             "• NEVER respond saying a connected integration is 'not connected'.\n"
+            "• After calling COMPOSIO_SEARCH_TOOLS, ALWAYS follow up by calling "
+            "COMPOSIO_MULTI_EXECUTE_TOOL — never stop after just searching.\n"
             "</current_environment>"
         )
         static_parts.append(env_block)
