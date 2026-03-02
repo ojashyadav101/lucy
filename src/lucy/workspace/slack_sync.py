@@ -60,6 +60,7 @@ async def sync_channel_messages(
                 continue
 
             by_date: dict[str, list[str]] = {}
+            by_thread: dict[str, list[str]] = {}
             for msg in messages:
                 if msg.get("subtype"):
                     continue
@@ -67,6 +68,7 @@ async def sync_channel_messages(
                 ts = msg.get("ts", "")
                 text = msg.get("text", "").strip()
                 user = msg.get("user", "unknown")
+                thread_ts = msg.get("thread_ts", "")
 
                 if not text:
                     continue
@@ -80,6 +82,13 @@ async def sync_channel_messages(
                 if date_key not in by_date:
                     by_date[date_key] = []
                 by_date[date_key].append(line)
+
+                # Also bucket thread replies into per-thread files
+                # A reply has thread_ts != ts (thread_ts is the root message ts)
+                if thread_ts and thread_ts != ts:
+                    if thread_ts not in by_thread:
+                        by_thread[thread_ts] = []
+                    by_thread[thread_ts].append(line)
 
             for date_key, lines in by_date.items():
                 lines.reverse()
@@ -96,6 +105,22 @@ async def sync_channel_messages(
                 else:
                     await ws.write_file(file_path, content)
                     total_synced += len(lines)
+
+            # Write thread reply files for searchability
+            for thread_key, lines in by_thread.items():
+                thread_path = (
+                    f"slack_logs/{channel_name}/threads/{thread_key}.md"
+                )
+                existing = await ws.read_file(thread_path)
+                if existing:
+                    existing_lines = set(existing.strip().split("\n"))
+                    new_lines = [l for l in lines if l not in existing_lines]
+                    if new_lines:
+                        await ws.append_file(
+                            thread_path, "\n".join(new_lines) + "\n",
+                        )
+                else:
+                    await ws.write_file(thread_path, "\n".join(lines) + "\n")
 
         except Exception as e:
             logger.warning(

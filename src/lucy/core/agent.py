@@ -869,6 +869,7 @@ class LucyAgent:
                     ws,
                     user_slack_id=ctx.user_slack_id,
                     user_message=message,
+                    thread_ts=ctx.thread_ts,
                 )
             else:
                 # Use compact SOUL on tool_use intents when many tools are
@@ -883,6 +884,8 @@ class LucyAgent:
                     user_message=message,
                     prompt_modules=route.prompt_modules,
                     compact=use_compact,
+                    thread_ts=ctx.thread_ts,
+                    user_id=ctx.user_slack_id,
                 )
             utc_now = datetime.now(timezone.utc)
             time_block = (
@@ -1320,10 +1323,40 @@ class LucyAgent:
                 append_to_company_knowledge,
                 append_to_team_knowledge,
                 check_fact_contradictions,
+                classify_memory_category,
                 classify_memory_target,
+                extract_facts_from_message,
                 should_persist_memory,
             )
-            if should_persist_memory(message):
+
+            # Strategy 1: structured fact extraction (runs on every message)
+            # Catches implicit facts like "my name is X", "we use Y" even
+            # without explicit memory signals.
+            extracted = extract_facts_from_message(message)
+            for fact_text, category in extracted:
+                target = classify_memory_target(message)
+                if target == "company":
+                    await append_to_company_knowledge(ws, fact_text)
+                elif target == "team":
+                    await append_to_team_knowledge(ws, fact_text)
+                else:
+                    await add_session_fact(
+                        ws, fact_text,
+                        source="structured_extract",
+                        category=category,
+                        thread_ts=ctx.thread_ts,
+                        user_id=ctx.user_slack_id,
+                    )
+            if extracted:
+                logger.debug(
+                    "structured_facts_extracted",
+                    count=len(extracted),
+                    workspace_id=ctx.workspace_id,
+                )
+
+            # Strategy 2: signal-based persistence (broader catch for
+            # messages with explicit memory signals but no structured facts)
+            if should_persist_memory(message) and not extracted:
                 target = classify_memory_target(message)
                 fact = message.strip()
                 if len(fact) > 500:
@@ -1347,9 +1380,13 @@ class LucyAgent:
                 elif target == "team":
                     await append_to_team_knowledge(ws, fact)
                 else:
+                    category = classify_memory_category(message)
                     await add_session_fact(
-                        ws, fact, source="conversation", category=target,
+                        ws, fact,
+                        source="conversation",
+                        category=category,
                         thread_ts=ctx.thread_ts,
+                        user_id=ctx.user_slack_id,
                     )
                 logger.debug(
                     "memory_persisted",
@@ -3717,7 +3754,12 @@ class LucyAgent:
         current_text: str,
         slack_client: Any | None = None,
     ) -> list[dict[str, Any]]:
-        """Build LLM messages from Slack thread history."""
+        """Build LLM messages from Slack thread history.
+
+        For threads with more than 20 messages, fetches up to 100 messages
+        and prepends a structured summary of the earliest exchanges so that
+        long-thread context is not silently lost.
+        """
         messages: list[dict[str, Any]] = []
 
         if ctx.thread_ts and ctx.channel_id and slack_client:
@@ -3725,11 +3767,48 @@ class LucyAgent:
                 result = await slack_client.conversations_replies(
                     channel=ctx.channel_id,
                     ts=ctx.thread_ts,
-                    limit=20,
+                    limit=100,
                 )
                 thread_msgs = result.get("messages", [])
 
-                for msg in thread_msgs[:-1]:
+                # Exclude the very last message (that's the current message
+                # being processed -- it'll be appended as the final user turn)
+                history = thread_msgs[:-1]
+
+                _RECENT_WINDOW = 20
+                if len(history) > _RECENT_WINDOW:
+                    early = history[:-_RECENT_WINDOW]
+                    recent = history[-_RECENT_WINDOW:]
+
+                    # Build a compact summary of the early messages
+                    summary_parts: list[str] = []
+                    for m in early:
+                        text = m.get("text", "").strip()
+                        if not text:
+                            continue
+                        is_bot = bool(m.get("bot_id")) or bool(m.get("app_id"))
+                        role = "Lucy" if is_bot else "User"
+                        cleaned = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+                        if cleaned:
+                            summary_parts.append(
+                                f"- {role}: {cleaned[:150]}"
+                            )
+
+                    if summary_parts:
+                        summary_block = (
+                            "Earlier in this thread:\n"
+                            + "\n".join(summary_parts[-10:])
+                        )
+                        messages.append({
+                            "role": "system",
+                            "content": summary_block,
+                        })
+
+                    msgs_to_expand = recent
+                else:
+                    msgs_to_expand = history
+
+                for msg in msgs_to_expand:
                     text = msg.get("text", "").strip()
                     if not text:
                         continue
@@ -3753,7 +3832,9 @@ class LucyAgent:
                 logger.debug(
                     "thread_history_loaded",
                     thread_ts=ctx.thread_ts,
-                    count=len(messages),
+                    total_msgs=len(thread_msgs),
+                    expanded_msgs=len(msgs_to_expand),
+                    has_summary=len(thread_msgs) > _RECENT_WINDOW + 1,
                 )
 
             except Exception as e:

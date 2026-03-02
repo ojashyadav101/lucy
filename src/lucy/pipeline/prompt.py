@@ -123,14 +123,18 @@ async def _build_memory_context(
 ) -> str:
     """Build formatted memory context for prompt injection.
 
-    Uses thread-aware filtering so only facts from the current thread
-    (plus global facts) are included. Prevents cross-thread contamination.
+    Uses scored retrieval: same-thread > same-user > topic-relevant > recent.
     Returns empty string if no memories found.
     """
     try:
-        from lucy.workspace.memory import get_session_context_for_prompt
+        from lucy.workspace.memory import load_relevant_memories
 
-        formatted = await get_session_context_for_prompt(ws, thread_ts=thread_ts)
+        formatted = await load_relevant_memories(
+            ws,
+            user_id=user_id,
+            thread_ts=thread_ts,
+            topic_hint=topic_hint,
+        )
         if not formatted:
             return ""
 

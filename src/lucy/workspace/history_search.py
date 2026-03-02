@@ -94,7 +94,7 @@ async def search_slack_history(
             continue
         channel_name = ch_dir.name
 
-        # Iterate log files in reverse chronological order
+        # Iterate daily log files in reverse chronological order
         log_files = sorted(ch_dir.glob("*.md"), reverse=True)
         for log_file in log_files:
             date_str = log_file.stem  # "2026-02-23"
@@ -130,6 +130,41 @@ async def search_slack_history(
 
             if len(results) >= max_results:
                 break
+
+        # Also search thread reply files (slack_logs/{channel}/threads/*.md)
+        # These contain replies synced per-thread for complete context.
+        threads_dir = ch_dir / "threads"
+        if threads_dir.is_dir() and len(results) < max_results:
+            thread_files = sorted(threads_dir.glob("*.md"), reverse=True)
+            for thread_file in thread_files:
+                try:
+                    content = thread_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+
+                for i, line in enumerate(content.splitlines()):
+                    if not pattern.search(line):
+                        continue
+
+                    parsed = _parse_log_line(line)
+                    if not parsed:
+                        continue
+
+                    time_str, user, text = parsed
+                    results.append(SearchResult(
+                        channel=f"{channel_name}/thread",
+                        date=thread_file.stem,
+                        time=time_str,
+                        user=user,
+                        text=text,
+                        line_number=i + 1,
+                    ))
+
+                    if len(results) >= max_results:
+                        break
+
+                if len(results) >= max_results:
+                    break
 
         if len(results) >= max_results:
             break

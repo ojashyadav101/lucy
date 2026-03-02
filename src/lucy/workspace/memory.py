@@ -88,6 +88,38 @@ _TEAM_SIGNALS = re.compile(
 )
 
 
+_PREFERENCE_SIGNALS = re.compile(
+    r"\b(?:"
+    r"i (?:prefer|like|want|need)|"
+    r"(?:please )?(?:always|never) (?:use|include|add|format)|"
+    r"my (?:preferred|favorite|default)|"
+    r"(?:use|format|write|send) (?:it |things )?in|"
+    r"(?:don't|do not|stop) (?:use|include|add|send)|"
+    r"(?:tone|style|voice|format) should be"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_DECISION_SIGNALS = re.compile(
+    r"\b(?:"
+    r"(?:we|i) decided|(?:let's|we'll) go with|"
+    r"(?:final|approved|confirmed) (?:decision|choice|plan)|"
+    r"(?:we're|we are) going (?:to|with)|"
+    r"(?:the plan is|decision made|settled on|chose|picked)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_PROJECT_SIGNALS = re.compile(
+    r"\b(?:"
+    r"(?:the|our|this) project|deadline (?:is|was)|"
+    r"(?:launch|ship|release|deploy) (?:date|by|on|is)|"
+    r"(?:sprint|milestone|phase|roadmap)|"
+    r"(?:working on|building|developing|shipping)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _HYPOTHETICAL_SIGNALS = re.compile(
     r"\b(?:"
     r"(?:what if|imagine|hypothetically|suppose|let's say|pretend|"
@@ -97,6 +129,38 @@ _HYPOTHETICAL_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Structured fact extractors ────────────────────────────────────────────
+# Patterns to extract concrete facts from messages for richer categorization
+_FACT_EXTRACTORS: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"(?:my name is|i'm|i am)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)?)", re.IGNORECASE),
+     "user_preferences", "User's name is {0}"),
+    (re.compile(r"(?:my role is|i'm the|i am the|i work as(?: a| an)?)\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
+     "facts", "User's role: {0}"),
+    (re.compile(r"(?:we use|our (?:stack|tech|tools?) (?:is|are|includes?))\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
+     "facts", "Tech stack includes: {0}"),
+    (re.compile(r"(?:our|my)\s+(?:mrr|arr|revenue|budget|runway)\s+is\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
+     "facts", "Business metric: {0}"),
+    (re.compile(r"(?:deadline is|launch (?:by|on|date)|due (?:by|on|date))\s+(.{3,30}?)(?:\.|,|$)", re.IGNORECASE),
+     "project_context", "Deadline/launch: {0}"),
+    (re.compile(r"(?:we decided|let's go with|decision(?: made)?:?|settled on|chose)\s+(.{3,80}?)(?:\.|$)", re.IGNORECASE),
+     "decisions", "Decision: {0}"),
+    (re.compile(r"(?:i prefer|please always|always use|never use|my preference is)\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
+     "user_preferences", "Preference: {0}"),
+    (re.compile(r"(?:my (?:timezone|tz|time ?zone) is|i'm in)\s+([A-Z][A-Za-z/_+-]{2,30})", re.IGNORECASE),
+     "user_preferences", "User timezone: {0}"),
+    (re.compile(r"(?:my email is|email me at|reach me at)\s+([^\s,]+@[^\s,]+)", re.IGNORECASE),
+     "user_preferences", "User email: {0}"),
+]
+
+# ── Memory categories ─────────────────────────────────────────────────────
+MEMORY_CATEGORIES: dict[str, str] = {
+    "user_preferences": "User preferences and working style",
+    "project_context": "Project details, timelines, goals",
+    "decisions": "Decisions made during conversations",
+    "facts": "Important facts about the company, team, or work",
+    "general": "General context worth remembering",
+}
+
 
 def should_persist_memory(message: str) -> bool:
     """Quick check: does this message contain facts worth persisting?
@@ -105,7 +169,11 @@ def should_persist_memory(message: str) -> bool:
     be stored as real facts.
     """
     if not _REMEMBER_SIGNALS.search(message):
-        return False
+        # Also check category-specific signals not covered by _REMEMBER_SIGNALS
+        if not any(sig.search(message) for sig in (
+            _PREFERENCE_SIGNALS, _DECISION_SIGNALS, _PROJECT_SIGNALS,
+        )):
+            return False
 
     if _HYPOTHETICAL_SIGNALS.search(message):
         return False
@@ -125,12 +193,51 @@ def classify_memory_target(message: str) -> str:
     return "session"
 
 
+def classify_memory_category(message: str) -> str:
+    """Classify the memory category for session facts.
+
+    Returns one of: user_preferences, project_context, decisions,
+    facts, general.
+    """
+    if _PREFERENCE_SIGNALS.search(message):
+        return "user_preferences"
+    if _DECISION_SIGNALS.search(message):
+        return "decisions"
+    if _PROJECT_SIGNALS.search(message):
+        return "project_context"
+    if _COMPANY_SIGNALS.search(message) or _TEAM_SIGNALS.search(message):
+        return "facts"
+    return "general"
+
+
+def extract_facts_from_message(message: str) -> list[tuple[str, str]]:
+    """Extract structured facts from a single message.
+
+    Returns list of (fact_text, category) tuples.
+    Skips hypothetical/test messages entirely.
+    """
+    if _HYPOTHETICAL_SIGNALS.search(message):
+        return []
+
+    facts: list[tuple[str, str]] = []
+    for pattern, category, template in _FACT_EXTRACTORS:
+        match = pattern.search(message)
+        if match:
+            groups = match.groups()
+            if groups:
+                fact_text = template.format(*groups)
+                facts.append((fact_text.strip(), category))
+
+    return facts
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SESSION MEMORY — Bridge between threads and permanent knowledge
 # ═══════════════════════════════════════════════════════════════════════════
 
 SESSION_MEMORY_PATH = "data/session_memory.json"
 MAX_SESSION_ITEMS = 50
+MAX_MEMORY_CONTEXT_CHARS = 1500  # ~500 tokens at ~3 chars/token
 
 
 async def read_session_memory(ws: WorkspaceFS) -> list[dict[str, Any]]:
@@ -166,6 +273,7 @@ async def add_session_fact(
     source: str = "conversation",
     category: str = "general",
     thread_ts: str | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Add a fact to session memory. Deduplicates by content.
 
@@ -181,14 +289,18 @@ async def add_session_fact(
             if existing.get("fact", "").lower().strip() == fact_lower:
                 return
 
-        items.append({
+        entry: dict[str, Any] = {
             "fact": fact,
             "source": source,
             "category": category,
             "ts": datetime.now(timezone.utc).isoformat(),
-            **({"thread_ts": thread_ts} if thread_ts else {}),
-        })
+        }
+        if thread_ts:
+            entry["thread_ts"] = thread_ts
+        if user_id:
+            entry["user_id"] = user_id
 
+        items.append(entry)
         await write_session_memory(ws, items)
         logger.info("session_fact_added", fact=fact[:100], category=category)
 
@@ -202,6 +314,9 @@ async def get_session_context_for_prompt(
     If thread_ts is provided, only include facts from that thread
     plus global facts (no thread_ts). This prevents cross-thread
     contamination.
+
+    Kept for backward compatibility. Prefer load_relevant_memories()
+    when user_id and topic_hint are available.
     """
     items = await read_session_memory(ws)
     if not items:
@@ -225,6 +340,108 @@ async def get_session_context_for_prompt(
         "### Recent Context (from earlier conversations)\n"
         + "\n".join(lines)
     )
+
+
+async def load_relevant_memories(
+    ws: WorkspaceFS,
+    user_id: str | None = None,
+    thread_ts: str | None = None,
+    topic_hint: str | None = None,
+) -> str:
+    """Load memories relevant to the current conversation using scoring.
+
+    Prioritizes by:
+    1. Same-thread facts (+10) — always most relevant
+    2. Same-user facts (+3) — likely relevant
+    3. Topic-relevant facts (+1.5/keyword) — keyword overlap with message
+    4. Recent facts (+5/<1h, +2/<24h, +1/<1wk)
+    5. High-value categories (+2 preferences, +1.5 decisions, +1 project)
+
+    Returns formatted string capped at MAX_MEMORY_CONTEXT_CHARS.
+    This supersedes get_session_context_for_prompt() for prompt injection.
+    """
+    items = await read_session_memory(ws)
+    if not items:
+        return ""
+
+    scored: list[tuple[float, dict]] = []
+    topic_keywords: set[str] = set()
+    if topic_hint:
+        topic_keywords = set(re.findall(r"\b[a-z]{3,}\b", topic_hint.lower()))
+        topic_keywords -= {
+            "the", "and", "for", "that", "this", "with", "from",
+            "have", "has", "are", "was", "were", "will", "can",
+            "not", "but", "all", "about", "what", "how", "does",
+            "your", "you", "please", "could", "would", "should",
+            "tell", "help", "know", "think", "like", "just", "some",
+        }
+
+    for item in items:
+        score = 0.0
+        fact = item.get("fact", "")
+
+        if thread_ts and item.get("thread_ts") == thread_ts:
+            score += 10.0
+
+        if user_id and item.get("user_id") == user_id:
+            score += 3.0
+
+        if topic_keywords:
+            fact_words = set(re.findall(r"\b[a-z]{3,}\b", fact.lower()))
+            overlap = topic_keywords & fact_words
+            score += len(overlap) * 1.5
+
+        try:
+            ts = datetime.fromisoformat(item.get("ts", ""))
+            age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+            if age_hours < 1:
+                score += 5.0
+            elif age_hours < 24:
+                score += 2.0
+            elif age_hours < 168:
+                score += 1.0
+        except (ValueError, TypeError):
+            pass
+
+        cat = item.get("category", "general")
+        if cat == "user_preferences":
+            score += 2.0
+        elif cat == "decisions":
+            score += 1.5
+        elif cat == "project_context":
+            score += 1.0
+
+        if score > 0:
+            scored.append((score, item))
+
+    if not scored:
+        return ""
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    lines: list[str] = []
+    total_chars = 0
+    category_prefix = {
+        "user_preferences": "Preference",
+        "project_context": "Project",
+        "decisions": "Decided",
+        "facts": "Fact",
+        "general": "Context",
+    }
+    for _score, item in scored:
+        fact = item.get("fact", "").strip()
+        cat = item.get("category", "general")
+        prefix = category_prefix.get(cat, "Context")
+        line = f"- [{prefix}] {fact}"
+        if total_chars + len(line) > MAX_MEMORY_CONTEXT_CHARS:
+            break
+        lines.append(line)
+        total_chars += len(line)
+
+    if not lines:
+        return ""
+
+    return "### Relevant Context\n" + "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
