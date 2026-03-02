@@ -513,6 +513,40 @@ async def build_system_prompt(
     if memory_context:
         dynamic_parts.append(f"<memory>\n{memory_context}\n</memory>")
 
+    # Build the reflection suffix dynamically. If the workspace has recent
+    # ToolFailures in its LEARNINGS.md, extract their tool names and inject
+    # them as a specific "TOOL_RISKS" axis — prompting Lucy to double-check
+    # she isn't about to call a tool that has been failing repeatedly.
+    _tool_risk_line = ""
+    try:
+        from lucy.workspace.memory import LEARNINGS_PATH
+        import re as _re
+        _learnings_text = await ws.read_file(LEARNINGS_PATH) or ""
+        if _learnings_text:
+            _tf_match = _re.search(
+                r"## ToolFailures\s*(.*?)(?=\n## |\Z)", _learnings_text, _re.DOTALL
+            )
+            if _tf_match and _tf_match.group(1).strip():
+                # Extract tool names from entries like: "Tool `foo` returned error..."
+                _tool_names = _re.findall(r"Tool `([^`]+)` returned error", _tf_match.group(1))
+                if _tool_names:
+                    # Deduplicate, keep last 3
+                    _seen: set[str] = set()
+                    _unique: list[str] = []
+                    for _t in reversed(_tool_names):
+                        if _t not in _seen:
+                            _seen.add(_t)
+                            _unique.append(_t)
+                        if len(_unique) >= 3:
+                            break
+                    _tool_risk_line = (
+                        f"TOOL_RISKS: Are you about to call "
+                        f"{', '.join(reversed(_unique))}? "
+                        f"These have failed recently — use alternatives if available.\n"
+                    )
+    except Exception:
+        pass
+
     _REFLECTION_SUFFIX = (
         "\n\n<response_format_requirement>\n"
         "MANDATORY: Every final response MUST start with a "
@@ -524,7 +558,8 @@ async def build_system_prompt(
         "COMPLETE: yes\n"
         "PERSONALIZED: yes\n"
         "INSIGHT_BEYOND_QUESTION: yes\n"
-        "CONFIDENCE: 8\n"
+        + (_tool_risk_line)
+        + "CONFIDENCE: 8\n"
         "WEAKNESS: Could add week-over-week comparison.\n"
         "</lucy_reflection>\n\n"
         "Then your actual response after the closing tag. "

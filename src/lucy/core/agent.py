@@ -1432,6 +1432,20 @@ class LucyAgent:
                         workspace_id=ctx.workspace_id,
                         error=str(e),
                     )
+                    # Persist double-failure to workspace learnings so Lucy
+                    # avoids the same approach on the next user request.
+                    try:
+                        from lucy.workspace.filesystem import get_workspace
+                        from lucy.workspace.memory import append_learning
+                        _ws = get_workspace(ctx.workspace_id)
+                        await append_learning(
+                            _ws,
+                            f"Intent '{route.intent}': verification retry also failed "
+                            f"({failure_desc}). Approach change needed for: {message[:150]}",
+                            section="Mistakes",
+                        )
+                    except Exception:
+                        pass
 
         # 6b5. Abort mechanism: if the model flagged itself as unhelpful
         # with very low confidence, retry once (like Viktor's do_send=False)
@@ -4982,7 +4996,13 @@ async def _trim_tool_results(
                             timeout=10.0,
                         )
                         summary = result.content or ""
-                        msg = {**msg, "content": f"[LLM SUMMARIZED]: {summary}"}
+                        # Enforce hard limit — the LLM instruction is a hint,
+                        # not a guarantee. Truncate to ensure we stay within budget.
+                        prefix = "[LLM SUMMARIZED]: "
+                        max_summary = max_result_chars - len(prefix)
+                        if len(summary) > max_summary:
+                            summary = summary[:max_summary]
+                        msg = {**msg, "content": f"{prefix}{summary}"}
                     except Exception as e:
                         logger.warning("llm_condensation_failed", error=str(e))
                         msg = {**msg, "content": content[:max_result_chars] + "...(summarized)"}

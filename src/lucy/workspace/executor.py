@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -232,6 +233,37 @@ async def _execute_via_composio(
 
 # ── Local subprocess fallback ──────────────────────────────────────────
 
+def _sanitized_subprocess_env() -> dict[str, str]:
+    """Build a subprocess environment that strips Lucy's secrets.
+
+    The local executor fallback spawns a child process that inherits the
+    full environment of the Lucy server process — including all API keys,
+    OAuth tokens, and database credentials in LUCY_* environment variables.
+    A malicious or buggy script could exfiltrate these via HTTP or write
+    them to a file.
+
+    This function returns a minimal environment suitable for running
+    user-provided scripts: only standard system variables are preserved.
+    Lucy-specific secrets (LUCY_*, OPENROUTER_*, COMPOSIO_*, SLACK_*,
+    DATABASE_URL, etc.) are removed.
+    """
+    _SECRET_PREFIXES = (
+        "LUCY_", "OPENROUTER_", "COMPOSIO_", "SLACK_", "AGENTMAIL_",
+        "VERCEL_", "CONVEX_", "DATABASE_", "REDIS_", "SENTRY_",
+        "AWS_", "GCP_", "AZURE_", "ANTHROPIC_", "OPENAI_",
+    )
+    safe: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if any(key.upper().startswith(p) for p in _SECRET_PREFIXES):
+            continue
+        safe[key] = value
+    # Ensure clean Python environment
+    safe["PYTHONDONTWRITEBYTECODE"] = "1"
+    safe.pop("PYTHONSTARTUP", None)
+    safe.pop("PYTHONPATH", None)
+    return safe
+
+
 async def _execute_local_python(
     workspace_id: str,
     code: str,
@@ -245,6 +277,7 @@ async def _execute_local_python(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(ws.root),
+            env=_sanitized_subprocess_env(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -307,6 +340,7 @@ async def _execute_local_bash(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=_sanitized_subprocess_env(),
         )
         try:
             stdout, stderr = await asyncio.wait_for(
