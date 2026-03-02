@@ -29,6 +29,13 @@ _WRAPPERS_DIR = Path(__file__).parent
 _wrapper_health: dict[str, dict[str, Any]] = {}
 _wrapper_health_lock: object | None = None  # asyncio.Lock, created lazily
 
+# ─── Module Cache (mtime-keyed) ─────────────────────────────────────────────
+# Avoids exec_module on every request. A wrapper module is only re-executed
+# when the wrapper.py file's mtime changes (i.e. a new wrapper was installed).
+# Key: slug → (file_mtime_float, module). Not thread-safe for writes, but
+# fine under Python's GIL and asyncio's single-thread model.
+_module_cache: dict[str, tuple[float, Any]] = {}
+
 
 def get_wrapper_health() -> dict[str, dict[str, Any]]:
     """Return the health status of all loaded wrappers.
@@ -224,21 +231,31 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
         slug = meta.get("slug", slug_dir.name)
         service_name = meta.get("service_name", slug)
 
-        # ── Import wrapper module ──
+        # ── Import wrapper module (mtime-keyed cache) ──
+        # Avoids re-executing wrapper.py on every request. Module is only
+        # reloaded when the file changes on disk (e.g. after a wrapper update).
         try:
-            spec = importlib.util.spec_from_file_location(
-                f"custom_wrapper_{slug}", str(wrapper_path),
-            )
-            if not spec or not spec.loader:
-                continue
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            current_mtime = wrapper_path.stat().st_mtime
+            cached = _module_cache.get(slug)
+            if cached and cached[0] == current_mtime:
+                mod = cached[1]
+            else:
+                spec = importlib.util.spec_from_file_location(
+                    f"custom_wrapper_{slug}", str(wrapper_path),
+                )
+                if not spec or not spec.loader:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _module_cache[slug] = (current_mtime, mod)
+                logger.debug("custom_wrapper_module_loaded", slug=slug)
         except Exception as exc:
             logger.warning(
                 "custom_wrapper_import_failed",
                 slug=slug,
                 error=str(exc),
             )
+            _module_cache.pop(slug, None)  # Invalidate stale cache entry
             new_health[slug] = {
                 "healthy": False,
                 "service_name": service_name,
@@ -427,14 +444,21 @@ def execute_custom_tool(
         return {"error": f"No wrapper found for slug '{slug}'"}
 
     try:
-        spec = importlib.util.spec_from_file_location(
-            f"custom_wrapper_{slug}", str(wrapper_path),
-        )
-        if not spec or not spec.loader:
-            return {"error": f"Cannot load wrapper for '{slug}'"}
-
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        # Reuse cached module if file hasn't changed — avoids the second
+        # exec_module call per request (assembly already loaded it above).
+        current_mtime = wrapper_path.stat().st_mtime
+        cached = _module_cache.get(slug)
+        if cached and cached[0] == current_mtime:
+            mod = cached[1]
+        else:
+            spec = importlib.util.spec_from_file_location(
+                f"custom_wrapper_{slug}", str(wrapper_path),
+            )
+            if not spec or not spec.loader:
+                return {"error": f"Cannot load wrapper for '{slug}'"}
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _module_cache[slug] = (current_mtime, mod)
     except Exception as exc:
         return {"error": f"Failed to import wrapper for '{slug}': {exc}"}
 

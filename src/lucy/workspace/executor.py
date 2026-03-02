@@ -144,9 +144,15 @@ async def execute_workspace_script(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(ws.root),
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+
         output = stdout.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
         err = stderr.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
         return ExecutionResult(
@@ -240,9 +246,15 @@ async def _execute_local_python(
             stderr=asyncio.subprocess.PIPE,
             cwd=str(ws.root),
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+
         output = stdout.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
         err = stderr.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
 
@@ -296,9 +308,15 @@ async def _execute_local_bash(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise
+
         output = stdout.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
         err = stderr.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS]
 

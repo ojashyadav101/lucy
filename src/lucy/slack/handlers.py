@@ -83,6 +83,31 @@ def _get_agent_semaphore() -> asyncio.Semaphore:
 def register_handlers(app: AsyncApp) -> None:
     """Register all Slack event handlers with the Bolt app."""
 
+    # ── HITL expiry notification ────────────────────────────────────────
+    # When a pending action times out, notify the requesting user so they
+    # know to re-issue the request rather than waiting forever.
+    async def _on_hitl_expired(action: dict[str, Any]) -> None:
+        requesting_user = action.get("requesting_user_id", "")
+        tool_name = action.get("tool_name", "action")
+        if not requesting_user:
+            return
+        try:
+            description = action.get("description", "")
+            short_desc = description.split("\n")[0][:120] if description else tool_name
+            await app.client.chat_postMessage(
+                channel=requesting_user,
+                text=(
+                    f"⏰ Your approval request for *{short_desc}* has expired "
+                    f"(requests expire after {int(PENDING_TTL_SECONDS // 60)} minutes). "
+                    f"Re-send your original message if you still want me to do this."
+                ),
+            )
+        except Exception as exc:
+            logger.debug("hitl_expiry_notify_failed", error=str(exc))
+
+    from lucy.slack.hitl import register_expiry_callback, PENDING_TTL_SECONDS
+    register_expiry_callback(_on_hitl_expired)
+
     # ═══ APP MENTION (@Lucy) ════════════════════════════════════════════
 
     @app.event("app_mention")

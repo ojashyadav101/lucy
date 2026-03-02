@@ -238,7 +238,10 @@ async def deploy_app(
 
         public_url = config.public_url()
 
-        validation = await _validate_deployment(public_url)
+        # Pass the bypass secret so validation works even when Vercel deployment
+        # protection is enabled (without it, validation always gets HTTP 401).
+        bypass_secret = getattr(config, "bypass_secret", None)
+        validation = await _validate_deployment(public_url, bypass_secret=bypass_secret)
         if not validation["ok"]:
             logger.warning(
                 "deployment_validation_failed",
@@ -267,7 +270,7 @@ async def deploy_app(
 
 
 async def _wait_for_deployment(
-    vercel: Any, deployment_id: str, max_wait: int = 60,
+    vercel: Any, deployment_id: str, max_wait: int = 180,
 ) -> str:
     """Poll Vercel until deployment reaches a terminal state."""
     import asyncio
@@ -306,13 +309,20 @@ async def _wait_for_deployment(
     return "TIMEOUT"
 
 
-async def _validate_deployment(url: str) -> dict[str, Any]:
-    """Fetch the deployed URL and verify the app renders content."""
+async def _validate_deployment(url: str, bypass_secret: str | None = None) -> dict[str, Any]:
+    """Fetch the deployed URL and verify the app renders content.
+
+    bypass_secret: Vercel deployment protection bypass secret. Required when
+    Vercel has protection enabled — without it, validation always gets HTTP 401.
+    """
     import httpx
 
     try:
+        headers: dict[str, str] = {}
+        if bypass_secret:
+            headers["x-vercel-protection-bypass"] = bypass_secret
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=headers)
             if resp.status_code != 200:
                 return {"ok": False, "reason": f"HTTP {resp.status_code}"}
 

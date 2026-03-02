@@ -33,7 +33,18 @@ _CODE_KEYWORDS = re.compile(
     r"\b(code|deploy|script|function|debug|refactor|implement|"
     r"write a? ?program|create a? ?app|build [\w ]* ?app|make [\w ]* ?app|"
     r"lambda|api endpoint|pull request|"
-    r"regex|algorithm|class|module|package|dockerfile|ci/cd|pipeline)\b",
+    # regex is an unambiguous coding concept
+    r"regex|"
+    # dockerfile and ci/cd are unambiguous devops/coding terms
+    r"dockerfile|ci/cd|"
+    # 'package' only when clearly code-related (install/npm/pip context)
+    r"npm package|pip package|install package|"
+    # Removed 'pipeline' — too ambiguous: "sales pipeline", "data pipeline",
+    # "onboarding pipeline" are business questions, not coding tasks.
+    # Removed 'class' — too broad: "class of customer", "first-class", "class action".
+    # Removed 'algorithm' — "what algorithm does Google use?" is research, not coding.
+    # Removed 'module' — "which module handles invoicing?" is a lookup, not coding.
+    r"write the algorithm|implement the algorithm|code the algorithm)\b",
     re.IGNORECASE,
 )
 

@@ -84,7 +84,20 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/Users/[^\s)\"']+"), ""),
 ]
 
-_ALLCAPS_TOOL_RE = re.compile(r"\b[A-Z]{2,}_[A-Z_]{3,}\b")
+# Match only known Composio/internal tool namespaces — NOT any ALL_CAPS_IDENTIFIER.
+# The previous broad pattern silently erased valid technical content like
+# HTTP_STATUS_CODE, DATABASE_URL, AWS_ACCESS_KEY, or any env var the model might
+# legitimately reference. Scoped to known service prefixes + internal lucy_ tools.
+_KNOWN_TOOL_PREFIXES = (
+    "COMPOSIO_", "GOOGLECALENDAR_", "GMAIL_", "GOOGLEDRIVE_", "GOOGLESHEETS_",
+    "GOOGLEDOCS_", "GITHUB_", "LINEAR_", "NOTION_", "SLACK_", "TRELLO_",
+    "HUBSPOT_", "SALESFORCE_", "STRIPE_", "TWILIO_", "FIGMA_", "JIRA_",
+    "ASANA_", "MONDAY_", "CLICKUP_", "ZENDESK_", "INTERCOM_", "AIRTABLE_",
+    "DROPBOX_", "ONEDRIVE_", "ZOHO_", "PIPEDRIVE_", "MAILCHIMP_", "SENDGRID_",
+)
+_ALLCAPS_TOOL_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(p) for p in _KNOWN_TOOL_PREFIXES) + r")[A-Z_]+\b"
+)
 
 _HUMANIZE_MAP = {
     "COMPOSIO_SEARCH_TOOLS": "search for tools",

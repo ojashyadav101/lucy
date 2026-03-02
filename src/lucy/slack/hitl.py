@@ -191,16 +191,50 @@ async def resolve_pending_action(
     return None
 
 
+_expiry_callbacks: list[Any] = []
+
+
+def register_expiry_callback(cb: Any) -> None:
+    """Register a callback to be called when a pending action expires.
+
+    Callback signature: async def cb(action: dict[str, Any]) -> None
+    Used by the Slack handler to notify the requesting user that their
+    action timed out and they should re-issue the request if needed.
+    """
+    _expiry_callbacks.append(cb)
+
+
 def _cleanup_expired() -> None:
-    """Remove expired pending actions."""
+    """Remove expired pending actions and fire expiry callbacks."""
+    import asyncio
+
     now = time.monotonic()
     expired = [
-        aid for aid, data in _pending_actions.items()
+        (aid, data) for aid, data in _pending_actions.items()
         if now - data["created_at"] > PENDING_TTL_SECONDS
     ]
-    for aid in expired:
+    for aid, data in expired:
         _pending_actions.pop(aid, None)
-        logger.debug("hitl_action_expired", action_id=aid)
+        # Remove from disk so it doesn't reappear after restart
+        workspace_id = data.get("workspace_id", "")
+        if workspace_id:
+            _remove_persisted_action(workspace_id, aid)
+
+        logger.info(
+            "hitl_action_expired",
+            action_id=aid,
+            tool=data.get("tool_name"),
+            requesting_user=data.get("requesting_user_id"),
+        )
+
+        # Fire expiry callbacks (e.g. notify the requesting user in Slack)
+        for cb in _expiry_callbacks:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(cb(data))
+            except Exception as exc:
+                logger.debug("hitl_expiry_callback_failed", error=str(exc))
 
 
 DESTRUCTIVE_ACTION_PATTERNS: frozenset[str] = frozenset({

@@ -219,8 +219,24 @@ def main() -> None:
                     continue
                 try:
                     _os.kill(old_pid, 0)
-                    logger.warning("killing_stale_lucy", pid=old_pid)
-                    _os.kill(old_pid, signal.SIGKILL)
+                    logger.warning("graceful_shutdown_stale_lucy", pid=old_pid)
+                    # SIGTERM first — gives the old process a chance to flush
+                    # logs, release DB connections, and clean up state.
+                    # SIGKILL only as fallback after 5s.
+                    _os.kill(old_pid, signal.SIGTERM)
+                    import time as _time
+                    for _ in range(10):
+                        _time.sleep(0.5)
+                        try:
+                            _os.kill(old_pid, 0)
+                        except ProcessLookupError:
+                            break
+                    else:
+                        logger.warning("force_killing_stale_lucy", pid=old_pid)
+                        try:
+                            _os.kill(old_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                 except ProcessLookupError:
                     pass
         except Exception as e:
@@ -231,7 +247,7 @@ def main() -> None:
                 try:
                     old_pid = int(open(pf).read().strip())
                     if old_pid != _os.getpid():
-                        _os.kill(old_pid, signal.SIGKILL)
+                        _os.kill(old_pid, signal.SIGTERM)
                 except (ProcessLookupError, ValueError, OSError):
                     pass
 
@@ -257,10 +273,28 @@ def main() -> None:
         scheduler = get_scheduler(slack_client=bolt.client)
         await scheduler.start()
 
-        await _start_email_listener(bolt.client)
+        email_listener = await _start_email_listener(bolt.client)
 
         sm_handler = AsyncSocketModeHandler(bolt, settings.slack_app_token)
-        await sm_handler.start_async()
+        try:
+            await sm_handler.start_async()
+        finally:
+            # Mirror the HTTP-mode lifespan shutdown: clean up all resources
+            # even in Socket Mode so logs are flushed and connections released.
+            if email_listener:
+                try:
+                    await email_listener.stop()
+                except Exception:
+                    pass
+            try:
+                scheduler.stop()
+            except Exception:
+                pass
+            try:
+                from lucy.db import close_db
+                await close_db()
+            except Exception:
+                pass
 
     asyncio.run(_run())
 
