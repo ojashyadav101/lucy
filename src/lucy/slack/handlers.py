@@ -749,71 +749,93 @@ async def _run_with_recovery(
     slack_client: Any,
     workspace_id: str,
 ) -> str:
-    """Run agent with a single retry on exception.
+    """Run agent with strategy-driven recovery on exception.
 
-    The supervisor inside the agent loop handles re-planning and
-    course-correction during execution. This outer layer only catches
-    hard crashes (network errors, 5xx responses) and does ONE retry
-    with failure context so the agent can adapt.
+    Uses the error_strategy engine to classify each failure and pick a
+    concrete recovery action (wait time, model override, failure context,
+    tool pruning). Retries up to 3 times with an escalating strategy
+    before delivering an actionable degradation message.
     """
     from lucy.core.openclaw import OpenClawError
+    from lucy.pipeline.error_strategy import (
+        classify_error,
+        get_actionable_degradation_message,
+        get_recovery_strategy,
+        should_give_up,
+    )
 
-    def _is_client_error(error_str: str) -> bool:
-        return any(
-            code in error_str for code in ("400", "401", "403", "404", "405", "422")
-        )
-
-    def _retry_delay(error_str: str) -> float:
-        lower = error_str.lower()
-        if "rate limit" in lower or "429" in lower:
-            return 15.0
-        if "timeout" in lower:
-            return 3.0
-        return 2.0
-
-    # Attempt 1: normal run (router-selected model)
     last_exc: Exception | None = None
-    try:
-        return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
-    except OpenClawError as e:
-        last_error = f"OpenClaw error (status {e.status_code}): {e}"
-        last_exc = e
-        logger.warning(
-            "agent_attempt_1_failed",
-            status_code=e.status_code,
-            workspace_id=workspace_id,
-        )
-        if _is_client_error(str(e.status_code)):
-            raise
-    except Exception as e:
-        last_error = str(e)
-        last_exc = e
-        logger.warning("agent_attempt_1_error", error=str(e), workspace_id=workspace_id)
-        if _is_client_error(last_error):
-            raise
+    classification = None
 
-    # Attempt 2: single retry with failure context (skip for client errors)
-    await asyncio.sleep(_retry_delay(last_error))
-    try:
-        return await agent.run(
-            message=text,
-            ctx=ctx,
-            slack_client=slack_client,
-            failure_context=f"Previous attempt failed: {last_error}",
-        )
-    except Exception as e:
-        last_exc = e
-        logger.warning("agent_attempt_2_error", error=str(e), workspace_id=workspace_id)
+    for attempt in range(4):  # attempt 0 = first try, 1-3 = recovery attempts
+        try:
+            if attempt == 0:
+                return await agent.run(message=text, ctx=ctx, slack_client=slack_client)
 
-    from lucy.pipeline.edge_cases import classify_error_for_degradation, get_degradation_message
-    error_type = classify_error_for_degradation(last_exc) if last_exc else "unknown"
-    degradation_msg = get_degradation_message(error_type)
+            # Use the strategy engine for all retry attempts
+            strategy = get_recovery_strategy(classification, attempt - 1)
+            logger.info(
+                "recovery_attempt",
+                workspace_id=workspace_id,
+                attempt=attempt,
+                strategy=strategy.name,
+                wait_seconds=strategy.wait_seconds,
+                model_override=strategy.model_override,
+            )
+            if strategy.wait_seconds > 0:
+                await asyncio.sleep(strategy.wait_seconds)
+
+            run_kwargs: dict[str, Any] = {
+                "message": text,
+                "ctx": ctx,
+                "slack_client": slack_client,
+                "failure_context": strategy.failure_context,
+            }
+            if strategy.model_override:
+                run_kwargs["model_override"] = strategy.model_override
+
+            return await agent.run(**run_kwargs)
+
+        except OpenClawError as e:
+            last_exc = e
+            classification = classify_error(e)
+            logger.warning(
+                "agent_run_failed",
+                workspace_id=workspace_id,
+                attempt=attempt,
+                status_code=e.status_code,
+                category=classification.category,
+            )
+            if classification.is_client_fault and attempt == 0:
+                raise
+
+        except Exception as e:
+            last_exc = e
+            classification = classify_error(e)
+            logger.warning(
+                "agent_run_error",
+                workspace_id=workspace_id,
+                attempt=attempt,
+                category=classification.category,
+                error=str(e)[:200],
+            )
+            if classification.is_client_fault and attempt == 0:
+                raise
+
+        if classification and should_give_up(classification, attempt + 1):
+            break
+
+    degradation_msg = (
+        get_actionable_degradation_message(classification)
+        if classification
+        else "All recovery attempts exhausted."
+    )
     logger.error(
         "recovery_attempts_exhausted",
         workspace_id=workspace_id,
-        error_type=error_type,
+        category=classification.category if classification else "unknown",
     )
-    raise RuntimeError(f"Recovery attempts exhausted: {degradation_msg}")
+    raise RuntimeError(degradation_msg)
 
 
 # ═══════════════════════════════════════════════════════════════════════

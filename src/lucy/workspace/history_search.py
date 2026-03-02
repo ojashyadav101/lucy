@@ -146,6 +146,17 @@ async def search_slack_history(
         if threads_dir.is_dir() and len(results) < max_results:
             thread_files = sorted(threads_dir.glob("*.md"), reverse=True)
             for thread_file in thread_files:
+                # Thread files are named by Slack Unix timestamp (e.g. 1772378140.md).
+                # Convert to a date so we can honour the days_back filter.
+                try:
+                    ts_float = float(thread_file.stem)
+                    file_date = datetime.fromtimestamp(ts_float, tz=timezone.utc).strftime(
+                        "%Y-%m-%d"
+                    )
+                    if file_date < earliest_str:
+                        continue
+                except (ValueError, OSError):
+                    pass  # Non-timestamp filename — include it
                 try:
                     content = thread_file.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):
