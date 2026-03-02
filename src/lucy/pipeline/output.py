@@ -324,9 +324,10 @@ def _validate_tone(text: str) -> str:
 # --- Detection patterns: each (regex, weight, category) ---
 
 _AI_TELL_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
-    # PUNCTUATION
-    (re.compile(r" — "), 3, "em_dash"),
-    (re.compile(r"—"), 2, "em_dash"),
+    # PUNCTUATION — em dashes in prose are flagged, but structured list
+    # separators (e.g., "📧 Gmail — emails") are handled separately in
+    # _replace_prose_emdashes() and won't be penalized here.
+    (re.compile(r"(?<=[a-z]) — (?=[a-z])"), 3, "em_dash_prose"),
     (re.compile(r" – "), 1, "en_dash"),
 
     # POWER WORDS (the classic LLM vocabulary)
@@ -470,9 +471,9 @@ def _ai_tell_score(text: str) -> int:
 # --- Tier 1: Regex safety net (always runs, instant) ---
 
 _REGEX_DEAI_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # Dashes
-    (re.compile(r" — "), ", "),
-    (re.compile(r"—"), ", "),
+    # Em dashes in prose are handled by _replace_prose_emdashes() below,
+    # which preserves them in structured list items (e.g., "📧 Gmail — emails").
+    # En dashes are always normalized.
     (re.compile(r" – "), "-"),
     (re.compile(r"–"), "-"),
 
@@ -520,8 +521,49 @@ _REGEX_DEAI_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
+# Pattern for structured list items where em dashes serve as separators.
+# Matches lines starting with emoji, bullet (•/-/*), or whitespace+bullet,
+# followed by a short label, then " — " separator.
+# Example: "📧 *Gmail* — emails, contacts" or "• GitHub — repos, PRs"
+_STRUCTURED_EMDASH_LINE = re.compile(
+    r"^[\s•\-\*]*.{0,60} — ",
+    re.MULTILINE,
+)
+
+
+def _replace_prose_emdashes(text: str) -> str:
+    """Replace em dashes in prose but preserve them in structured list items.
+
+    Em dashes in prose (mid-sentence asides) are an AI writing tell.
+    But em dashes as list-item separators ("Gmail — emails, contacts")
+    create useful visual structure and should be kept.
+    """
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.lstrip()
+        # Preserve em dashes in structured list items:
+        # lines starting with emoji, bullet, or bold label + short text + " — "
+        is_list_item = (
+            stripped
+            and (
+                # Starts with bullet/emoji-like character (non-ASCII or •/-/*)
+                not stripped[0].isalpha()
+                or stripped.startswith(("*", "_"))
+            )
+            and " — " in stripped
+            and stripped.index(" — ") < 60  # separator appears early = label
+        )
+        if is_list_item:
+            result.append(line)
+        else:
+            result.append(line.replace(" — ", ", ").replace("—", ", "))
+    return "\n".join(result)
+
+
 def _regex_deai(text: str) -> str:
     """Fast regex-based de-AI pass. Always runs as safety net."""
+    text = _replace_prose_emdashes(text)
     for pattern, replacement in _REGEX_DEAI_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
@@ -534,7 +576,8 @@ You are a copy editor. Your ONE job: rewrite the text so it reads like a real \
 person wrote it on Slack, not like an AI generated it.
 
 FIX these problems (if present):
-- Em dashes: replace with commas, periods, or rewrite the clause
+- Em dashes in prose: replace with commas, periods, or rewrite the clause. \
+Keep em dashes that act as separators in list items (e.g., "📧 Gmail — emails")
 - Power words: delve, pivotal, tapestry, beacon, leverage, unleash, unlock, \
 foster, empower, synergy, game-changing, holistic, robust, seamless, \
 comprehensive, transformative, innovative, dynamic, groundbreaking, \

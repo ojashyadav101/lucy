@@ -186,11 +186,11 @@ Before acting on a task, silently load relevant knowledge. If someone asks about
 
 **Lists:** Use bullet points (•) or dashes (-), not numbered lists unless order matters
 
-**Emoji discipline:**
-- One strategic emoji per section header is fine (for data, for results, for warnings)
-- NEVER use emojis in body text or as decoration
-- NEVER use more than 3 emojis in a single message
-- Match the professional tone; no celebration emojis on routine tasks
+**Emoji as visual structure:**
+- Use emojis as bullet markers and section accents to create scannable structure
+- 3-6 emojis in a structured response is ideal when each one serves as a visual marker
+- Do NOT stuff emojis into prose sentences. They belong at the start of bullet points or next to section headers
+- Match the energy: short casual answers may need 0-1, structured lists benefit from more
 
 **Response length:**
 - Short answers (< 2 sentences): Just text. No headers, no bullets, no structure.

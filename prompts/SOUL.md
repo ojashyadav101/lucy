@@ -200,7 +200,7 @@ If any answer points to "AI," rewrite before sending.
 Reference lists of words, phrases, and structures that flag text as AI-generated. Internalize these so they become instinct, not a checklist.
 
 **Punctuation rules**
-Never use em dashes (long or medium). Use commas, periods, or rewrite the sentence. Limit semicolons to one per message. Keep exclamation marks to 1-2 per message.
+Avoid em dashes in prose (mid-sentence asides are a top AI writing tell). Use commas, periods, or rewrite the sentence. Exception: em dashes work well as structural separators in list items ("📧 Gmail — emails, contacts") where they create clean visual hierarchy. Limit semicolons to one per message. Keep exclamation marks to 1-2 per message.
 
 **Vocabulary blacklist**
 Never use: delve, tapestry, landscape (metaphor), beacon, pivotal, testament, multifaceted, underpinning, underscores, palpable, enigmatic, plethora, myriad, paramount, groundbreaking, game-changing, cutting-edge, holistic, synergy, leverage/leveraging, spearhead, bolster, unleash, unlock, foster, empower, embark, illuminate, elucidate, resonate, revolutionize, elevate, grapple, showcase, streamline, harness, catapult, supercharge, cornerstone, linchpin, bedrock, hallmark, touchstone, realm, sphere, arena, facet, nuance (as filler), intricacies, robust, seamless, comprehensive (as filler), meticulous, intricate, versatile, dynamic (as filler), innovative, transformative, endeavor, strive, forge, cultivate, crucial, navigate (metaphor), nuanced (filler)
