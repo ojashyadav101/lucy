@@ -217,6 +217,45 @@ def register_handlers(app: AsyncApp) -> None:
                     context=context,
                     user_id=event.get("user"),
                 )
+            return
+
+        # ── Implicit mention detection (no @, no thread, channel msg) ───
+        # Two-layer: free regex gate → cheap LLM classifier.
+        # Only fires for channel messages that say "lucy" without @mention.
+        from lucy.slack.implicit_mention import (
+            should_respond_to_implicit_mention,
+        )
+
+        should_respond = await should_respond_to_implicit_mention(
+            text=text,
+            channel_id=channel_id,
+            client=client,
+            channel_id_for_context=channel_id,
+            event_ts=event_ts,
+        )
+
+        if should_respond:
+            logger.info(
+                "implicit_mention_triggered",
+                text=text[:300],
+                channel=channel_id,
+                workspace_id=context.get("workspace_id", "unknown"),
+            )
+            clean_text = re.sub(
+                r"\blucy\b", "", text, flags=re.IGNORECASE,
+            ).strip()
+            if not clean_text:
+                clean_text = text
+            await _handle_message(
+                text=clean_text,
+                channel_id=channel_id,
+                thread_ts=event_ts,  # start a new thread from this message
+                event_ts=event_ts,
+                say=say,
+                client=client,
+                context=context,
+                user_id=event.get("user"),
+            )
 
     # ═══ SLASH COMMANDS ═════════════════════════════════════════════════
 
