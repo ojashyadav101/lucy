@@ -27,6 +27,7 @@ _WRAPPERS_DIR = Path(__file__).parent
 # Importable by other modules to check wrapper readiness at any time.
 
 _wrapper_health: dict[str, dict[str, Any]] = {}
+_wrapper_health_lock: object | None = None  # asyncio.Lock, created lazily
 
 
 def get_wrapper_health() -> dict[str, dict[str, Any]]:
@@ -200,7 +201,9 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
     to ``_execute_custom_wrapper_tool`` instead of Composio.
     """
     tool_defs: list[dict[str, Any]] = []
-    _wrapper_health.clear()
+    # Build a fresh local health dict; atomically replace the global at the end
+    # to avoid races where concurrent requests see a partially-cleared registry.
+    new_health: dict[str, dict[str, Any]] = {}
 
     if not _WRAPPERS_DIR.exists():
         return tool_defs
@@ -236,7 +239,7 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
                 slug=slug,
                 error=str(exc),
             )
-            _wrapper_health[slug] = {
+            new_health[slug] = {
                 "healthy": False,
                 "service_name": service_name,
                 "tool_count": 0,
@@ -256,7 +259,7 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
                 has_tools=bool(raw_tools),
                 has_execute=has_execute,
             )
-            _wrapper_health[slug] = {
+            new_health[slug] = {
                 "healthy": False,
                 "service_name": service_name,
                 "tool_count": 0,
@@ -374,14 +377,20 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
                 healthy=not bool(validation_errors),
             )
 
-        # ── Update health registry ──
-        _wrapper_health[slug] = {
+        # ── Update local health dict ──
+        new_health[slug] = {
             "healthy": not bool(validation_errors),
             "service_name": service_name,
             "tool_count": len(registered_names),
             "errors": validation_errors,
             "warnings": validation_warnings,
         }
+
+    # Atomically swap the global registry so concurrent readers never see a
+    # partially-cleared state (avoids the race from _wrapper_health.clear()
+    # being called mid-loop while another request reads the registry).
+    global _wrapper_health
+    _wrapper_health = new_health
 
     # ── Summary log ──
     if _wrapper_health:

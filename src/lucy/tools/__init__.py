@@ -22,6 +22,11 @@ from lucy.tools.services import (
     get_services_tool_definitions,
     is_service_tool,
 )
+from lucy.tools.slack_proactive import (
+    execute_slack_proactive_tool,
+    get_slack_proactive_tool_definitions,
+    is_slack_proactive_tool,
+)
 from lucy.tools.spaces import (
     execute_spaces_tool,
     get_spaces_tool_definitions,
@@ -38,17 +43,20 @@ __all__ = [
     "execute_email_tool",
     "execute_file_tool",
     "execute_service_tool",
+    "execute_slack_proactive_tool",
     "execute_spaces_tool",
     "execute_web_search",
     "get_code_tool_definitions",
     "get_email_tool_definitions",
     "get_file_tool_definitions",
     "get_services_tool_definitions",
+    "get_slack_proactive_tool_definitions",
     "get_spaces_tool_definitions",
     "get_web_search_tool_definitions",
     "is_code_tool",
     "is_email_tool",
     "is_service_tool",
+    "is_slack_proactive_tool",
     "is_spaces_tool",
     "is_web_search_tool",
     "upload_file_to_slack",

@@ -112,6 +112,7 @@ class Settings(BaseSettings):
 
     # ── External service timeouts ─────────────────────────────
     composio_timeout_s: float = 60.0
+    mcp_timeout_s: float = 30.0
     vercel_timeout_s: float = 60.0
     convex_timeout_s: float = 30.0
     camofox_request_timeout_s: float = 30.0

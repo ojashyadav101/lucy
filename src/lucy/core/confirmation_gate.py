@@ -45,6 +45,11 @@ _GATE_EXEMPT: frozenset[str] = frozenset({
     "lucy_search_slack_history",
     "lucy_get_channel_history",
     "lucy_web_search",
+    # Integration research — the user asking to connect a service IS the consent;
+    # asking "are you sure you want me to research this?" is redundant and breaks UX
+    "lucy_resolve_custom_integration",
+    "lucy_list_mcp_connections",
+    "lucy_refresh_mcp",
 })
 
 # Tools where gating would break the UX (the action IS the user's request)
@@ -119,29 +124,97 @@ def format_confirmation_message(
     parameters: dict[str, Any],
     action_type: ActionType,
 ) -> str:
-    """Format a human-readable confirmation message for the user.
+    """Generate a natural first-person narrative for the approval prompt.
 
-    Returns a description string suitable for Slack Block Kit display.
-    The message varies by severity level.
+    Returns a conversational description the user can read and act on.
     """
-    stripped = tool_name.removeprefix("lucy_custom_")
-    param_summary = _summarize_params(stripped, parameters)
+    return _build_hitl_narrative(tool_name, parameters, action_type)
 
-    if action_type == ActionType.DESTRUCTIVE:
+
+def _build_hitl_narrative(
+    tool_name: str,
+    parameters: dict[str, Any],
+    action_type: ActionType,
+) -> str:
+    """Build a natural, contextual narrative for each gated tool call.
+
+    Outputs first-person language that describes exactly what Lucy is
+    about to do, so the user can make an informed approval decision.
+    """
+    is_destructive = action_type == ActionType.DESTRUCTIVE
+
+    # ── MCP connection ────────────────────────────────────────────────
+    if tool_name in ("lucy_connect_mcp", "lucy_custom_connect_mcp"):
+        service = (parameters.get("service") or "the service").replace("_", " ").title()
+        url = parameters.get("mcp_url") or parameters.get("url", "")
+        short_url = (url[:72] + "…") if len(url) > 72 else url
         return (
-            f"⚠️ *Destructive action — cannot be undone*\n"
-            f"Action: `{_humanize_tool_name(stripped)}`\n"
-            f"{param_summary}\n"
-            f"This will execute immediately and may not be reversible."
+            f"To connect *{service}* via MCP, I'll use this endpoint:\n"
+            f"> `{short_url}`\n\n"
+            "Say the word and I'll set it up right away."
         )
-    elif action_type == ActionType.WRITE:
+
+    # ── API key storage ───────────────────────────────────────────────
+    if tool_name in ("lucy_store_api_key", "lucy_custom_store_api_key"):
+        service = (parameters.get("service_slug") or "the service").replace("_", " ").title()
         return (
-            f"📝 *Action requires confirmation*\n"
-            f"Action: `{_humanize_tool_name(stripped)}`\n"
-            f"{param_summary}"
+            f"I'll store your *{service}* API key so I can use it for all future requests. "
+            "It'll be kept securely and never exposed in messages."
         )
-    else:
-        return f"Action: `{_humanize_tool_name(stripped)}`"
+
+    # ── Email sending ─────────────────────────────────────────────────
+    if any(kw in tool_name.lower() for kw in ("send_email", "send_message", "gmail_send")):
+        to = parameters.get("recipient_email") or parameters.get("to", "")
+        subject = parameters.get("subject", "")
+        parts: list[str] = []
+        if to:
+            parts.append(f"To: *{to}*")
+        if subject:
+            parts.append(f"Subject: _{subject}_")
+        detail = "  ·  ".join(parts) if parts else "an email"
+        return f"I'm about to send {detail}. Approve to send it."
+
+    # ── Calendar event creation ───────────────────────────────────────
+    if any(kw in tool_name.lower() for kw in ("create_event", "create_calendar")):
+        title = parameters.get("title") or parameters.get("summary", "")
+        when = parameters.get("start_datetime") or parameters.get("start", "")
+        desc = f"*{title}*" if title else "a new event"
+        if when:
+            desc += f" at {when}"
+        return f"I'll add {desc} to your calendar."
+
+    # ── Cron / heartbeat creation ─────────────────────────────────────
+    if "create_cron" in tool_name.lower():
+        title = parameters.get("title") or parameters.get("name", "")
+        detail = f" — *{title}*" if title else ""
+        return f"I'll set up a scheduled task{detail}. Approve to create it."
+
+    if "create_heartbeat" in tool_name.lower():
+        title = parameters.get("title") or parameters.get("name", "")
+        detail = f" — *{title}*" if title else ""
+        return f"I'll create a heartbeat monitor{detail}."
+
+    # ── Deletions ─────────────────────────────────────────────────────
+    if any(kw in tool_name.lower() for kw in ("delete", "remove", "destroy")):
+        thing = (
+            parameters.get("title")
+            or parameters.get("name")
+            or parameters.get("id")
+            or "this item"
+        )
+        return (
+            f"I'm about to permanently delete *{thing}*. "
+            "This can't be undone — approve only if you're sure."
+        )
+
+    # ── Generic fallback ──────────────────────────────────────────────
+    stripped = tool_name.removeprefix("lucy_custom_").removeprefix("lucy_")
+    readable = _humanize_tool_name(stripped)
+    param_summary = _summarize_params(stripped, parameters)
+    prefix = "⚠️ This is irreversible — " if is_destructive else ""
+    if param_summary:
+        return f"{prefix}I'd like to *{readable}*:\n{param_summary}"
+    return f"{prefix}I'd like to *{readable}*. Approve to proceed."
 
 
 def create_gated_result(
@@ -149,12 +222,16 @@ def create_gated_result(
     parameters: dict[str, Any],
     action_type: ActionType,
     workspace_id: str,
+    requesting_user_id: str = "",
 ) -> dict[str, Any]:
     """Create the pending action and return a result the agent can use.
 
     The agent receives this instead of the actual tool result. It tells
     the agent to present an approval prompt to the user with Block Kit
     buttons.
+
+    requesting_user_id: Slack user ID of the person who triggered this agent run.
+    Stored with the action so the approval handler can enforce ownership.
     """
     from lucy.slack.hitl import create_pending_action
 
@@ -165,6 +242,7 @@ def create_gated_result(
         parameters=parameters,
         description=description,
         workspace_id=workspace_id,
+        requesting_user_id=requesting_user_id,
     )
 
     logger.info(
@@ -208,53 +286,48 @@ def _build_approval_blocks(
 ) -> list[dict[str, Any]]:
     """Build Slack Block Kit blocks for the approval prompt.
 
-    Returns blocks the agent can post directly to Slack.
+    Layout:
+      [optional warning header for destructive actions]
+      [section: natural narrative]
+      [divider]
+      [actions: Approve | Reject]
     """
-    blocks: list[dict[str, Any]] = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": description,
-            },
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "✅ Approve",
-                    },
-                    "style": "primary",
-                    "action_id": f"lucy_action_approve_{action_id}",
-                    "value": action_id,
-                },
-                {
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "❌ Cancel",
-                    },
-                    "style": "danger",
-                    "action_id": f"lucy_action_cancel_{action_id}",
-                    "value": action_id,
-                },
-            ],
-        },
-    ]
+    blocks: list[dict[str, Any]] = []
 
     if severity == "destructive":
-        blocks.insert(0, {
+        blocks.append({
             "type": "context",
             "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": "🔒 This action requires your explicit approval",
-                },
+                {"type": "mrkdwn", "text": "⚠️  *Heads up — this action cannot be undone*"},
             ],
         })
+
+    blocks.append({
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": description},
+    })
+
+    blocks.append({"type": "divider"})
+
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Approve", "emoji": False},
+                "style": "primary",
+                "action_id": f"lucy_action_approve_{action_id}",
+                "value": action_id,
+            },
+            {
+                # No "style" = default (light grey) — much better contrast than "danger"
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Reject", "emoji": False},
+                "action_id": f"lucy_action_cancel_{action_id}",
+                "value": action_id,
+            },
+        ],
+    })
 
     return blocks
 

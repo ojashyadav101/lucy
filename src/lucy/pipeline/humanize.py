@@ -182,6 +182,14 @@ _FALLBACKS: dict[str, list[str]] = {
 
 _pools: dict[str, list[str]] = {}
 _pools_ready = False
+_pools_init_lock: asyncio.Lock | None = None
+
+
+def _get_pools_lock() -> asyncio.Lock:
+    global _pools_init_lock
+    if _pools_init_lock is None:
+        _pools_init_lock = asyncio.Lock()
+    return _pools_init_lock
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -198,7 +206,15 @@ def pick(category: str, **format_kwargs: Any) -> str:
     """
     pool = _pools.get(category) or _FALLBACKS.get(category)
     if not pool:
-        return category
+        logger.warning(
+            "humanize_pick_category_missing",
+            category=category,
+            note="Add this category to _FALLBACKS to avoid user-visible internal names",
+        )
+        return "On it!"
+    if len(pool) == 0:
+        logger.warning("humanize_pick_empty_pool", category=category)
+        return "On it!"
     msg = random.choice(pool)
     if format_kwargs:
         try:
@@ -293,67 +309,73 @@ async def initialize_pools() -> None:
 
     Should be called once during Lucy's startup (non-blocking).
     If it fails, ``pick()`` degrades to the hardcoded fallbacks.
+
+    An asyncio.Lock prevents concurrent pool initialization calls from both
+    making LLM requests (e.g., double startup invocation or race at boot).
     """
     global _pools, _pools_ready
 
-    if _pools_ready:
-        return
+    async with _get_pools_lock():
+        if _pools_ready:
+            return
 
-    try:
-        from lucy.core.openclaw import ChatConfig, get_openclaw_client
+        try:
+            from lucy.core.openclaw import ChatConfig, get_openclaw_client
 
-        client = await get_openclaw_client()
+            client = await get_openclaw_client()
 
-        categories_block = "\n".join(
-            f"- {name}: {desc}" for name, desc in POOL_CATEGORIES.items()
-        )
-        prompt = (
-            f"Generate 6 unique message variations for each category:\n\n"
-            f"{categories_block}\n\n"
-            f"Return ONLY valid JSON. Keys are category names, values are "
-            f"arrays of 6 strings. No markdown fences."
-        )
+            categories_block = "\n".join(
+                f"- {name}: {desc}" for name, desc in POOL_CATEGORIES.items()
+            )
+            prompt = (
+                f"Generate 6 unique message variations for each category:\n\n"
+                f"{categories_block}\n\n"
+                f"Return ONLY valid JSON. Keys are category names, values are "
+                f"arrays of 6 strings. No markdown fences."
+            )
 
-        response = await asyncio.wait_for(
-            client.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                config=ChatConfig(
-                    model=MODEL_TIERS["fast"],
-                    system_prompt=_POOL_GENERATOR_PROMPT,
-                    max_tokens=LLMPresets.HUMANIZE_POOL.max_tokens,
-                    temperature=LLMPresets.HUMANIZE_POOL.temperature,
+            response = await asyncio.wait_for(
+                client.chat_completion(
+                    messages=[{"role": "user", "content": prompt}],
+                    config=ChatConfig(
+                        model=MODEL_TIERS["fast"],
+                        system_prompt=_POOL_GENERATOR_PROMPT,
+                        max_tokens=LLMPresets.HUMANIZE_POOL.max_tokens,
+                        temperature=LLMPresets.HUMANIZE_POOL.temperature,
+                    ),
                 ),
-            ),
-            timeout=30.0,
-        )
+                timeout=30.0,
+            )
 
-        raw = (response.content or "").strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            raw = (response.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
-        parsed: dict[str, list[str]] = json.loads(raw)
+            parsed: dict[str, list[str]] = json.loads(raw)
 
-        new_pools: dict[str, list[str]] = {}
-        loaded = 0
-        for cat, variations in parsed.items():
-            if isinstance(variations, list) and all(
-                isinstance(v, str) for v in variations
-            ):
-                new_pools[cat] = variations
-                loaded += 1
+            new_pools: dict[str, list[str]] = {}
+            loaded = 0
+            for cat, variations in parsed.items():
+                if (
+                    isinstance(variations, list)
+                    and len(variations) > 0
+                    and all(isinstance(v, str) for v in variations)
+                ):
+                    new_pools[cat] = variations
+                    loaded += 1
 
-        _pools = new_pools
-        _pools_ready = loaded > 0
-        logger.info(
-            "humanize_pools_initialized",
-            categories_loaded=loaded,
-            total_variations=sum(len(v) for v in _pools.values()),
-        )
+            _pools = new_pools
+            _pools_ready = loaded > 0
+            logger.info(
+                "humanize_pools_initialized",
+                categories_loaded=loaded,
+                total_variations=sum(len(v) for v in _pools.values()),
+            )
 
-    except json.JSONDecodeError as exc:
-        logger.warning("humanize_pool_json_parse_failed", error=str(exc))
-    except Exception as exc:
-        logger.warning("humanize_pool_init_failed", error=str(exc))
+        except json.JSONDecodeError as exc:
+            logger.warning("humanize_pool_json_parse_failed", error=str(exc))
+        except Exception as exc:
+            logger.warning("humanize_pool_init_failed", error=str(exc))
 
 
 async def refresh_pools() -> None:

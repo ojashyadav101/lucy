@@ -403,8 +403,12 @@ async def build_system_prompt(
         if intent_modules_text:
             dynamic_parts.append(intent_modules_text)
 
-    from lucy.integrations.wrapper_generator import discover_saved_wrappers
-    custom_wrappers = discover_saved_wrappers()
+    try:
+        from lucy.integrations.wrapper_generator import discover_saved_wrappers
+        custom_wrappers = discover_saved_wrappers()
+    except Exception as _wrappers_err:
+        logger.warning("custom_wrappers_discover_failed", error=str(_wrappers_err))
+        custom_wrappers = []
 
     keys_path = Path(settings.workspace_root).parent / "keys.json"
     keys_data: dict[str, Any] = {}
@@ -442,6 +446,32 @@ async def build_system_prompt(
             )
         lines.append("</custom_integrations>")
         dynamic_parts.append("\n".join(lines))
+
+    # ── MCP connections context ──────────────────────────────────
+    try:
+        from lucy.workspace.connections import load_mcp_connections
+        mcp_conns = await load_mcp_connections(ws)
+        if mcp_conns:
+            mcp_lines = [
+                "<mcp_connections>",
+                "You have active MCP connections. Their tools appear in your tool list "
+                "prefixed with mcp_{service}_. Call them directly for any task related "
+                "to these services — do NOT use Composio or custom wrappers for them.",
+            ]
+            for conn in mcp_conns:
+                mcp_lines.append(
+                    f"- {conn.service} ({conn.tool_count} tools, "
+                    f"transport={conn.transport}): use mcp_{conn.service}_* tools"
+                )
+            mcp_lines.append(
+                "\nIf a user asks to connect a service you don't recognise, "
+                "use lucy_resolve_custom_integration — many modern tools support "
+                "MCP. If it does, ask for their URL and call lucy_connect_mcp."
+            )
+            mcp_lines.append("</mcp_connections>")
+            dynamic_parts.append("\n".join(mcp_lines))
+    except Exception as _mcp_ctx_err:
+        logger.debug("mcp_context_inject_failed", error=str(_mcp_ctx_err))
 
     relevant_skills = ""
     if user_message:

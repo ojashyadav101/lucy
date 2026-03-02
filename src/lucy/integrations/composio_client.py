@@ -499,11 +499,19 @@ class ComposioClient:
             if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
                 data = result.get("data", {})
                 if isinstance(data, dict) and "results" in data:
+                    _NOT_IN_COMPOSIO_SIGNALS = (
+                        "not found", "no toolkit", "invalid toolkit",
+                        "does not exist", "not supported", "not available",
+                        "unknown toolkit", "toolkit not",
+                    )
                     permanently_failed = [
                         k for k, v in data["results"].items()
                         if isinstance(v, dict)
                         and v.get("status") == "failed"
-                        and "not found" in str(v.get("error_message", "")).lower()
+                        and any(
+                            sig in str(v.get("error_message", "")).lower()
+                            for sig in _NOT_IN_COMPOSIO_SIGNALS
+                        )
                     ]
                     if permanently_failed:
                         result["_unresolved_services"] = permanently_failed

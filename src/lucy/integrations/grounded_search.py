@@ -31,8 +31,9 @@ Research the service "{service_name}" and answer ONLY with a JSON object:
 {{
   "service_name": "{service_name}",
   "has_mcp": true/false,
-  "mcp_repo_url": "GitHub URL or npm package name if MCP server exists, else null",
+  "mcp_repo_url": "GitHub URL or npm package name if stdio MCP server exists, else null",
   "mcp_docs_url": "URL to MCP server documentation/README, else null",
+  "mcp_http_url": "Base HTTP/SSE URL for the MCP server if it is accessed over HTTP (not stdio), else null",
   "has_openapi": true/false,
   "openapi_spec_url": "Direct URL to .json or .yaml OpenAPI spec file, else null",
   "openapi_docs_url": "URL to API reference documentation, else null",
@@ -47,6 +48,12 @@ Research the service "{service_name}" and answer ONLY with a JSON object:
 
 Rules:
 - MCP = Model Context Protocol server. Search for "[service] MCP server" on GitHub.
+- mcp_repo_url = npm package or GitHub URL for a STDIO MCP server (runs as a local process).
+- mcp_http_url = HTTP/SSE endpoint URL for an MCP server accessed over HTTP. Many modern
+  services (e.g. Craft.do) expose a remote HTTP MCP endpoint. If the MCP URL is
+  user-specific/generated (like Craft's per-user URL), set this to null — the user will
+  paste their own URL. Only set mcp_http_url when a FIXED, non-user-specific HTTP
+  endpoint is publicly documented. When uncertain, prefer null.
 - OpenAPI = Swagger/OpenAPI specification file. Look for official API docs that publish one.
 - SDK = official or well-maintained Python library on PyPI or GitHub.
 - api_base_url = the root URL that API calls are made to (not the docs URL).
@@ -132,6 +139,7 @@ class IntegrationClassification:
     has_mcp: bool = False
     mcp_repo_url: str | None = None
     mcp_docs_url: str | None = None
+    mcp_http_url: str | None = None
     has_openapi: bool = False
     openapi_spec_url: str | None = None
     openapi_docs_url: str | None = None
@@ -180,6 +188,7 @@ async def classify_service(service_name: str) -> IntegrationClassification:
         has_mcp=bool(parsed.get("has_mcp")),
         mcp_repo_url=parsed.get("mcp_repo_url"),
         mcp_docs_url=parsed.get("mcp_docs_url"),
+        mcp_http_url=parsed.get("mcp_http_url"),
         has_openapi=bool(parsed.get("has_openapi")),
         openapi_spec_url=parsed.get("openapi_spec_url"),
         openapi_docs_url=parsed.get("openapi_docs_url"),
@@ -200,6 +209,7 @@ async def classify_service(service_name: str) -> IntegrationClassification:
         "grounded_search_complete",
         service=service_name,
         has_mcp=classification.has_mcp,
+        mcp_http_url=classification.mcp_http_url,
         has_openapi=classification.has_openapi,
         has_sdk=classification.has_sdk,
         api_base_url=classification.api_base_url,

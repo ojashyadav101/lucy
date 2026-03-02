@@ -49,7 +49,8 @@ _DESTRUCTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|_)cancel(?=[_\s]|$)", re.IGNORECASE),      # cancel_subscription
     re.compile(r"(?:^|_)revoke(?=[_\s]|$)", re.IGNORECASE),      # revoke_token, revoke_session
     re.compile(r"(?:^|_)ban(?=[_\s]|$)", re.IGNORECASE),         # ban_user
-    re.compile(r"(?:^|_)unban(?=[_\s]|$)", re.IGNORECASE),       # unban_user
+    # unban removed from DESTRUCTIVE — unbanning is reversible (can re-ban).
+    # Kept above WRITE patterns so it stays gated, just not at DESTRUCTIVE level.
     re.compile(r"(?:^|_)destroy(?=[_\s]|$)", re.IGNORECASE),     # destroy_resource
     re.compile(r"(?:^|_)purge(?=[_\s]|$)", re.IGNORECASE),       # purge_cache
     re.compile(r"(?:^|_)forward(?=[_\s]|$)", re.IGNORECASE),     # forward_email
@@ -74,6 +75,8 @@ _WRITE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|_)store(?=[_\s]|$)", re.IGNORECASE),      # store_api_key
     re.compile(r"(?:^|_)quick[_\s]?add", re.IGNORECASE),        # quick_add event
     re.compile(r"(?:^|_)trigger(?=[_\s]|$)", re.IGNORECASE),    # trigger_cron
+    re.compile(r"(?:^|_)export(?=[_\s]|$)", re.IGNORECASE),     # export_data — write to external storage
+    re.compile(r"(?:^|_)unban(?=[_\s]|$)", re.IGNORECASE),      # unban_user — reversible moderation
 ]
 
 # READ patterns — fetches data, no side effects
@@ -92,7 +95,8 @@ _READ_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|_)show(?=[_\s]|$)", re.IGNORECASE),     # show_calendar
     re.compile(r"(?:^|_)retrieve(?=[_\s]|$)", re.IGNORECASE), # retrieve_record
     re.compile(r"(?:^|_)view(?=[_\s]|$)", re.IGNORECASE),     # view_details
-    re.compile(r"(?:^|_)export(?=[_\s]|$)", re.IGNORECASE),   # export_data
+    # export removed from READ — export_user_data/export_contacts can write to external storage.
+    # Classified as WRITE (reversible side-effect) via the WRITE patterns below.
     re.compile(r"(?:^|_)download(?=[_\s]|$)", re.IGNORECASE), # download_file
 ]
 
@@ -112,6 +116,9 @@ _INTERNAL_READ_TOOLS: frozenset[str] = frozenset({
     "lucy_web_search",
     "lucy_read_file",
     "lucy_list_files",
+    # Self-monitoring — internal quality gate, never visible to users
+    "lucy_reflection",
+    "lucy_react_to_message",
     # Composio meta-tools (discovery, not execution)
     "COMPOSIO_SEARCH_TOOLS",
     "COMPOSIO_GET_TOOL_SCHEMAS",
@@ -252,9 +259,9 @@ def classify(tool_name: str, parameters: dict[str, Any] | None = None) -> Action
         if tool_name == "COMPOSIO_MULTI_EXECUTE_TOOL":
             return ActionType.WRITE  # conservative default
         if tool_name == "COMPOSIO_REMOTE_BASH_TOOL":
-            return ActionType.WRITE
+            return ActionType.DESTRUCTIVE  # arbitrary bash on remote machine = irreversible
         if tool_name == "COMPOSIO_REMOTE_WORKBENCH":
-            return ActionType.WRITE
+            return ActionType.DESTRUCTIVE  # remote workbench has unbounded side-effect potential
         # Search/schema tools are read-only
         return ActionType.READ
 

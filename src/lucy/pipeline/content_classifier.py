@@ -38,7 +38,10 @@ class ClassifiedBlock(NamedTuple):
 # XML TAG DETECTION — highest confidence signal
 # ═══════════════════════════════════════════════════════════════════════
 
-# Tags that are ALWAYS internal (never user-facing)
+# Tags that are ALWAYS internal (never user-facing).
+# IMPORTANT: Must include every tag variant the agent actually emits.
+# The agent uses <lucy_reflection> in its output format; "reflection" alone
+# would only catch the bare variant and leave <lucy_reflection> blocks visible.
 _INTERNAL_XML_TAGS = frozenset({
     "planning", "thinking", "self_critique", "self_correction",
     "supervisor_guidance", "supervisor_note", "internal_note",
@@ -46,6 +49,9 @@ _INTERNAL_XML_TAGS = frozenset({
     "meta_commentary", "reasoning", "reflection", "scratchpad",
     "chain_of_thought", "cot", "inner_monologue",
     "custom_integration_directive",
+    # Agent-specific variants — MUST be kept in sync with the prompt format
+    "lucy_reflection",
+    "response_format_requirement",
 })
 
 # Match opening + content + closing for known internal tags

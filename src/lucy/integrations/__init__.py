@@ -1,4 +1,4 @@
-"""Integration layer: Composio meta-tools, CamoFox browser, and dynamic resolution."""
+"""Integration layer: Composio meta-tools, CamoFox browser, dynamic resolution, and MCP."""
 
 from lucy.integrations.camofox import CamoFoxClient, get_camofox_client
 from lucy.integrations.composio_client import ComposioClient, get_composio_client
@@ -6,6 +6,13 @@ from lucy.integrations.grounded_search import (
     IntegrationClassification,
     classify_service,
     discover_endpoints,
+)
+from lucy.integrations.mcp_client import (
+    MCPDiscoveryResult,
+    call_tool as mcp_call_tool,
+    connect_and_discover,
+    mcp_tools_to_openai,
+    parse_mcp_tool_name,
 )
 from lucy.integrations.openclaw_gateway import (
     OpenClawGatewayClient,
@@ -19,15 +26,21 @@ __all__ = [
     "CamoFoxClient",
     "ComposioClient",
     "IntegrationClassification",
+    "MCPDiscoveryResult",
     "OpenClawGatewayClient",
     "OpenClawGatewayError",
     "ResolutionResult",
+    "call_tool",
     "classify_service",
+    "connect_and_discover",
     "discover_endpoints",
     "discover_saved_wrappers",
     "get_camofox_client",
     "get_composio_client",
     "get_gateway_client",
+    "mcp_call_tool",
+    "mcp_tools_to_openai",
+    "parse_mcp_tool_name",
     "resolve_integration",
     "resolve_multiple",
 ]

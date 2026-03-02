@@ -81,19 +81,26 @@ async def ensure_identity(
     if not needs_probe:
         return identity
 
+    new_facts_found = False
     for service in needs_probe:
         try:
             facts = await _probe_service(service, ws)
             if facts:
                 identity.update(facts)
+                new_facts_found = True
         except Exception as exc:
-            logger.debug(
+            # Log at WARNING, not DEBUG — these are external service failures
+            # and should be visible in production logs per project error policy.
+            logger.warning(
                 "identity_probe_failed",
                 service=service,
                 error=str(exc),
             )
 
-    if any(k for k in identity if k != "_updated_at"):
+    # Only write (and reset _updated_at) if probes actually returned new data.
+    # Without this guard, a temporary service outage would freeze the cache for
+    # 24 hours — the next run would see a fresh timestamp and skip probing again.
+    if new_facts_found:
         identity = await write_identity(ws, identity)
 
     return identity
@@ -194,7 +201,9 @@ async def _probe_polar() -> dict[str, Any]:
         if not keys_path.exists():
             return {}
 
-        keys_data = json.loads(keys_path.read_text(encoding="utf-8"))
+        import asyncio as _asyncio
+        _raw = await _asyncio.to_thread(keys_path.read_text, encoding="utf-8")
+        keys_data = json.loads(_raw)
         api_key = (
             keys_data
             .get("custom_integrations", {})

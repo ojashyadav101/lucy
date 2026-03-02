@@ -23,6 +23,7 @@ _SEEDS_DIR = Path(__file__).parent.parent.parent.parent / "workspace_seeds"
 async def onboard_workspace(
     workspace_id: str,
     slack_client: object | None = None,
+    owner_slack_id: str | None = None,
 ) -> WorkspaceFS:
     """Run the full onboarding sequence for a new workspace.
 
@@ -33,6 +34,13 @@ async def onboard_workspace(
     4. Stub company/SKILL.md
     5. Set up default cron placeholders
     6. Reload cron scheduler for this workspace
+
+    Args:
+        workspace_id: Slack workspace/team ID.
+        slack_client: Optional Slack client for API calls.
+        owner_slack_id: Slack user ID of the person who triggered onboarding.
+            Used to populate requesting_user_id on DM-delivery seed crons so
+            workflow-discovery and daily-self-audit can actually DM someone.
 
     Returns the initialized WorkspaceFS.
     """
@@ -56,6 +64,12 @@ async def onboard_workspace(
     crons_dir = _SEEDS_DIR / "crons"
     cron_count = await ws.copy_seeds(crons_dir, target_subdir="crons")
     logger.info("crons_seeded", workspace_id=workspace_id, count=cron_count)
+
+    # Step 3b: Patch seed crons that use delivery_mode=dm with the owner's Slack ID.
+    # Without this, DM-delivery crons have an empty requesting_user_id and their
+    # output is silently dropped.
+    if owner_slack_id:
+        await _patch_dm_crons_with_owner(ws, owner_slack_id)
 
     # Step 4: Profile team members from Slack
     if slack_client:
@@ -95,6 +109,40 @@ async def onboard_workspace(
         crons=cron_count,
     )
     return ws
+
+
+async def _patch_dm_crons_with_owner(ws: WorkspaceFS, owner_slack_id: str) -> None:
+    """Set requesting_user_id on seed crons that have delivery_mode=dm.
+
+    Seed crons like workflow-discovery and daily-self-audit use
+    delivery_mode=dm but ship with an empty requesting_user_id.
+    Without a target user, the scheduler silently drops their output.
+    """
+    import json as _json
+
+    crons_dir = ws.root / "crons"
+    if not crons_dir.is_dir():
+        return
+
+    for cron_dir in crons_dir.iterdir():
+        if not cron_dir.is_dir():
+            continue
+        task_file = cron_dir / "task.json"
+        if not task_file.is_file():
+            continue
+        try:
+            data = _json.loads(task_file.read_text("utf-8"))
+            if data.get("delivery_mode") == "dm" and not data.get("requesting_user_id"):
+                data["requesting_user_id"] = owner_slack_id
+                task_file.write_text(_json.dumps(data, indent=2, ensure_ascii=False), "utf-8")
+                logger.info(
+                    "cron_dm_patched_with_owner",
+                    workspace_id=ws.workspace_id,
+                    cron=cron_dir.name,
+                    owner=owner_slack_id,
+                )
+        except Exception as e:
+            logger.warning("cron_dm_patch_failed", cron=cron_dir.name, error=str(e))
 
 
 async def _create_learnings_stub(ws: WorkspaceFS) -> None:
@@ -296,13 +344,20 @@ async def _create_company_stub(ws: WorkspaceFS) -> None:
 async def ensure_workspace(
     workspace_id: str,
     slack_client: object | None = None,
+    owner_slack_id: str | None = None,
 ) -> WorkspaceFS:
     """Get an existing workspace or onboard a new one.
 
     This is the main entry point — call this from handlers
     instead of creating WorkspaceFS directly.
+
+    Args:
+        workspace_id: Slack workspace/team ID.
+        slack_client: Optional Slack client for team profiling.
+        owner_slack_id: Slack user ID of the person triggering onboarding.
+            Passed through to populate requesting_user_id on DM-mode crons.
     """
     ws = WorkspaceFS(workspace_id=workspace_id, base_path=settings.workspace_root)
     if not ws.exists:
-        ws = await onboard_workspace(workspace_id, slack_client)
+        ws = await onboard_workspace(workspace_id, slack_client, owner_slack_id)
     return ws

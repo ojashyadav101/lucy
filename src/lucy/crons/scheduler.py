@@ -1139,7 +1139,36 @@ class CronScheduler:
                 )
 
                 if attempt < max_attempts:
-                    delay = RETRY_DELAY_BASE * (2 ** (attempt - 1))
+                    # Wire error_strategy to get smarter retry behaviour:
+                    # - AUTH errors are never transient; skip remaining attempts
+                    # - Rate-limit errors use Retry-After from the error itself
+                    # - Other transient errors use standard exponential backoff
+                    from lucy.pipeline.error_strategy import classify_error, ErrorCategory
+                    err_cls = classify_error(e)
+
+                    if not err_cls.is_transient:
+                        logger.warning(
+                            "cron_retry_aborted_non_transient",
+                            workspace_id=workspace_id,
+                            cron_path=cron.path,
+                            error_category=err_cls.category.value,
+                            attempt=attempt,
+                        )
+                        break  # no point retrying auth/parse/data errors
+
+                    if err_cls.suggested_wait > 0:
+                        delay = err_cls.suggested_wait
+                    else:
+                        delay = RETRY_DELAY_BASE * (2 ** (attempt - 1))
+
+                    logger.info(
+                        "cron_retry_scheduled",
+                        workspace_id=workspace_id,
+                        cron_path=cron.path,
+                        attempt=attempt,
+                        delay_s=delay,
+                        error_category=err_cls.category.value,
+                    )
                     await asyncio.sleep(delay)
 
         elapsed_ms = round((_time.monotonic() - t0) * 1000)

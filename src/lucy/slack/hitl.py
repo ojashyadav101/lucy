@@ -97,11 +97,15 @@ def create_pending_action(
     parameters: dict[str, Any],
     description: str,
     workspace_id: str,
+    requesting_user_id: str = "",
 ) -> str:
     """Store a pending action and return its unique ID.
 
     The action will be held until the user approves or cancels it,
     or until it expires after PENDING_TTL_SECONDS.
+
+    requesting_user_id: Slack user ID of the person who triggered this action.
+    When provided, only that user (or a workspace admin) can approve it.
     """
     action_id = uuid.uuid4().hex[:12]
     action = {
@@ -109,7 +113,9 @@ def create_pending_action(
         "parameters": parameters,
         "description": description,
         "workspace_id": workspace_id,
+        "requesting_user_id": requesting_user_id,
         "created_at": time.monotonic(),
+        "wall_created_at": time.time(),
     }
     _pending_actions[action_id] = action
     _persist_action(workspace_id, action_id, action)
@@ -125,6 +131,17 @@ def create_pending_action(
     return action_id
 
 
+def get_pending_action_metadata(action_id: str) -> dict[str, Any] | None:
+    """Return metadata for a pending action without resolving it.
+
+    Used for pre-flight checks (e.g., ownership verification) before approval.
+    Returns None if the action is not found in memory (disk not checked — this
+    is intentional: a server restart means we can't verify ownership, so we
+    allow the approval to proceed rather than block legitimate post-restart use).
+    """
+    return _pending_actions.get(action_id)
+
+
 async def resolve_pending_action(
     action_id: str,
     approved: bool,
@@ -138,7 +155,10 @@ async def resolve_pending_action(
     action = _pending_actions.pop(action_id, None)
 
     if not action:
-        # Try loading from disk (server may have restarted)
+        # Try loading from disk (server may have restarted).
+        # IMPORTANT: Do NOT re-insert into _pending_actions here — that would
+        # create a ghost entry that a second concurrent resolve call could pop
+        # and execute again, causing double-execution in multi-process deploys.
         logger.info("hitl_action_not_in_memory_trying_disk", action_id=action_id)
         root = Path(settings.workspace_root)
         if root.is_dir():
@@ -147,7 +167,6 @@ async def resolve_pending_action(
                     disk_actions = _load_from_disk(ws_dir.name)
                     if action_id in disk_actions:
                         action = disk_actions[action_id]
-                        _pending_actions[action_id] = action
                         logger.info(
                             "hitl_action_recovered_from_disk",
                             action_id=action_id,

@@ -1,6 +1,13 @@
 """Filesystem-based workspace: skills, memory, activity logs, snapshots, timezone, Slack sync."""
 
 from lucy.workspace.activity_log import get_recent_activity, log_activity
+from lucy.workspace.connections import (
+    MCPConnectionRecord,
+    delete_mcp_connection,
+    get_mcp_connection,
+    load_mcp_connections,
+    save_mcp_connection,
+)
 from lucy.workspace.filesystem import WorkspaceFS, get_workspace
 from lucy.workspace.identity import ensure_identity, read_identity, write_identity
 from lucy.workspace.onboarding import ensure_workspace, onboard_workspace
@@ -30,6 +37,11 @@ __all__ = [
     "get_workspace",
     "ensure_workspace",
     "onboard_workspace",
+    "MCPConnectionRecord",
+    "delete_mcp_connection",
+    "get_mcp_connection",
+    "load_mcp_connections",
+    "save_mcp_connection",
     "read_identity",
     "write_identity",
     "ensure_identity",

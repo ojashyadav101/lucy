@@ -238,10 +238,13 @@ class AgentContext:
     # Each entry: {"tool_name": str, "parameters": dict}.
     # The gate consumes (pops) the first matching entry when found.
     pre_approved_tools: list[dict[str, Any]] = field(default_factory=list)
-    # When True, skip ALL confirmation gates for every tool call in this run.
-    # Set by _execute_approved_action — the user already approved this agent run
-    # by clicking the Approve button, so no further gating is needed.
-    skip_confirmation_gates: bool = False
+    # When set, skip the confirmation gate for exactly this one tool call.
+    # Set by _execute_approved_action — the user clicked Approve on a specific
+    # action. Only that tool is pre-approved; any additional WRITE/DESTRUCTIVE
+    # tool calls the agent makes during the same run are still gated normally.
+    # This prevents a single Approve click from silently authorizing cascading
+    # follow-up actions the user never saw.
+    approved_tool_name: str = ""
 
 
 def _check_budget(ctx: AgentContext) -> float:
@@ -256,6 +259,13 @@ def _check_budget(ctx: AgentContext) -> float:
 _REFLECTION_RE = re.compile(
     r"<lucy_reflection>\s*(.*?)\s*</lucy_reflection>",
     re.DOTALL | re.IGNORECASE,
+)
+# Matches an unclosed <lucy_reflection> tag — strips from the opening tag to
+# the first double-newline break (i.e., the metadata block only, not the
+# real response that follows), then strips the stray opening tag itself.
+_REFLECTION_UNCLOSED_RE = re.compile(
+    r"<lucy_reflection>\s*((?:[^\n]+\n?)*?)(?=\n\n|\Z)",
+    re.IGNORECASE,
 )
 
 
@@ -272,6 +282,13 @@ def _parse_reflection(
 
     match = _REFLECTION_RE.search(text)
     if not match:
+        # Attempt to handle malformed/unclosed <lucy_reflection> blocks.
+        # If the block starts but has no closing tag, strip the metadata lines
+        # up to the first paragraph break so the actual response isn't lost.
+        unclosed = _REFLECTION_UNCLOSED_RE.search(text)
+        if unclosed:
+            clean = (text[: unclosed.start()] + text[unclosed.end() :]).strip()
+            return clean, {}
         return text, {}
 
     block = match.group(1)
@@ -801,8 +818,13 @@ class LucyAgent:
                         wrapper_tool.get("function", {}).get("name", "").lower()
                     )
                     shadowed = any(
+                        # Match both naming conventions:
+                        # - Old: lucy_<slug>_*   (legacy wrappers)
+                        # - New: lucy_custom_<slug>_*  (wrapper_generator output)
                         tool_name_lower.startswith(f"lucy_{slug}_")
                         or tool_name_lower == f"lucy_{slug}"
+                        or tool_name_lower.startswith(f"lucy_custom_{slug}_")
+                        or tool_name_lower == f"lucy_custom_{slug}"
                         for slug in mcp_service_slugs
                     )
                     if shadowed:
@@ -2852,23 +2874,23 @@ class LucyAgent:
             from lucy.core.confirmation_gate import should_gate, create_gated_result
             from lucy.core.action_classifier import get_classification_summary
 
-            # Check if this entire agent run is pre-authorized (user clicked Approve
-            # on the parent action). If so, skip all gates — no further HITL prompts.
-            _skip_all_gates = getattr(ctx, "skip_confirmation_gates", False)
-
-            if _skip_all_gates:
+            # Check if this specific tool was pre-approved by the user clicking
+            # Approve on the HITL message. Only the exact tool the user approved
+            # is bypassed — any other WRITE/DESTRUCTIVE calls are still gated.
+            _approved_tool = getattr(ctx, "approved_tool_name", "")
+            if _approved_tool and name == _approved_tool:
                 gate_needed = False
                 from lucy.core.action_classifier import ActionType as _AT
                 action_type = _AT.WRITE
+                # Consume the approval so it can't be reused for a second call
+                ctx.approved_tool_name = ""
                 logger.info(
-                    "confirmation_gate_skipped_approved_run",
+                    "confirmation_gate_skipped_user_approved",
                     tool=name,
                     workspace_id=ctx.workspace_id,
                 )
             else:
-                # Check if this specific tool call was pre-approved via HITL.
-                # _execute_approved_action populates ctx.pre_approved_tools as a
-                # fallback for one-time single-call bypass.
+                # Check pre_approved_tools list (legacy one-time bypass list).
                 _pre_approved = getattr(ctx, "pre_approved_tools", [])
                 _pre_approved_idx: int | None = None
                 for _i, _pa in enumerate(_pre_approved):
@@ -2906,6 +2928,7 @@ class LucyAgent:
                     parameters=params,
                     action_type=action_type,
                     workspace_id=ctx.workspace_id,
+                    requesting_user_id=ctx.user_slack_id or "",
                 )
                 # Do NOT post to Slack here. The agent loop's pending-approval
                 # break will combine the LLM's own response_text with these
@@ -4342,7 +4365,9 @@ class LucyAgent:
             )
 
             corrected = (result.content or "").strip()
-            if "RESPONSE_OK" in corrected:
+            # Use startswith to avoid treating a code snippet containing
+            # "RESPONSE_OK" as a no-op signal; the first token must be the sentinel.
+            if corrected.startswith("RESPONSE_OK"):
                 logger.info("quality_gate_original_ok")
                 return None
 

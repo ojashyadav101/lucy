@@ -123,7 +123,29 @@ async def resolve_integration(service_name: str) -> ResolutionResult:
         f"api_docs={'yes' if classification.api_docs_url else 'no'}"
     )
 
-    # ── Stage 1: MCP ─────────────────────────────────────────
+    # ── Stage 1a: HTTP/SSE MCP (user-provided URL or known endpoint) ─────────
+    if classification.has_mcp and not classification.mcp_repo_url:
+        # This service uses HTTP/SSE MCP — either a fixed public endpoint or a
+        # per-user generated URL. Either way we need a URL from the user.
+        mcp_http_url = classification.mcp_http_url
+        result.decision_log.append(
+            f"STAGE1_MCP_HTTP: has_mcp=True, no stdio repo, "
+            f"http_url={'known' if mcp_http_url else 'user-provided'}"
+        )
+        logger.info(
+            "resolver_mcp_http_detected",
+            service=service_name,
+            step="STAGE1_MCP_HTTP",
+            http_url_known=bool(mcp_http_url),
+        )
+        result.stage = ResolutionStage.MCP
+        result.success = True
+        result.result_data = _build_mcp_http_instructions(service_name, classification)
+        result.timing_ms["total_ms"] = round((time.monotonic() - pipeline_start) * 1000, 1)
+        _log_pipeline_summary(result)
+        return result
+
+    # ── Stage 1b: stdio MCP (VPS install) ────────────────────────────────────
     if classification.has_mcp and classification.mcp_repo_url:
         t0 = time.monotonic()
         result.decision_log.append(f"STAGE1_MCP_ATTEMPTING: repo={classification.mcp_repo_url}")
@@ -163,7 +185,7 @@ async def resolve_integration(service_name: str) -> ResolutionResult:
             duration_ms=round(mcp_ms, 1),
         )
     else:
-        result.decision_log.append("STAGE1_MCP_SKIPPED: no MCP server found in research")
+        result.decision_log.append("STAGE1_MCP_SKIPPED: no MCP server found in research (neither HTTP nor stdio)")
 
     # ── Stage 2: OpenAPI ─────────────────────────────────────
     if classification.has_openapi and classification.openapi_spec_url:
@@ -398,6 +420,58 @@ def _categorize_tools(tool_names: list[str]) -> list[str]:
                 seen.add(label)
                 categories.append(label)
     return categories
+
+
+def _build_mcp_http_instructions(
+    service: str, classification: IntegrationClassification
+) -> dict[str, Any]:
+    """Build result data for HTTP/SSE MCP services.
+
+    When has_mcp=True but no stdio repo exists, the service uses HTTP MCP.
+    Either the endpoint is a fixed public URL (rare) or the user needs to
+    generate a personal URL inside the service's settings.
+    """
+    known_url = classification.mcp_http_url
+    docs_url = classification.mcp_docs_url
+
+    if known_url:
+        return {
+            "service": service,
+            "method": "HTTP MCP server",
+            "status": "needs_user_mcp_url",
+            "mcp_http_url_known": known_url,
+            "message": (
+                f"{service} supports MCP via HTTP. The MCP endpoint is: {known_url}. "
+                "Use lucy_connect_mcp with this URL to connect instantly, "
+                "or ask the user to confirm before connecting."
+            ),
+            "next_step": (
+                f"Tell the user that {service} has MCP support with a known endpoint. "
+                f"Call lucy_connect_mcp(service='{service.lower()}', mcp_url='{known_url}') "
+                "to connect immediately, unless the service requires per-user auth tokens "
+                "embedded in the URL (in that case ask the user for their personal URL first)."
+            ),
+        }
+
+    # Per-user URL — explain how to get it
+    docs_hint = f" See: {docs_url}" if docs_url else ""
+    return {
+        "service": service,
+        "method": "HTTP MCP server",
+        "status": "needs_user_mcp_url",
+        "mcp_http_url_known": None,
+        "mcp_docs_url": docs_url,
+        "message": (
+            f"{service} supports MCP via HTTP, but each user gets a personal MCP URL "
+            f"generated inside the {service} app.{docs_hint}"
+        ),
+        "next_step": (
+            f"Tell the user that {service} has MCP support. Ask them to open {service}, "
+            f"go to Settings → Integrations (or similar), create an MCP connection, "
+            f"and paste the generated URL here. Once they do, call "
+            f"lucy_connect_mcp(service='{service.lower()}', mcp_url='<their URL>')."
+        ),
+    }
 
 
 def _build_failure_data(

@@ -104,6 +104,7 @@ class TurnReport:
     result_preview: str
     had_error: bool
     error_summary: str = ""
+    is_pending_approval: bool = False
 
 
 @dataclass
@@ -403,7 +404,12 @@ async def evaluate_progress(
     recent = turn_reports[-3:] if turn_reports else []
     recent_lines: list[str] = []
     for r in recent:
-        status = f"ERROR: {r.error_summary}" if r.had_error else r.result_preview[:80]
+        if r.is_pending_approval:
+            status = "PENDING_APPROVAL — waiting for user to click Approve/Cancel"
+        elif r.had_error:
+            status = f"ERROR: {r.error_summary}"
+        else:
+            status = r.result_preview[:80]
         recent_lines.append(f"  Turn {r.turn}: {r.tool_name} -> {status}")
     recent_text = "\n".join(recent_lines) if recent_lines else "  (no tools called yet)"
 
@@ -425,6 +431,23 @@ async def evaluate_progress(
             "data without setting up monitoring, choose I and "
             "instruct it to use lucy_create_heartbeat for instant alerts "
             "or lucy_create_cron for scheduled reports.\n"
+        )
+
+    # If any recent turn returned pending_approval, the agent is waiting for a
+    # human decision. Do NOT continue, intervene, replan, or suggest alternatives.
+    # The ONLY correct action is A (ask user) — effectively: do nothing until they
+    # click the button.
+    _has_pending_approval = any(r.is_pending_approval for r in turn_reports)
+    if _has_pending_approval:
+        intent_hint = (
+            "\nCRITICAL: A HITL (Human-in-the-Loop) approval is pending. "
+            "The agent posted an Approve/Cancel prompt to Slack and is waiting "
+            "for the user to click a button. This is the EXPECTED state — it is "
+            "NOT an error, NOT a stuck agent, and NOT something to fix by trying "
+            "a different approach. "
+            "You MUST return 'A' (ask user). Do NOT return I, R, E, or X. "
+            "Do NOT suggest the agent build a workaround, use an API instead of "
+            "MCP, or deviate from the user's chosen path in any way.\n"
         )
 
     prompt = (
@@ -517,12 +540,19 @@ def build_turn_report(
             args = args[:77] + "..."
 
         had_error = False
+        is_pending_approval = False
         error_summary = ""
         preview = result_str[:100] if result_str else ""
 
         if result_str:
             lower = result_str[:500].lower()
-            if '"error"' in lower or '"error":' in lower:
+            # pending_approval is a terminal state — the agent is waiting for
+            # a human to click an Approve/Cancel button. Do NOT treat this as
+            # a success to continue from, and do NOT treat it as an error to
+            # retry. Flag it explicitly so the supervisor can handle it correctly.
+            if '"status": "pending_approval"' in result_str or '"status":"pending_approval"' in result_str:
+                is_pending_approval = True
+            elif '"error"' in lower or '"error":' in lower:
                 had_error = True
                 try:
                     parsed = json.loads(result_str)
@@ -541,5 +571,6 @@ def build_turn_report(
             result_preview=preview,
             had_error=had_error,
             error_summary=error_summary,
+            is_pending_approval=is_pending_approval,
         ))
     return reports

@@ -29,10 +29,11 @@ third-party tool orchestration, and **Slack Bolt** for real-time event handling.
 | 4 | **Workspace & Memory** | `workspace/` | Per-workspace filesystem, three-tier memory, skills, onboarding |
 | 5 | **Cron Engine** | `crons/` | APScheduler-based recurring jobs with Slack delivery |
 | 6 | **Heartbeat Monitor** | `crons/heartbeat` | Real-time condition monitors (API health, page content, thresholds) |
-| 7 | **Tools** | `tools/` | File generation, web search, Spaces, email |
-| 8 | **Integrations** | `integrations/` | Composio meta-tools, custom wrappers, MCP, OpenAPI registration |
-| 9 | **Infrastructure** | `infra/` | Rate limiting, priority queue, request tracing |
-| 10 | **Prompts & Personality** | `prompts/` | SOUL.md, SYSTEM_CORE.md, intent modules, sub-agent prompts |
+| 7 | **Proactiveness Engine** | `workspace/`, `tools/slack_proactive.py` | Heartbeat intelligence loop, event queue, workflow discovery, local Slack reader |
+| 8 | **Tools** | `tools/` | File generation, web search, Spaces, email, Slack actions (react/post/DM) |
+| 9 | **Integrations** | `integrations/` | Composio meta-tools, custom wrappers, MCP, OpenAPI registration |
+| 10 | **Infrastructure** | `infra/` | Rate limiting, priority queue, request tracing |
+| 11 | **Prompts & Personality** | `prompts/` | SOUL.md, SYSTEM_CORE.md, intent modules, sub-agent prompts |
 
 ---
 

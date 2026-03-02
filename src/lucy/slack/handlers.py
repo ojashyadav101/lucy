@@ -137,7 +137,12 @@ def register_handlers(app: AsyncApp) -> None:
         if subtype in {
             "message_changed", "message_deleted",
             "channel_join", "channel_leave",
+            "bot_message",
         }:
+            return
+        # Skip messages posted by any bot (including Lucy herself) to prevent
+        # Lucy from reacting to her own HITL prompts or other bot replies.
+        if event.get("bot_id"):
             return
 
         text = event.get("text", "")
@@ -312,28 +317,99 @@ def register_handlers(app: AsyncApp) -> None:
         await ack()
         action = body.get("actions", [{}])[0]
         action_id = action.get("value", "")
+        approver_id = body.get("user", {}).get("id", "")
         user_name = body.get("user", {}).get("name", "someone")
         channel = body.get("channel", {}).get("id")
-        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        message_ts = body.get("message", {}).get("ts")
+        thread_ts = body.get("message", {}).get("thread_ts") or message_ts
 
         logger.info("hitl_approved", action_id=action_id, user=user_name)
 
         from lucy.slack.hitl import resolve_pending_action
+
+        # Ownership check: only the user who triggered the action can approve it.
+        # This prevents other workspace members from executing actions on behalf
+        # of someone else without their knowledge.
+        from lucy.slack.hitl import get_pending_action_metadata
+        metadata = get_pending_action_metadata(action_id)
+        if metadata:
+            requesting_user = metadata.get("requesting_user_id", "")
+            if requesting_user and approver_id and requesting_user != approver_id:
+                logger.warning(
+                    "hitl_unauthorized_approval_attempt",
+                    action_id=action_id,
+                    requesting_user=requesting_user,
+                    approver_id=approver_id,
+                )
+                if channel and message_ts:
+                    original_blocks = body.get("message", {}).get("blocks", [])
+                    updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                    updated_blocks.append({
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": "⚠️  Only the person who requested this action can approve it."}],
+                    })
+                    try:
+                        await client.chat_update(
+                            channel=channel, ts=message_ts,
+                            blocks=updated_blocks, text="Unauthorized approval attempt.",
+                        )
+                    except Exception:
+                        pass
+                return
+
         resolved = await resolve_pending_action(action_id, approved=True)
 
         if resolved:
-            from lucy.pipeline.humanize import pick
-            await say(
-                text=pick("hitl_approved", user=user_name),
-                thread_ts=thread_ts,
-            )
+            # Update the approval message in place: remove the buttons, show status.
+            # This gives immediate visual feedback without a separate reply.
+            if channel and message_ts:
+                original_blocks = body.get("message", {}).get("blocks", [])
+                updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                updated_blocks.append({
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"✓  Approved by *{user_name}* — on it!"},
+                    ],
+                })
+                try:
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        blocks=updated_blocks,
+                        text="Approved — executing now.",
+                    )
+                except Exception as _upd_err:
+                    logger.warning("hitl_approve_message_update_failed", error=str(_upd_err))
+
             workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
             await _execute_approved_action(
                 resolved, workspace_id, channel, thread_ts, say, client, context,
             )
         else:
-            from lucy.pipeline.humanize import pick
-            await say(text=pick("hitl_expired"), thread_ts=thread_ts)
+            # Action expired — update in place if possible, fall back to reply
+            if channel and message_ts:
+                original_blocks = body.get("message", {}).get("blocks", [])
+                updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+                updated_blocks.append({
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": "⚠️  This action has already been handled or expired."},
+                    ],
+                })
+                try:
+                    await client.chat_update(
+                        channel=channel,
+                        ts=message_ts,
+                        blocks=updated_blocks,
+                        text="This action has expired.",
+                    )
+                except Exception as _upd_err:
+                    logger.warning("hitl_expired_message_update_failed", error=str(_upd_err))
+                    from lucy.pipeline.humanize import pick
+                    await say(text=pick("hitl_expired"), thread_ts=thread_ts)
+            else:
+                from lucy.pipeline.humanize import pick
+                await say(text=pick("hitl_expired"), thread_ts=thread_ts)
 
     @app.action(re.compile(r"lucy_action_cancel_.*"))
     async def handle_cancel_action(
@@ -341,19 +417,180 @@ def register_handlers(app: AsyncApp) -> None:
         body: dict[str, Any],
         say: AsyncSay,
         context: AsyncBoltContext,
+        client: Any,
     ) -> None:
         await ack()
         action = body.get("actions", [{}])[0]
         action_id = action.get("value", "")
         user_name = body.get("user", {}).get("name", "someone")
-        thread_ts = body.get("message", {}).get("thread_ts") or body.get("message", {}).get("ts")
+        channel = body.get("channel", {}).get("id")
+        message_ts = body.get("message", {}).get("ts")
+        thread_ts = body.get("message", {}).get("thread_ts") or message_ts
 
         logger.info("hitl_cancelled", action_id=action_id, user=user_name)
 
         from lucy.slack.hitl import resolve_pending_action
         await resolve_pending_action(action_id, approved=False)
-        from lucy.pipeline.humanize import pick
-        await say(text=pick("hitl_cancelled", user=user_name), thread_ts=thread_ts)
+
+        # Update the approval message in place: remove buttons, show rejection status.
+        if channel and message_ts:
+            original_blocks = body.get("message", {}).get("blocks", [])
+            updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
+            updated_blocks.append({
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"✕  Rejected by *{user_name}*."},
+                ],
+            })
+            try:
+                await client.chat_update(
+                    channel=channel,
+                    ts=message_ts,
+                    blocks=updated_blocks,
+                    text="Action rejected.",
+                )
+            except Exception as _upd_err:
+                logger.warning("hitl_cancel_message_update_failed", error=str(_upd_err))
+                from lucy.pipeline.humanize import pick
+                await say(text=pick("hitl_cancelled", user=user_name), thread_ts=thread_ts)
+        else:
+            from lucy.pipeline.humanize import pick
+            await say(text=pick("hitl_cancelled", user=user_name), thread_ts=thread_ts)
+
+    # ═══ PROACTIVE EVENT CAPTURE ════════════════════════════════════════
+
+    @app.event("reaction_added")
+    async def handle_reaction_added(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Log reactions to the proactive event queue for heartbeat awareness.
+
+        We capture: reactions on Lucy's own messages (user engagement signal)
+        and high-energy emojis (tada, rocket, fire = celebration/win).
+        This avoids triggering expensive agent runs per reaction.
+        """
+        workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
+        if not workspace_id:
+            return
+
+        emoji = event.get("reaction", "")
+        user = event.get("user", "")
+        item = event.get("item", {})
+        channel = item.get("channel", "")
+        message_ts = item.get("ts", "")
+        item_user = event.get("item_user", "")  # who owns the message being reacted to
+
+        # Only log celebration/high-signal emojis OR reactions to Lucy's messages
+        celebration_emojis = {
+            "tada", "rocket", "fire", "100", "raised_hands",
+            "clap", "muscle", "star", "sparkles", "trophy",
+            "medal", "first_place_medal", "party_popper",
+        }
+        is_celebration = emoji in celebration_emojis
+
+        # We don't track Lucy's bot user ID centrally -- skip the "on Lucy's message"
+        # check here. The heartbeat can determine this from context if needed.
+        is_on_lucy_message = False
+
+        if not is_celebration and not is_on_lucy_message:
+            return
+
+        try:
+            from lucy.workspace.filesystem import get_workspace
+            from lucy.workspace.proactive_events import append_proactive_event
+            ws = get_workspace(workspace_id)
+            await append_proactive_event(ws, "reaction_added", {
+                "emoji": emoji,
+                "user": user,
+                "channel": channel,
+                "message_ts": message_ts,
+                "is_celebration": is_celebration,
+                "on_lucy_message": is_on_lucy_message,
+            })
+        except Exception as e:
+            logger.debug("proactive_event_log_failed", event_type="reaction_added", error=str(e))
+
+    @app.event("member_joined_channel")
+    async def handle_member_joined_channel(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Log new channel members for heartbeat awareness.
+
+        The heartbeat can use this to introduce Lucy to the new member
+        or welcome them to the channel.
+        """
+        workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
+        if not workspace_id:
+            return
+
+        user = event.get("user", "")
+        channel = event.get("channel", "")
+        inviter = event.get("inviter", "")
+
+        logger.debug(
+            "member_joined_channel",
+            workspace_id=workspace_id,
+            user=user,
+            channel=channel,
+        )
+
+        try:
+            from lucy.workspace.filesystem import get_workspace
+            from lucy.workspace.proactive_events import append_proactive_event
+            ws = get_workspace(workspace_id)
+            await append_proactive_event(ws, "member_joined", {
+                "user": user,
+                "channel": channel,
+                "inviter": inviter,
+            })
+        except Exception as e:
+            logger.debug("proactive_event_log_failed", event_type="member_joined", error=str(e))
+
+    @app.event("channel_created")
+    async def handle_channel_created(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Log new channels for heartbeat awareness.
+
+        The heartbeat can use this to introduce Lucy or monitor the new channel.
+        """
+        workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
+        if not workspace_id:
+            return
+
+        channel_info = event.get("channel", {})
+        channel_id = channel_info.get("id", "")
+        channel_name = channel_info.get("name", "")
+        creator = channel_info.get("creator", "")
+
+        logger.debug(
+            "channel_created",
+            workspace_id=workspace_id,
+            channel=channel_name,
+        )
+
+        try:
+            from lucy.workspace.filesystem import get_workspace
+            from lucy.workspace.proactive_events import append_proactive_event
+            ws = get_workspace(workspace_id)
+            await append_proactive_event(ws, "channel_created", {
+                "channel_id": channel_id,
+                "channel": channel_name,
+                "creator": creator,
+            })
+        except Exception as e:
+            logger.debug("proactive_event_log_failed", event_type="channel_created", error=str(e))
+
+    @app.event("app_home_opened")
+    async def handle_app_home_opened(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Acknowledge app home opens (required to avoid Slack warnings)."""
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -688,6 +925,12 @@ async def _handle_message(
             split_response,
         )
 
+        # The HITL approval blocks were already posted to Slack directly.
+        # Returning this sentinel means "I already responded via blocks" —
+        # don't post any additional message that would clutter the thread.
+        if response_text == "__hitl_pending__":
+            return
+
         response_text = response_text or ""
         run_meta = getattr(agent, "_last_run_metadata", {})
         skip_tone = run_meta.get("should_skip_tone_validation", False)
@@ -887,8 +1130,26 @@ def _log_task_exception(task: asyncio.Task) -> None:  # type: ignore[type-arg]
 
 
 def _clean_mention(text: str) -> str:
-    """Remove @Lucy mention from text."""
-    return re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+    """Remove @Lucy mention and decode Slack formatting in message text.
+
+    Converts Slack's mrkdwn encoding to plain text so regex-based
+    tools (memory extraction, intent detection) work correctly:
+      <mailto:a@b.com|a@b.com>  →  a@b.com
+      <https://example.com|label>  →  label
+      <#C123|channel-name>  →  #channel-name
+      <@U123>  →  (removed)
+    """
+    # Strip @Lucy mention
+    text = re.sub(r"<@[A-Z0-9]+>", "", text)
+    # Decode mailto: links — keep the email address part
+    text = re.sub(r"<mailto:([^|>]+)\|[^>]*>", r"\1", text)
+    text = re.sub(r"<mailto:([^>]+)>", r"\1", text)
+    # Decode hyperlinks — prefer the display label when present
+    text = re.sub(r"<https?://[^|>]+\|([^>]+)>", r"\1", text)
+    text = re.sub(r"<https?://([^>]+)>", r"https://\1", text)
+    # Decode channel references
+    text = re.sub(r"<#[A-Z0-9]+\|([^>]+)>", r"#\1", text)
+    return text.strip()
 
 
 async def _register_channel_background(
@@ -1008,6 +1269,7 @@ async def _execute_approved_action(
 ) -> None:
     """Execute a human-approved action through the agent."""
     tool_name = action_data.get("tool_name", "unknown")
+    parameters = action_data.get("parameters", {})
     try:
         from lucy.core.agent import AgentContext, get_agent
 
@@ -1016,12 +1278,26 @@ async def _execute_approved_action(
             workspace_id=workspace_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
+            # Only pre-approve the specific tool the user clicked Approve on.
+            # Any additional WRITE/DESTRUCTIVE follow-up tool calls remain gated.
+            approved_tool_name=tool_name,
         )
+        # Serialize parameters as JSON (not Python repr) so the agent receives
+        # a deterministic, safely-parseable format regardless of value complexity.
+        import json as _json
+        params_json = _json.dumps(parameters, ensure_ascii=False, indent=2)
         instruction = (
-            f"The user has approved the following action. Execute it now:\n"
+            f"The user has approved the following action. Execute it immediately "
+            f"using the tool `{tool_name}` with these exact parameters — "
+            f"do NOT ask for confirmation, it has already been approved:\n"
             f"{action_data.get('description', '')}\n"
             f"Tool: {tool_name}\n"
-            f"Parameters: {action_data.get('parameters', {})}"
+            f"Parameters (JSON):\n```json\n{params_json}\n```\n\n"
+            f"IMPORTANT: If the tool fails, follow the `next_step` in the tool "
+            f"result exactly. Do NOT try alternative integration methods, do NOT "
+            f"suggest API keys or custom wrappers unless the tool result explicitly "
+            f"says to do so. Report the failure clearly and follow the instructions "
+            f"in `next_step`."
         )
         response = await asyncio.wait_for(
             agent.run(message=instruction, ctx=ctx, slack_client=client),

@@ -472,3 +472,12 @@ These crons are registered at startup, not stored in workspaces:
 | Evaluation loop timing | Startup `heartbeat_loop` cron schedule |
 | Delivery formatting | `_deliver_to_slack()`, output pipeline, Block Kit |
 | `LEARNINGS.md` format | `_build_cron_instruction()` (reads it) |
+
+---
+
+## See Also
+
+**[PROACTIVENESS_ENGINE.md](PROACTIVENESS_ENGINE.md)** — Full deep-dive into how
+the heartbeat's proactive intelligence loop works: local Slack reader, event
+queue, emoji reaction tools, decision framework, workflow discovery, and
+daily self-audit coordination.

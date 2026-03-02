@@ -154,9 +154,19 @@ _HYPOTHETICAL_SIGNALS = re.compile(
 # ── Structured fact extractors ────────────────────────────────────────────
 # Patterns to extract concrete facts from messages for richer categorization
 _FACT_EXTRACTORS: list[tuple[re.Pattern[str], str, str]] = [
-    # Only match explicit "my name is X" — NOT "I'm based in X" to avoid false positives
-    (re.compile(r"(?:my name is|i am called|i go by|call me)\s+([A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)?)", re.IGNORECASE),
-     "user_preferences", "User name: {0}"),
+    # Match name-declaration variants: "my name is", "my preferred name is", "call me", etc.
+    # Captures the first 1-2 word(s) after the keyword phrase. Post-processed below
+    # (see _apply_fact_extractors) to require the first token starts with an uppercase
+    # letter, preventing false positives like "my name is unknown" or "call me anything".
+    (re.compile(
+        r"(?:my (?:preferred |full |first |display )?name is"
+        r"|i(?:'m| am) called"
+        r"|i go by"
+        r"|call me"
+        r"|prefer(?:red)? (?:to be called|the name|name))"
+        r"\s+(\w+(?: \w+)?)",
+        re.IGNORECASE,
+    ), "user_preferences", "User name: {0}"),
     (re.compile(r"(?:my role is|i'm the|i am the|i work as(?: a| an)?)\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
      "facts", "User's role: {0}"),
     (re.compile(r"(?:we use|our (?:stack|tech|tools?) (?:is|are|includes?))\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
@@ -283,6 +293,13 @@ def extract_facts_from_message(message: str) -> list[tuple[str, str]]:
         if match:
             groups = match.groups()
             if groups:
+                # For name extractors: require the first captured word to start
+                # with an uppercase letter so "my name is unknown" or "call me
+                # anything" are rejected (generic/non-name phrases).
+                if template.startswith("User name:"):
+                    first_word = groups[0].split()[0] if groups[0] else ""
+                    if not first_word or not first_word[0].isupper():
+                        continue
                 fact_text = template.format(*groups).strip()
                 if fact_text.lower() not in seen:
                     seen.add(fact_text.lower())
