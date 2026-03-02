@@ -124,7 +124,7 @@ class TestSystemPromptAudit:
     """Test that prompt updates are present and well-formed."""
 
     def _read_prompt(self, filename: str) -> str:
-        here = Path(__file__).parent.parent / "assets" / filename
+        here = Path(__file__).parent.parent / "prompts" / filename
         return here.read_text(encoding="utf-8")
 
     # --- Test F: investigation discipline enforcement ---
@@ -205,15 +205,18 @@ class TestFileOutputTools:
 
     # --- Test M: tool definitions for file tools ---
     def test_m_file_tool_definitions(self):
-        """get_file_tool_definitions returns valid schemas."""
+        """get_file_tool_definitions returns valid schemas for all file tools."""
         from lucy.tools.file_generator import get_file_tool_definitions
 
         tools = get_file_tool_definitions()
-        assert len(tools) == 3
         names = {t["function"]["name"] for t in tools}
+        # Core generation tools (original 3)
         assert "lucy_generate_pdf" in names
         assert "lucy_generate_excel" in names
         assert "lucy_generate_csv" in names
+        # Extended workspace tools added later
+        assert "lucy_write_file" in names
+        assert "lucy_edit_file" in names
 
     # --- Test N: execute_file_tool dispatches correctly ---
     @pytest.mark.asyncio

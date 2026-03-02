@@ -2736,30 +2736,10 @@ class LucyAgent:
         if tool_count == 0:
             return ""
 
-        if has_errors:
-            task_desc = ""
-            if last_tool_name:
-                if last_tool_name in LucyAgent._TOOL_HUMAN_NAMES:
-                    task_desc = LucyAgent._TOOL_HUMAN_NAMES[last_tool_name]
-                elif last_tool_name.startswith("lucy_custom_"):
-                    slug = last_tool_name.removeprefix("lucy_custom_").split("_")[0]
-                    task_desc = f"pulling data from {slug.title()}"
-
-            if task_desc and error_hint:
-                return (
-                    f"I was {task_desc} but hit {error_hint}. "
-                    "Let me try a different approach."
-                )
-            if task_desc:
-                return (
-                    f"I ran into an issue while {task_desc}. "
-                    "Let me try a different approach."
-                )
-            return (
-                "I ran into a hiccup while processing your request. "
-                "Let me try a different approach."
-            )
-
+        # Check for successful tool results first — even if there were some
+        # errors, partial successes should be surfaced to the user rather than
+        # presenting a generic error message. The hybrid case (some tools
+        # succeeded, some errored) should show what was gathered.
         has_tool_results = any(
             msg.get("role") == "tool"
             and msg.get("content", "")
@@ -2790,10 +2770,35 @@ class LucyAgent:
                 return ""
             summary = "; ".join(tool_data[:3])
             return (
-                f"Here's what I found so far: {summary}\n\n"
+                f"Here's what I gathered so far: {summary}\n\n"
                 "I'm still piecing together the full picture. "
                 "Let me know if this helps or if you need me "
                 "to dig deeper."
+            )
+
+        # No successful tool results — all tools errored
+        if has_errors:
+            task_desc = ""
+            if last_tool_name:
+                if last_tool_name in LucyAgent._TOOL_HUMAN_NAMES:
+                    task_desc = LucyAgent._TOOL_HUMAN_NAMES[last_tool_name]
+                elif last_tool_name.startswith("lucy_custom_"):
+                    slug = last_tool_name.removeprefix("lucy_custom_").split("_")[0]
+                    task_desc = f"pulling data from {slug.title()}"
+
+            if task_desc and error_hint:
+                return (
+                    f"I was {task_desc} but hit {error_hint}. "
+                    "Let me try a different approach."
+                )
+            if task_desc:
+                return (
+                    f"I ran into an issue while {task_desc}. "
+                    "Let me try a different approach."
+                )
+            return (
+                "I ran into a hiccup while processing your request. "
+                "Let me try a different approach."
             )
         return ""
 

@@ -157,8 +157,13 @@ _FALLBACKS: dict[str, list[str]] = {
         "I'll be ready again in a moment."
     ],
     "error_connection": [
-        "Having trouble reaching a service I need. "
-        "Retrying now."
+        "Having trouble reaching a service I need. Retrying now.",
+        "Connection issue — trying a different approach.",
+    ],
+    "error_timeout": [
+        "That's taking longer than expected. Switching to a different approach.",
+        "Timed out on that one. Let me try a different angle.",
+        "It's taking longer than usual — retrying with a lighter approach.",
     ],
     "error_generic": [
         "Trying a different approach.",

@@ -140,8 +140,21 @@ def _build_hitl_narrative(
 
     Outputs first-person language that describes exactly what Lucy is
     about to do, so the user can make an informed approval decision.
+    DESTRUCTIVE actions always include a ⚠️ warning prefix so severity is
+    visible in both Block Kit and plain-text rendering.
     """
     is_destructive = action_type == ActionType.DESTRUCTIVE
+    body = _build_hitl_narrative_inner(tool_name, parameters, is_destructive)
+    if is_destructive:
+        return f"⚠️  *Destructive action — cannot be undone*\n\n{body}"
+    return body
+
+
+def _build_hitl_narrative_inner(
+    tool_name: str,
+    parameters: dict[str, Any],
+    is_destructive: bool,
+) -> str:
 
     # ── MCP connection ────────────────────────────────────────────────
     if tool_name in ("lucy_connect_mcp", "lucy_custom_connect_mcp"):
@@ -181,7 +194,7 @@ def _build_hitl_narrative(
         desc = f"*{title}*" if title else "a new event"
         if when:
             desc += f" at {when}"
-        return f"I'll add {desc} to your calendar."
+        return f"I need your confirmation to add {desc} to your calendar."
 
     # ── Cron / heartbeat creation ─────────────────────────────────────
     if "create_cron" in tool_name.lower():
@@ -199,6 +212,7 @@ def _build_hitl_narrative(
         thing = (
             parameters.get("title")
             or parameters.get("name")
+            or parameters.get("user_id")
             or parameters.get("id")
             or "this item"
         )
@@ -211,10 +225,9 @@ def _build_hitl_narrative(
     stripped = tool_name.removeprefix("lucy_custom_").removeprefix("lucy_")
     readable = _humanize_tool_name(stripped)
     param_summary = _summarize_params(stripped, parameters)
-    prefix = "⚠️ This is irreversible — " if is_destructive else ""
     if param_summary:
-        return f"{prefix}I'd like to *{readable}*:\n{param_summary}"
-    return f"{prefix}I'd like to *{readable}*. Approve to proceed."
+        return f"I'd like to *{readable}*:\n{param_summary}"
+    return f"I'd like to *{readable}*. Approve to proceed."
 
 
 def create_gated_result(
