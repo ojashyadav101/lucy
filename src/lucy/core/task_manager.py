@@ -174,7 +174,7 @@ class TaskManager:
                 f"background tasks running. Max is {MAX_BACKGROUND_TASKS}."
             )
 
-        task_id = f"task_{uuid.uuid4().hex[:12]}"
+        task_id = f"task_{uuid.uuid4().hex}"
         task = BackgroundTask(
             task_id=task_id,
             workspace_id=workspace_id,
@@ -330,8 +330,14 @@ class TaskManager:
     def get_active_for_thread(
         self,
         thread_ts: str | None,
+        workspace_id: str = "",
     ) -> BackgroundTask | None:
-        """Return the active background task running in a given thread."""
+        """Return the active background task running in a given thread.
+
+        workspace_id must be supplied to prevent cross-workspace matches —
+        Slack thread_ts values are epoch-based floats and are globally unique
+        in practice, but the workspace_id guard provides defense-in-depth.
+        """
         if not thread_ts:
             return None
         for t in self._tasks.values():
@@ -339,6 +345,7 @@ class TaskManager:
                 t.thread_ts == thread_ts
                 and t.state
                 in (TaskState.PENDING, TaskState.ACKNOWLEDGED, TaskState.WORKING)
+                and (not workspace_id or t.workspace_id == workspace_id)
             ):
                 return t
         return None

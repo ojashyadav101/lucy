@@ -210,6 +210,7 @@ def register_handlers(app: AsyncApp) -> None:
             task_mgr = get_task_manager()
             active = task_mgr.get_active_for_thread(
                 event.get("thread_ts"),
+                workspace_id=context.get("workspace_id", ""),
             )
             if active:
                 from lucy.pipeline.edge_cases import is_task_cancellation

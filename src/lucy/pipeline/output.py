@@ -143,15 +143,36 @@ def _sanitize(text: str) -> str:
 # LAYER 2: MARKDOWN -> SLACK MRKDWN CONVERTER
 # ═══════════════════════════════════════════════════════════════════════
 
+def _stash_code_blocks(text: str) -> tuple[str, list[str]]:
+    """Extract all code blocks from text and replace with NUL-delimited tokens.
+
+    Returns (tokenized_text, stash) where stash[i] is the original code block.
+    Extracted before _sanitize so that code examples (which may contain
+    COMPOSIO_ tool names, env vars, etc.) are not mangled by redaction patterns.
+    """
+    stash: list[str] = []
+
+    def _stash(m: re.Match[str]) -> str:
+        stash.append(m.group(0))
+        return f"\x00CODEBLOCK{len(stash) - 1}\x00"
+
+    text = re.sub(r"```.*?```", _stash, text, flags=re.DOTALL)
+    text = re.sub(r"`[^`]+`", _stash, text)
+    return text, stash
+
+
+def _unstash_code_blocks(text: str, stash: list[str]) -> str:
+    """Restore code blocks from the stash produced by _stash_code_blocks."""
+    for i, block in enumerate(stash):
+        text = text.replace(f"\x00CODEBLOCK{i}\x00", block)
+    return text
+
+
 def _convert_markdown_to_slack(text: str) -> str:
-    code_blocks: list[str] = []
-
-    def _stash_code(m: re.Match[str]) -> str:
-        code_blocks.append(m.group(0))
-        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
-
-    text = re.sub(r"```.*?```", _stash_code, text, flags=re.DOTALL)
-    text = re.sub(r"`[^`]+`", _stash_code, text)
+    # Code blocks were already stashed in process_output before _sanitize.
+    # Re-stash any that remain (e.g. blocks added after sanitize, or edge cases
+    # where the earlier stash didn't cover an inline tick).
+    text, code_blocks = _stash_code_blocks(text)
 
     text = _convert_tables_to_lists(text)
     # Convert markdown links FIRST (before bold conversion touches them)
@@ -172,8 +193,7 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = re.sub(r"\*(https?://[^\s*|>]+)\*", r"\1", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
 
-    for i, block in enumerate(code_blocks):
-        text = text.replace(f"\x00CODEBLOCK{i}\x00", block)
+    text = _unstash_code_blocks(text, code_blocks)
     return text
 
 
@@ -709,7 +729,13 @@ async def process_output(
     if not text.strip():
         return "I've completed the task."
 
+    # Stash code blocks before _sanitize so their contents (tool names, env vars,
+    # paths, etc.) are not mangled by redaction patterns. Code examples shown to
+    # the user should be preserved verbatim.
+    text, _code_stash = _stash_code_blocks(text)
     text = _sanitize(text)
+    text = _unstash_code_blocks(text, _code_stash)
+
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     if not skip_tone_validation:
@@ -732,7 +758,10 @@ def process_output_sync(text: str | None) -> str:
     if not text.strip():
         return "I've completed the task."
 
+    text, _code_stash = _stash_code_blocks(text)
     text = _sanitize(text)
+    text = _unstash_code_blocks(text, _code_stash)
+
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
     text = _validate_tone(text)

@@ -3608,6 +3608,7 @@ class LucyAgent:
                     slack_client=self._current_slack_client,
                     channel_id=self._current_channel_id,
                     thread_ts=self._current_thread_ts,
+                    workspace_id=ctx.workspace_id,
                 )
 
             if tool_name == "lucy_resolve_custom_integration":

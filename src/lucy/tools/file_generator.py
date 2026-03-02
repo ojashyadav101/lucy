@@ -512,13 +512,28 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
     ]
 
 
-def _resolve_mangled_path(raw_path: str, ws_root: str) -> Path | None:
+def _is_within_workspace_root(path: Path, ws_root: str) -> bool:
+    """Return True iff resolved path is strictly inside ws_root.
+
+    Using Path.is_relative_to() rather than startswith() to prevent the
+    classic '/srv/workspaces-evil' bypass where a directory with a shared
+    prefix passes a naive string check.
+    """
+    try:
+        return path.resolve().is_relative_to(Path(ws_root).resolve())
+    except ValueError:
+        return False
+
+
+def _resolve_mangled_path(raw_path: str, ws_root: str, workspace_id: str) -> Path | None:
     """Recover a valid workspace path when the LLM mangles it.
 
     Common LLM mistakes:
       - /home/user/src/App.tsx
       - ...worktrees/lucy/rdj/[workspace]/src/App.tsx
       - ...worktrees/lucy/rdj/workspace/src/App.tsx
+
+    Scoped to the current workspace_id only — never searches other workspaces.
     """
     import re
 
@@ -528,26 +543,23 @@ def _resolve_mangled_path(raw_path: str, ws_root: str) -> Path | None:
         return None
     relative = rel_match.group(1)
 
-    # workspace_root is already the top-level workspaces dir
-    spaces_root = Path(ws_root)
-    if not spaces_root.exists():
+    # Restrict search to the requesting workspace only to prevent cross-workspace
+    # data access (a mangled path from workspace B must never resolve to workspace A).
+    workspace_spaces = Path(ws_root) / workspace_id / "spaces"
+    if not workspace_spaces.exists():
         return None
 
     newest: Path | None = None
     newest_mtime = 0.0
-    for ws_dir in spaces_root.iterdir():
-        sp = ws_dir / "spaces"
-        if not sp.is_dir():
+    for proj in workspace_spaces.iterdir():
+        if not proj.is_dir():
             continue
-        for proj in sp.iterdir():
-            if not proj.is_dir():
-                continue
-            config = proj / "project.json"
-            if config.exists():
-                mtime = config.stat().st_mtime
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = proj
+        config = proj / "project.json"
+        if config.exists():
+            mtime = config.stat().st_mtime
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest = proj
 
     if newest is None:
         return None
@@ -560,6 +572,7 @@ async def execute_file_tool(
     slack_client: Any | None = None,
     channel_id: str | None = None,
     thread_ts: str | None = None,
+    workspace_id: str = "",
 ) -> dict[str, Any]:
     """Execute a file generation tool and optionally upload to Slack.
 
@@ -578,10 +591,9 @@ async def execute_file_tool(
 
             from lucy.config import settings
             ws_root = str(settings.workspace_root)
-            resolved = str(p.resolve())
 
-            if not resolved.startswith(ws_root):
-                p = _resolve_mangled_path(path_str, ws_root)
+            if not _is_within_workspace_root(p, ws_root):
+                p = _resolve_mangled_path(path_str, ws_root, workspace_id)
                 if p is None:
                     logger.warning(
                         "file_write_rejected",
@@ -625,8 +637,27 @@ async def execute_file_tool(
             new_string = parameters.get("new_string")
             if not path_str or old_string is None or new_string is None:
                 return {"error": "Missing required parameters: path, old_string, new_string"}
-            
+
             p = Path(path_str)
+
+            # Enforce the same workspace boundary as lucy_write_file.
+            from lucy.config import settings as _settings
+            _ws_root = str(_settings.workspace_root)
+            if not _is_within_workspace_root(p, _ws_root):
+                p = _resolve_mangled_path(path_str, _ws_root, workspace_id)
+                if p is None:
+                    logger.warning(
+                        "file_edit_rejected",
+                        original_path=path_str,
+                        reason="outside workspace, could not auto-correct",
+                    )
+                    return {
+                        "error": (
+                            f"Cannot edit {path_str} — path is outside the workspace. "
+                            f"Use a path returned by lucy_spaces_init."
+                        ),
+                    }
+
             if not p.exists():
                 return {"error": f"File not found: {path_str}"}
                 

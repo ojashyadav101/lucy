@@ -26,6 +26,12 @@ logger = structlog.get_logger()
 class CircuitBreaker:
     """Per-service circuit breaker with async context manager support."""
 
+    # Maximum time a probe can be in-flight before the flag is auto-cleared.
+    # Prevents permanent lockout if a task is cancelled while holding the probe
+    # slot (asyncio.CancelledError bypasses any except-only handler that doesn't
+    # explicitly catch BaseException).
+    _PROBE_MAX_AGE_SECONDS: float = 30.0
+
     __slots__ = (
         "name",
         "failure_threshold",
@@ -33,6 +39,7 @@ class CircuitBreaker:
         "_failure_count",
         "_last_failure_time",
         "_probe_in_flight",
+        "_probe_started_at",
     )
 
     def __init__(
@@ -47,6 +54,7 @@ class CircuitBreaker:
         self._failure_count: int = 0
         self._last_failure_time: float = 0.0
         self._probe_in_flight: bool = False
+        self._probe_started_at: float = 0.0
 
     @property
     def is_open(self) -> bool:
@@ -92,10 +100,25 @@ class CircuitBreaker:
         """
         if self._failure_count < self.failure_threshold:
             return True
-        if self.is_half_open and not self._probe_in_flight:
-            self._probe_in_flight = True
-            logger.info("circuit_breaker_half_open_probe", breaker=self.name)
-            return True
+        if self.is_half_open:
+            # Auto-clear a stale probe flag — guards against asyncio.CancelledError
+            # bypassing the context manager's __aexit__ in some call patterns.
+            if (
+                self._probe_in_flight
+                and (time.monotonic() - self._probe_started_at) > self._PROBE_MAX_AGE_SECONDS
+            ):
+                logger.warning(
+                    "circuit_breaker_probe_timeout_reset",
+                    breaker=self.name,
+                    age_s=round(time.monotonic() - self._probe_started_at, 1),
+                )
+                self._probe_in_flight = False
+
+            if not self._probe_in_flight:
+                self._probe_in_flight = True
+                self._probe_started_at = time.monotonic()
+                logger.info("circuit_breaker_half_open_probe", breaker=self.name)
+                return True
         return False
 
     async def __aenter__(self) -> Self:
