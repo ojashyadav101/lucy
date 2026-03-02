@@ -46,28 +46,6 @@ def _project_config_path(workspace_id: str, slug: str) -> Path:
     return _project_dir(workspace_id, slug) / "project.json"
 
 
-def _find_most_recent_project(workspace_id: str) -> str | None:
-    """Find the most recently created project in a workspace.
-
-    Only returns a match when exactly one project exists, to avoid
-    silently deploying the wrong project.
-    """
-    spaces_dir = _spaces_dir(workspace_id)
-    if not spaces_dir.exists():
-        return None
-
-    projects: list[str] = []
-    for child in spaces_dir.iterdir():
-        if not child.is_dir():
-            continue
-        config = child / "project.json"
-        if config.exists():
-            projects.append(child.name)
-
-    if len(projects) == 1:
-        return projects[0]
-    return None
-
 
 async def init_app_project(
     project_name: str,
@@ -99,6 +77,39 @@ async def init_app_project(
     project_secret = secrets.token_hex(32)
     vercel_project_name = f"lucy-{slug}-{short_hash}"
 
+    # Cleanup registry: we append cloud resources as they are created so that
+    # if any step fails, we roll back only what was actually provisioned.
+    # Each entry is a (label, async_cleanup_coroutine) pair.
+    _created_convex_project_id: str = ""
+    _created_vercel_project_id: str = ""
+
+    async def _rollback() -> None:
+        """Best-effort cleanup of cloud resources created so far."""
+        if _created_vercel_project_id:
+            try:
+                vercel = get_vercel_api()
+                await vercel.delete_project(_created_vercel_project_id)
+                logger.info("spaces_rollback_vercel_deleted", vercel_id=_created_vercel_project_id)
+            except Exception as rb_err:
+                logger.warning(
+                    "spaces_rollback_vercel_failed",
+                    vercel_id=_created_vercel_project_id,
+                    error=str(rb_err),
+                )
+        if _created_convex_project_id:
+            try:
+                convex = get_convex_api()
+                await convex.delete_project(_created_convex_project_id)
+                logger.info("spaces_rollback_convex_deleted", convex_id=_created_convex_project_id)
+            except Exception as rb_err:
+                logger.warning(
+                    "spaces_rollback_convex_failed",
+                    convex_id=_created_convex_project_id,
+                    error=str(rb_err),
+                )
+        if project_dir.exists():
+            shutil.rmtree(project_dir, ignore_errors=True)
+
     try:
         shutil.copytree(
             _TEMPLATE_DIR, project_dir,
@@ -111,10 +122,16 @@ async def init_app_project(
 
         convex = get_convex_api()
         convex_result = await convex.create_project(project_name)
-        convex_project_id = convex_result["projectId"]
+        _created_convex_project_id = convex_result["projectId"]
+        convex_project_id = _created_convex_project_id
 
+        # Use the first deployment that exists, or create a dev one.
+        # Sort by name to get deterministic results (avoids mixing dev/prod).
         deployments = await convex.list_deployments(convex_project_id)
-        if deployments:
+        dev_deps = [d for d in deployments if d.get("deploymentType") == "dev"]
+        if dev_deps:
+            dev_dep = dev_deps[0]
+        elif deployments:
             dev_dep = deployments[0]
         else:
             dev_dep = await convex.create_deployment(convex_project_id, "dev")
@@ -127,12 +144,15 @@ async def init_app_project(
 
         vercel = get_vercel_api()
         vercel_result = await vercel.create_project(vercel_project_name)
-        vercel_project_id = vercel_result["id"]
+        _created_vercel_project_id = vercel_result["id"]
+        vercel_project_id = _created_vercel_project_id
 
         bypass_secret = await vercel.generate_protection_bypass(vercel_project_id)
-
         await vercel.add_domain(vercel_project_id, subdomain)
 
+        # All cloud resources provisioned — now write local files.
+        # Writing config LAST ensures that if anything above fails, we can
+        # rollback the cloud resources and leave no orphaned project.json.
         env_local = project_dir / ".env.local"
         env_local.write_text(
             f"VITE_CONVEX_URL={deployment_url}\n"
@@ -172,8 +192,7 @@ async def init_app_project(
 
     except Exception as e:
         logger.error("spaces_init_failed", slug=slug, error=str(e))
-        if project_dir.exists():
-            shutil.rmtree(project_dir, ignore_errors=True)
+        await _rollback()
         return {"success": False, "error": str(e)}
 
 

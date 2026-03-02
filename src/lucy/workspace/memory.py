@@ -938,6 +938,9 @@ async def append_learning(
 # MEMORY CONSOLIDATION — Periodic promotion of session → knowledge
 # ═══════════════════════════════════════════════════════════════════════════
 
+_CONSOLIDATION_JOURNAL_PATH = "data/consolidation_journal.json"
+
+
 async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     """Promote high-value session facts to permanent knowledge files.
 
@@ -947,6 +950,10 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     - category "facts"           → company/SKILL.md  (hard facts about the business)
     - category "user_preferences" → kept in per-user file indefinitely (not promoted)
     - category "general"          → kept in shared pool (not promoted)
+
+    Crash safety: Uses a journal file to prevent the data-loss window between
+    removing facts from session memory and writing them to skill files. On
+    restart, any unfinished journal entries are replayed before new consolidation.
 
     Returns the number of facts promoted.
     """
@@ -958,6 +965,34 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     _PROMOTE_TO_TEAM: frozenset[str] = frozenset({"decisions", "project_context"})
     _PROMOTE_TO_COMPANY: frozenset[str] = frozenset({"facts"})
 
+    # ── Step 0: Replay any unfinished journal from a previous crash ──────────
+    try:
+        journal_raw = await _read_json_list(ws, _CONSOLIDATION_JOURNAL_PATH)
+        if journal_raw:
+            logger.info(
+                "consolidation_journal_replay",
+                workspace_id=ws.workspace_id,
+                count=len(journal_raw),
+            )
+            for entry in journal_raw:
+                fact = entry.get("fact", "")
+                dest = entry.get("dest", "")
+                if not fact:
+                    continue
+                if dest == "team":
+                    await append_to_team_knowledge(ws, fact)
+                elif dest == "company":
+                    await append_to_company_knowledge(ws, fact)
+            # Journal replayed — clear it
+            await ws.write_file(_CONSOLIDATION_JOURNAL_PATH, "[]")
+    except Exception as journal_err:
+        logger.warning(
+            "consolidation_journal_replay_failed",
+            workspace_id=ws.workspace_id,
+            error=str(journal_err),
+        )
+
+    # ── Step 1: Classify facts and build the journal ─────────────────────────
     async with lock:
         items = await _read_json_list(ws, SESSION_MEMORY_PATH)
         remaining: list[dict] = []
@@ -985,24 +1020,43 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
                 remaining.append(item)
 
         promoted = len(to_team) + len(to_company)
-        if promoted > 0:
-            await ws.write_file(
-                SESSION_MEMORY_PATH,
-                json.dumps(remaining[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
-            )
+        if promoted == 0:
+            return 0
 
+        # ── Step 2: Write journal BEFORE removing from session ───────────────
+        # If we crash after this point, the journal replay above will finish
+        # writing the facts to skill files on the next run.
+        journal_entries = (
+            [{"fact": f, "dest": "team"} for f in to_team]
+            + [{"fact": f, "dest": "company"} for f in to_company]
+        )
+        await ws.write_file(
+            _CONSOLIDATION_JOURNAL_PATH,
+            json.dumps(journal_entries, indent=2, ensure_ascii=False),
+        )
+
+        # ── Step 3: Remove promoted facts from session memory ────────────────
+        await ws.write_file(
+            SESSION_MEMORY_PATH,
+            json.dumps(remaining[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
+        )
+
+    # ── Step 4: Write facts to skill files ───────────────────────────────────
+    # Lock released — if a crash occurs here, journal replay handles recovery.
     for fact in to_team:
         await append_to_team_knowledge(ws, fact)
     for fact in to_company:
         await append_to_company_knowledge(ws, fact)
 
-    if promoted > 0:
-        logger.info(
-            "memory_consolidation_complete",
-            workspace_id=ws.workspace_id,
-            promoted_to_team=len(to_team),
-            promoted_to_company=len(to_company),
-            remaining=len(remaining),
-        )
+    # ── Step 5: Clear journal — promotion complete ────────────────────────────
+    await ws.write_file(_CONSOLIDATION_JOURNAL_PATH, "[]")
+
+    logger.info(
+        "memory_consolidation_complete",
+        workspace_id=ws.workspace_id,
+        promoted_to_team=len(to_team),
+        promoted_to_company=len(to_company),
+        remaining=len(remaining),
+    )
 
     return promoted
