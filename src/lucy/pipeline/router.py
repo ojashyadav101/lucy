@@ -31,7 +31,8 @@ MODEL_TIERS: dict[str, str] = {
 
 _CODE_KEYWORDS = re.compile(
     r"\b(code|deploy|script|function|debug|refactor|implement|"
-    r"write a? ?program|create a? ?app|lambda|api endpoint|pull request|"
+    r"write a? ?program|create a? ?app|build [\w ]* ?app|make [\w ]* ?app|"
+    r"lambda|api endpoint|pull request|"
     r"regex|algorithm|class|module|package|dockerfile|ci/cd|pipeline)\b",
     re.IGNORECASE,
 )
@@ -64,7 +65,7 @@ _SIMPLE_QUESTION = re.compile(
 )
 
 _ACTION_VERBS = re.compile(
-    r"\b(do|send|run|execute|delete|cancel|merge|deploy|schedule|create|update|remove)\b",
+    r"\b(do|send|run|execute|delete|cancel|merge|deploy|schedule|create|update|remove|build|push)\b",
     re.IGNORECASE,
 )
 
@@ -124,13 +125,13 @@ INTENT_MODULES: dict[str, list[str]] = {
     "lookup": [],
     "confirmation": [],
     "followup": [],
-    "tool_use": [],
+    "tool_use": ["philosophy", "skill_system"],
     "monitoring": [],
     "command": ["integrations"],
-    "code": ["coding"],
-    "reasoning": ["research"],
-    "document": ["data_tasks"],
-    "data": ["data_tasks"],
+    "code": ["coding", "skill_system"],
+    "reasoning": ["research", "philosophy"],
+    "document": ["data_tasks", "philosophy"],
+    "data": ["data_tasks", "philosophy"],
 }
 
 
@@ -189,7 +190,7 @@ def classify_and_route(
     # 3a. Data tasks — bulk data exports, "all users", complete reports
     if _DATA_TASK_KEYWORDS.search(text):
         if _DOCUMENT_KEYWORDS.search(text):
-            return _choice("data", "code")
+            return _choice("document", "document")
         return _choice("data", "code")
 
     # 3b. Document creation — check BEFORE research so "create a report

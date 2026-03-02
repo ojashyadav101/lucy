@@ -275,16 +275,36 @@ def get_degradation_message(error_type: str) -> str:
 
 
 def classify_error_for_degradation(error: Exception) -> str:
-    """Classify an exception into a degradation category."""
-    error_str = str(error).lower()
+    """Classify an exception into a degradation category.
 
-    if "429" in error_str or "rate limit" in error_str:
-        return "rate_limited"
-    if "timeout" in error_str or "timed out" in error_str:
-        return "tool_timeout"
-    if any(code in error_str for code in ("502", "503", "504", "unavailable")):
-        return "service_unavailable"
-    if "context" in error_str and ("length" in error_str or "token" in error_str):
-        return "context_overflow"
+    Delegates to the richer error_strategy module for classification,
+    then maps back to the pool-key strings used by get_degradation_message.
+    """
+    try:
+        from lucy.pipeline.error_strategy import ErrorCategory, classify_error
 
-    return "unknown"
+        classification = classify_error(error)
+        _CATEGORY_TO_POOL = {
+            ErrorCategory.RATE_LIMIT: "rate_limited",
+            ErrorCategory.TIMEOUT: "tool_timeout",
+            ErrorCategory.SERVICE_DOWN: "service_unavailable",
+            ErrorCategory.CONTEXT_OVERFLOW: "context_overflow",
+            ErrorCategory.AUTH_ERROR: "auth_error",
+        }
+        return _CATEGORY_TO_POOL.get(classification.category, "unknown")
+    except Exception:
+        error_str = str(error).lower()
+        if "429" in error_str or "rate limit" in error_str:
+            return "rate_limited"
+        if "timeout" in error_str or "timed out" in error_str:
+            return "tool_timeout"
+        if any(
+            code in error_str
+            for code in ("502", "503", "504", "unavailable")
+        ):
+            return "service_unavailable"
+        if "context" in error_str and (
+            "length" in error_str or "token" in error_str
+        ):
+            return "context_overflow"
+        return "unknown"

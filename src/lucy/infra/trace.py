@@ -138,8 +138,8 @@ class Trace:
             "model_used": self.model_used,
             "intent": self.intent,
             "tool_calls_made": self.tool_calls_made,
-            "user_message": self.user_message[:500],
-            "response_text": self.response_text[:500],
+            "user_message": self.user_message[:1000],
+            "response_text": self.response_text[:1000],
             "usage": self.usage,
             "spans": [s.to_dict() for s in self.spans],
         }

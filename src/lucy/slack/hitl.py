@@ -44,7 +44,8 @@ def _persist_action(workspace_id: str, action_id: str, action: dict[str, Any]) -
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as e:
+                logger.warning("hitl_store_parse_failed", error=str(e))
                 data = {}
         # Store wall-clock timestamp for cross-process TTL
         storable = {**action, "wall_created_at": time.time()}
@@ -86,7 +87,8 @@ def _load_from_disk(workspace_id: str) -> dict[str, dict[str, Any]]:
                 v["created_at"] = time.monotonic() - elapsed
                 valid[k] = v
         return valid
-    except Exception:
+    except Exception as e:
+        logger.warning("hitl_load_from_disk_failed", error=str(e))
         return {}
 
 

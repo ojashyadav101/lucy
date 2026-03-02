@@ -356,6 +356,70 @@ async def append_to_team_knowledge(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# LEARNINGS — Workspace-level persistent improvement log
+# ═══════════════════════════════════════════════════════════════════════════
+
+LEARNINGS_PATH = "data/LEARNINGS.md"
+
+_CORRECTION_SIGNALS = re.compile(
+    r"\b(?:"
+    r"that(?:'s| is| was) (?:wrong|incorrect|not right|not accurate|off)|"
+    r"no,?\s+actually|not quite|you(?:'re| are) wrong|that's not|"
+    r"i said|i meant|what i said|i didn't say|actually it(?:'s| is)|"
+    r"the (?:right|correct) (?:answer|number|figure|info)|"
+    r"please (?:fix|correct|update)|wrong number|wrong data|incorrect data|"
+    r"you got it wrong|you made a mistake|you were wrong"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+async def append_learning(
+    ws: WorkspaceFS,
+    entry: str,
+    section: str = "Mistakes",
+) -> None:
+    """Append a timestamped learning entry to data/LEARNINGS.md.
+
+    Args:
+        ws: The workspace to write to.
+        entry: The learning to record (one concise line).
+        section: Which section to append to: "Corrections", "Mistakes",
+                 or "Preferences".
+    """
+    lock = _get_workspace_lock(ws.workspace_id)
+    async with lock:
+        content = await ws.read_file(LEARNINGS_PATH) or (
+            "# Lucy Learnings\n\n"
+            "## Corrections\n\n"
+            "## Mistakes\n\n"
+            "## Preferences\n\n"
+        )
+
+        entry = entry.strip()
+        if not entry or entry in content:
+            return
+
+        section_header = f"## {section}"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        line = f"- [{timestamp}] {entry}"
+
+        if section_header in content:
+            idx = content.index(section_header) + len(section_header)
+            content = content[:idx] + f"\n\n{line}" + content[idx:]
+        else:
+            content += f"\n\n{section_header}\n\n{line}\n"
+
+        await ws.write_file(LEARNINGS_PATH, content)
+        logger.info(
+            "learning_appended",
+            workspace_id=ws.workspace_id,
+            section=section,
+            entry=entry[:100],
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MEMORY CONSOLIDATION — Periodic promotion of session → knowledge
 # ═══════════════════════════════════════════════════════════════════════════
 

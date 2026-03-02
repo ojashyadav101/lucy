@@ -52,8 +52,8 @@ async def resolve_workspace_middleware(
                     team_info = await client.team_info()
                     team_name = team_info.get("team", {}).get("name", team_name)
                     domain = team_info.get("team", {}).get("domain")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("team_info_fetch_failed", error=str(e))
             
             try:
                 workspace = Workspace(
@@ -130,8 +130,8 @@ async def resolve_user_middleware(
                     )
                     email = profile.get("profile", {}).get("email")
                     avatar_url = profile.get("profile", {}).get("image_72")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("user_info_fetch_failed", error=str(e))
             
             try:
                 user = User(

@@ -199,6 +199,19 @@ async def _handle_connection_success(
     composio = get_composio_client()
     await composio.invalidate_cache(pending.workspace_id)
 
+    try:
+        from lucy.workspace.filesystem import get_workspace
+        from lucy.workspace.identity import ensure_identity
+
+        ws = get_workspace(pending.workspace_id)
+        await ensure_identity(ws, [pending.display_name])
+    except Exception as exc:
+        logger.debug(
+            "identity_probe_on_connect_failed",
+            toolkit=pending.toolkit_slug,
+            error=str(exc),
+        )
+
     others_pending = _get_sibling_watches(pending)
 
     if others_pending:

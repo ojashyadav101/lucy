@@ -69,15 +69,21 @@ class TaskPlan:
     who: str = ""
     risks: str = ""
     format_hint: str = ""
+    end_goal: str = ""
+    assumptions: str = ""
 
     def to_prompt_text(self) -> str:
         lines = [f"Goal: {self.goal}"]
+        if self.end_goal:
+            lines.append(f"End goal (what the user is ultimately trying to achieve): {self.end_goal}")
         if self.who:
             lines.append(f"Who is asking: {self.who}")
         if self.ideal_outcome:
             lines.append(f"AMAZING outcome: {self.ideal_outcome}")
         if self.underwhelming:
             lines.append(f"AVOID (underwhelming): {self.underwhelming}")
+        if self.assumptions:
+            lines.append(f"ASSUMPTIONS to verify: {self.assumptions}")
         for s in self.steps:
             tools_hint = f" (using: {', '.join(s.expected_tools)})" if s.expected_tools else ""
             lines.append(f"  {s.number}. {s.description}{tools_hint}")
@@ -169,19 +175,20 @@ async def create_plan(
         f"TOOLS: {tools_str}"
         f"{context_block}\n"
         "Think through this task. One line per field. Be terse.\n\n"
-        "REAL_NEED: <what does the person actually need? Use context "
-        "about their role, company, and recent conversations to infer "
-        "the real need behind the literal request.>\n"
-        "WHO: <who is asking? technical/non-technical? what format do "
-        "they prefer? what's their communication style from context?>\n"
+        "REAL_NEED: <what does the person actually need?>\n"
+        "END_GOAL: <what larger goal is this request part of? "
+        "How can your response help them beyond just answering the question?>\n"
+        "WHO: <who is asking? technical/non-technical? style?>\n"
         "AMAZING: <what response would make them say 'exactly what I needed'?>\n"
-        "UNDERWHELMING: <what response would make them think 'I could have Googled this'?>\n"
+        "UNDERWHELMING: <what response would make them think "
+        "'I could have Googled this'?>\n"
+        "ASSUMPTIONS: <what assumptions are you making about the tools/data? "
+        "what could you confuse or get wrong?>\n"
         "1. <action> [tool] (fallback: <alt if this fails>)\n"
         "...\n"
-        "RISKS: <1-2 biggest risks: pagination, missing creds, scope>\n"
+        "RISKS: <biggest risks: wrong data, missing context, scope confusion>\n"
         "SUCCESS: <specific deliverables>\n"
-        "FORMAT: <how to present the result to this person; inline text, "
-        "text + file, or text + multi-tab Excel>"
+        "FORMAT: <how to present the result>"
     )
 
     try:
@@ -193,23 +200,34 @@ async def create_plan(
                     "You are a task planner. Think step by step about what "
                     "the user really needs, not just what they literally said. "
                     "Output structured fields. Be terse, one line each.\n\n"
-                    "THREE-FRAME TEST (critical):\n"
-                    "- AMAZING: What response would make them say 'this is exactly what I needed'?\n"
-                    "- UNDERWHELMING: What would make them think 'I could have Googled this'? "
-                    "Avoid this at all costs.\n"
-                    "- Build toward AMAZING. If AMAZING includes insights they didn't ask for, "
-                    "month-over-month comparison, a well-organized file, or a specific next step, "
-                    "plan for those.\n\n"
+                    "THINKING QUALITY (most important):\n"
+                    "- What is the user's END GOAL? Not just this message, but "
+                    "what are they trying to accomplish? Use context about their "
+                    "role, company, and recent conversations to infer this.\n"
+                    "- For each tool you plan to use, ask: will this ACTUALLY "
+                    "give me what the user needs? What assumptions am I making? "
+                    "What could go wrong or be misleading about the results?\n"
+                    "- What would a senior analyst do differently than a junior "
+                    "one? The junior dumps raw results. The senior interprets, "
+                    "cross-checks, and delivers insight. Plan like the senior.\n"
+                    "- A wrong answer delivered fast is worse than a right "
+                    "answer delivered in two minutes. Plan for accuracy.\n\n"
+                    "THREE-FRAME TEST:\n"
+                    "- AMAZING: What response would make them say "
+                    "'this is exactly what I needed'?\n"
+                    "- UNDERWHELMING: What would make them think "
+                    "'I could have Googled this'? Avoid this at all costs.\n"
+                    "- Build toward AMAZING. If AMAZING includes insights "
+                    "they didn't ask for, a comparison they'd find useful, "
+                    "or a specific next step, plan for those.\n\n"
                     "WHO: Consider who is asking. Technical or non-technical? "
-                    "Brief or detailed preference? Match the response format to the person.\n\n"
-                    "FORMAT guidance rules:\n"
-                    "- Data requests: key metric first with comparison, then supporting detail. "
-                    "If data is large, multi-tab Excel + concise Slack message with top insights. "
-                    "File must contain MORE than the message.\n"
-                    "- 'Detailed'/'all'/'comprehensive' = EVERYTHING, not a sample. "
-                    "Plan for pagination.\n"
+                    "Brief or detailed preference? Match the format.\n\n"
+                    "FORMAT:\n"
+                    "- Data requests: key metric first, then supporting detail. "
+                    "Large data: multi-tab Excel + concise message with insights.\n"
+                    "- 'Detailed'/'all'/'comprehensive' = EVERYTHING, not a sample.\n"
                     "- Simple requests: short answer, no file.\n"
-                    "- Always specify: inline text, text + file, or text + multi-tab Excel."
+                    "- Always specify: inline text, text + file, or text + Excel."
                 ),
                 max_tokens=LLMPresets.SUPERVISOR.max_tokens,
                 temperature=LLMPresets.SUPERVISOR.temperature,
@@ -234,6 +252,8 @@ def _parse_plan(text: str) -> TaskPlan | None:
     risks = ""
     success = ""
     format_hint = ""
+    end_goal = ""
+    assumptions = ""
     steps: list[PlanStep] = []
 
     for line in lines:
@@ -246,6 +266,9 @@ def _parse_plan(text: str) -> TaskPlan | None:
         if upper.startswith("REAL_NEED:"):
             goal = stripped[10:].strip()
             continue
+        if upper.startswith("END_GOAL:"):
+            end_goal = stripped[9:].strip()
+            continue
         if upper.startswith("IDEAL:"):
             ideal_outcome = stripped[6:].strip()
             continue
@@ -254,6 +277,9 @@ def _parse_plan(text: str) -> TaskPlan | None:
             continue
         if upper.startswith("UNDERWHELMING:"):
             underwhelming = stripped[14:].strip()
+            continue
+        if upper.startswith("ASSUMPTIONS:"):
+            assumptions = stripped[12:].strip()
             continue
         if upper.startswith("WHO:"):
             who = stripped[4:].strip()
@@ -301,6 +327,8 @@ def _parse_plan(text: str) -> TaskPlan | None:
         who=who,
         risks=risks,
         format_hint=format_hint,
+        end_goal=end_goal,
+        assumptions=assumptions,
     )
 
 

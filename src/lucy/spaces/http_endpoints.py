@@ -48,8 +48,8 @@ def _verify_project_secret(project_name: str, project_secret: str) -> bool:
             try:
                 data = json.loads(config_path.read_text())
                 return data.get("project_secret") == project_secret
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("spaces_secret_verify_failed", error=str(e))
     return False
 
 
@@ -146,7 +146,7 @@ async def _tool_ai_search(args: dict[str, Any]) -> dict[str, Any]:
                     },
                     {"role": "user", "content": query},
                 ],
-                "max_tokens": 1000,
+                "max_tokens": 4096,
             },
         )
         resp.raise_for_status()

@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     agent_tool_result_summary_threshold: int = 24_000
     agent_max_payload_chars: int = 120_000
     agent_absolute_max_seconds: int = 14_400
-    agent_silence_threshold_s: float = 480.0
+    agent_silence_threshold_s: float = 360.0
     agent_wallclock_timeout_s: float = 1200.0
 
     # ── Slack handler limits ──────────────────────────────────

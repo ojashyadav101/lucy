@@ -170,8 +170,8 @@ async def _start_email_listener(slack_client: object) -> object | None:
                 if name in ("talk-to-lucy", "lucy-my-ai", "lucy", "general"):
                     channel = ch.get("id")
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("email_channel_lookup_failed", error=str(e))
 
         await listener.start(
             slack_client=slack_client,
@@ -223,8 +223,8 @@ def main() -> None:
                     _os.kill(old_pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("stale_pid_cleanup_failed", error=str(e))
 
         for pf in [_pidfile, "/tmp/lucy_bot.pid"]:
             if _os.path.exists(pf):

@@ -219,8 +219,8 @@ class TaskManager:
                             thread_ts=thread_ts,
                             text=result,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("task_result_post_failed", error=str(e))
 
                 elapsed = round(task.completed_at - task.started_at, 1)
                 logger.info(
@@ -246,8 +246,8 @@ class TaskManager:
                                 "Let me know if you'd like me to continue."
                             ),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("task_timeout_post_failed", error=str(e))
                 logger.critical(
                     "background_task_safety_net",
                     task_id=task_id,
@@ -275,8 +275,8 @@ class TaskManager:
                             thread_ts=thread_ts,
                             text=pick("error_task_failed"),
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning("task_failure_post_failed", error=str(e))
                 logger.error(
                     "background_task_failed",
                     task_id=task_id,

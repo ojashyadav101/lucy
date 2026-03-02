@@ -408,13 +408,12 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": "lucy_generate_pdf",
                 "description": (
-                    "Generate a formatted PDF document. ONLY use this when the user "
-                    "EXPLICITLY asks for a PDF, report, or document — or when the "
-                    "output is genuinely multi-page (5+ sections with data). "
-                    "DO NOT use this for short answers, simple questions, lists, "
-                    "or anything that fits comfortably in a Slack message. "
-                    "When in doubt, respond in text — PDF is for heavy deliverables only. "
-                    "Provide HTML content for the body."
+                    "Generate a formatted PDF document. The file is "
+                    "AUTOMATICALLY uploaded to the current Slack channel. "
+                    "ONLY use when the user explicitly asks for a PDF, "
+                    "report, or document — or when the output is genuinely "
+                    "multi-page (5+ sections with data). When in doubt, "
+                    "respond in text. Provide HTML content for the body."
                 ),
                 "parameters": {
                     "type": "object",
@@ -441,9 +440,13 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": "lucy_generate_excel",
                 "description": (
-                    "Generate an Excel spreadsheet. ONLY use when the user "
-                    "explicitly asks for a spreadsheet, Excel file, or .xlsx "
-                    "download. Do NOT use for general data display."
+                    "Generate a multi-tab Excel spreadsheet. The file is "
+                    "AUTOMATICALLY uploaded to the current Slack channel — "
+                    "you do not need to handle file delivery separately. "
+                    "Create multiple sheets: a Summary sheet with key metrics "
+                    "and breakdowns, plus raw data sheets organized by "
+                    "relevant dimensions (time, category, status, etc.). "
+                    "The file must contain MORE data than the Slack message."
                 ),
                 "parameters": {
                     "type": "object",
@@ -478,8 +481,9 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
             "function": {
                 "name": "lucy_generate_csv",
                 "description": (
-                    "Generate a CSV file from tabular data. Use for simple "
-                    "data exports that don't need Excel formatting."
+                    "Generate a CSV file from tabular data. The file is "
+                    "AUTOMATICALLY uploaded to the current Slack channel. "
+                    "Use for simple data exports that don't need Excel formatting."
                 ),
                 "parameters": {
                     "type": "object",

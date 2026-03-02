@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,29 @@ def _project_dir(workspace_id: str, slug: str) -> Path:
 
 def _project_config_path(workspace_id: str, slug: str) -> Path:
     return _project_dir(workspace_id, slug) / "project.json"
+
+
+def _find_most_recent_project(workspace_id: str) -> str | None:
+    """Find the most recently created project in a workspace.
+
+    Only returns a match when exactly one project exists, to avoid
+    silently deploying the wrong project.
+    """
+    spaces_dir = _spaces_dir(workspace_id)
+    if not spaces_dir.exists():
+        return None
+
+    projects: list[str] = []
+    for child in spaces_dir.iterdir():
+        if not child.is_dir():
+            continue
+        config = child / "project.json"
+        if config.exists():
+            projects.append(child.name)
+
+    if len(projects) == 1:
+        return projects[0]
+    return None
 
 
 async def init_app_project(
@@ -156,17 +180,29 @@ async def init_app_project(
 async def deploy_app(
     project_name: str,
     workspace_id: str,
-    environment: str = "preview",
+    environment: str = "production",
 ) -> dict[str, Any]:
     """Build, deploy, wait for readiness, and validate a Lucy Spaces project."""
     slug = _slugify(project_name)
     config_path = _project_config_path(workspace_id, slug)
 
     if not config_path.exists():
-        return {"success": False, "error": f"Project \'{slug}\' not found"}
+        return {"success": False, "error": f"Project '{slug}' not found. Use the exact slug returned by lucy_spaces_init."}
 
     config = SpaceProject.load(config_path)
     project_dir = _project_dir(workspace_id, slug)
+
+    app_tsx = project_dir / "src" / "App.tsx"
+    if app_tsx.exists():
+        app_content = app_tsx.read_text(encoding="utf-8")
+        if "LUCY_SPACES_PLACEHOLDER" in app_content:
+            return {
+                "success": False,
+                "error": (
+                    "App.tsx has not been modified from the template. "
+                    "You must write your app code to src/App.tsx before deploying."
+                ),
+            }
 
     try:
         build_result = await _build_project(project_dir)
@@ -236,15 +272,36 @@ async def _wait_for_deployment(
     """Poll Vercel until deployment reaches a terminal state."""
     import asyncio
 
-    for _ in range(max_wait // 3):
+    delay = 2.0
+    max_delay = 10.0
+    start_time = time.monotonic()
+    consecutive_errors = 0
+    last_error_msg = ""
+
+    while (time.monotonic() - start_time) < max_wait:
         try:
             dep = await vercel.get_deployment(deployment_id)
             state = dep.get("readyState", "UNKNOWN")
+            consecutive_errors = 0
             if state in ("READY", "ERROR", "CANCELED"):
                 return state
-        except Exception:
-            pass
-        await asyncio.sleep(3)
+        except Exception as exc:
+            err_msg = str(exc)
+            if err_msg == last_error_msg:
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 1
+                last_error_msg = err_msg
+            if consecutive_errors >= 3:
+                logger.error(
+                    "deployment_poll_repeated_error",
+                    deployment_id=deployment_id,
+                    error=err_msg,
+                    consecutive=consecutive_errors,
+                )
+                return f"POLL_ERROR: {err_msg}"
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, max_delay)
 
     return "TIMEOUT"
 
@@ -282,6 +339,7 @@ async def _build_project(project_dir: Path) -> dict[str, Any]:
     path_env = os.environ.get("PATH", "")
     env = {**os.environ, "PATH": f"{bun_path.parent}:{path_env}"}
 
+    build_step = "bun install"
     try:
         proc = await asyncio.create_subprocess_exec(
             bun, "install",
@@ -298,6 +356,7 @@ async def _build_project(project_dir: Path) -> dict[str, Any]:
 
         logger.info("bun_install_complete", project=str(project_dir.name))
 
+        build_step = "vite build"
         npx = str(bun_path.parent / "npx") if (bun_path.parent / "npx").exists() else "npx"
         proc2 = await asyncio.create_subprocess_exec(
             npx, "vite", "build",
@@ -316,7 +375,7 @@ async def _build_project(project_dir: Path) -> dict[str, Any]:
         return {"success": True}
 
     except asyncio.TimeoutError:
-        return {"success": False, "error": "Build timed out (120s)"}
+        return {"success": False, "error": f"Build timed out during '{build_step}'"}
 
 
 async def list_apps(workspace_id: str) -> dict[str, Any]:
@@ -338,7 +397,8 @@ async def list_apps(workspace_id: str) -> dict[str, Any]:
                     "created_at": config.created_at,
                     "last_deployed": config.last_deployed_at,
                 })
-            except Exception:
+            except Exception as e:
+                logger.warning("spaces_config_parse_failed", slug=entry.name, error=str(e))
                 apps.append({
                     "name": entry.name,
                     "slug": entry.name,
@@ -383,6 +443,7 @@ async def delete_app_project(
 
     config = SpaceProject.load(config_path)
     deleted: list[str] = []
+    warnings: list[str] = []
 
     try:
         convex = get_convex_api()
@@ -390,6 +451,7 @@ async def delete_app_project(
         deleted.append(f"Convex project {config.convex_project_id}")
     except Exception as e:
         logger.warning("convex_delete_failed", error=str(e))
+        warnings.append(f"Convex cleanup failed: {e}")
 
     try:
         vercel = get_vercel_api()
@@ -397,10 +459,14 @@ async def delete_app_project(
         deleted.append(f"Vercel project {config.vercel_project_id}")
     except Exception as e:
         logger.warning("vercel_delete_failed", error=str(e))
+        warnings.append(f"Vercel cleanup failed: {e}")
 
     project_dir = _project_dir(workspace_id, slug)
     if project_dir.exists():
         shutil.rmtree(project_dir)
         deleted.append(f"Local files at {project_dir}")
 
-    return {"success": True, "deleted": deleted}
+    result: dict[str, Any] = {"success": True, "deleted": deleted}
+    if warnings:
+        result["warnings"] = warnings
+    return result

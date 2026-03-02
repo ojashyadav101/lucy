@@ -166,13 +166,18 @@ async def execute_spaces_tool(
             )
             if result.get("success"):
                 app_tsx = f"{result['sandbox_path']}/src/App.tsx"
+                slug = result.get("slug", "")
                 result["app_tsx_path"] = app_tsx
+                result["deploy_project_name"] = slug
                 result["summary"] = (
-                    f"Project '{result['project_name']}' created. "
-                    f"IMPORTANT: Call lucy_write_file with path "
-                    f"EXACTLY set to: {app_tsx} "
-                    f"— copy this path verbatim, do NOT shorten or "
-                    f"modify it. Then call lucy_spaces_deploy."
+                    f"Project created (slug: '{slug}'). "
+                    f"STEP 1: Call lucy_write_file with path "
+                    f"EXACTLY: {app_tsx} "
+                    f"— copy this path verbatim. "
+                    f"STEP 2: Call lucy_spaces_deploy with "
+                    f"project_name EXACTLY: '{slug}' "
+                    f"— you MUST use this exact slug, not any "
+                    f"other variation of the name."
                 )
             return result
 
@@ -208,7 +213,7 @@ async def execute_spaces_tool(
             else:
                 lines = [f"You have {result['count']} app(s):"]
                 for app in result["apps"]:
-                    lines.append(f"- {app['name']}: {app['url']}")
+                    lines.append(f"- {app.get('name', 'unknown')}: {app.get('url', app.get('error', 'no URL'))}")
                 result["summary"] = "\n".join(lines)
             return result
 

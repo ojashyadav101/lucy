@@ -2,6 +2,7 @@
 
 from lucy.workspace.activity_log import get_recent_activity, log_activity
 from lucy.workspace.filesystem import WorkspaceFS, get_workspace
+from lucy.workspace.identity import ensure_identity, read_identity, write_identity
 from lucy.workspace.onboarding import ensure_workspace, onboard_workspace
 from lucy.workspace.skills import (
     SkillInfo,
@@ -29,6 +30,9 @@ __all__ = [
     "get_workspace",
     "ensure_workspace",
     "onboard_workspace",
+    "read_identity",
+    "write_identity",
+    "ensure_identity",
     "SkillInfo",
     "get_skill_descriptions_for_prompt",
     "list_skills",

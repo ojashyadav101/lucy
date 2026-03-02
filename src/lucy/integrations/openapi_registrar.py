@@ -123,8 +123,8 @@ async def register_openapi_spec(
                         toolkit_slug=registered_slug,
                         spec_url=spec_url,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("openapi_register_endpoint_failed", error=str(e))
 
             # Fallback: try POST /v1/apps with the spec as body
             try:
@@ -143,8 +143,8 @@ async def register_openapi_spec(
                         toolkit_slug=registered_slug,
                         spec_url=spec_url,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("openapi_register_v1_apps_failed", error=str(e))
 
             # Fallback: try the v2 endpoint
             try:
@@ -163,8 +163,8 @@ async def register_openapi_spec(
                         toolkit_slug=registered_slug,
                         spec_url=spec_url,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("openapi_register_v2_failed", error=str(e))
 
         logger.warning(
             "openapi_registration_all_endpoints_failed",

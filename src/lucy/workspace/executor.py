@@ -28,7 +28,7 @@ from lucy.workspace.filesystem import WorkspaceFS, get_workspace
 
 logger = structlog.get_logger()
 
-MAX_OUTPUT_CHARS = 50_000
+MAX_OUTPUT_CHARS = 200_000
 SUBPROCESS_TIMEOUT = 60
 
 
@@ -87,7 +87,7 @@ async def execute_bash(
         result.elapsed_ms = round((time.monotonic() - t0) * 1000)
         return result
 
-    result = await _execute_local_bash(command, timeout)
+    result = await _execute_local_bash(command, timeout, workspace_id=workspace_id)
     result.elapsed_ms = round((time.monotonic() - t0) * 1000)
     return result
 
@@ -115,7 +115,8 @@ async def execute_workspace_script(
             method="local",
         )
 
-    if not str(full_path).startswith(str(ws.root.resolve() / "scripts")):
+    scripts_dir = ws.root.resolve() / "scripts"
+    if not full_path.is_relative_to(scripts_dir):
         return ExecutionResult(
             success=False,
             output="",
@@ -183,7 +184,7 @@ async def _execute_via_composio(
         from lucy.integrations.composio_client import get_composio_client
 
         client = get_composio_client()
-        if not client._composio:
+        if not client._ensure_sdk():
             return None
 
         tool_name = (
@@ -280,13 +281,20 @@ async def _execute_local_python(
 async def _execute_local_bash(
     command: str,
     timeout: int = SUBPROCESS_TIMEOUT,
+    *,
+    workspace_id: str | None = None,
 ) -> ExecutionResult:
     """Execute a bash command via local subprocess."""
+    cwd: str | None = None
+    if workspace_id:
+        ws = get_workspace(workspace_id)
+        cwd = str(ws.root)
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
         )
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout

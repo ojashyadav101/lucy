@@ -666,7 +666,11 @@ async def _deai(text: str) -> str:
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
-async def process_output(text: str | None) -> str:
+async def process_output(
+    text: str | None,
+    *,
+    skip_tone_validation: bool = False,
+) -> str:
     """Run all output layers on a message before posting to Slack.
 
     Pipeline order:
@@ -679,6 +683,10 @@ async def process_output(text: str | None) -> str:
     Now async: the de-AI engine may invoke a fast LLM call for contextual
     rewrites when significant AI tells are detected. Falls back to instant
     regex if the LLM is unavailable or the text is clean.
+
+    When *skip_tone_validation* is True the tone-replacement layer (Layer 3)
+    is bypassed. This preserves the model's natural voice for responses that
+    already passed structured self-evaluation with high confidence.
     """
     if not text or not text.strip():
         return text or ""
@@ -691,7 +699,8 @@ async def process_output(text: str | None) -> str:
     text = _sanitize(text)
     text = _fix_broken_urls(text)
     text = _convert_markdown_to_slack(text)
-    text = _validate_tone(text)
+    if not skip_tone_validation:
+        text = _validate_tone(text)
     text = await _deai(text)
     return text.strip()
 

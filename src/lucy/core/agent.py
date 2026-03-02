@@ -155,6 +155,72 @@ def _compact_data(data: Any, depth: int = 0) -> Any:
     return data
 
 
+def _extract_structured_summary(
+    data: Any,
+    *,
+    min_items: int = 10,
+    sample_count: int = 5,
+) -> dict[str, Any] | None:
+    """Detect list-of-dicts in a tool result and compute aggregates.
+
+    Instead of truncating large API responses (which forces the LLM to
+    infer numbers from fragments), this computes exact counts, sums,
+    averages, and distributions in Python and returns them alongside a
+    small sample so the LLM can report accurate data.
+
+    Returns ``None`` when the data isn't a summarizable collection.
+    """
+    from collections import Counter
+
+    items: list[dict[str, Any]] | None = None
+    wrapper_keys: dict[str, Any] = {}
+
+    if isinstance(data, list) and len(data) > min_items:
+        items = data
+    elif isinstance(data, dict):
+        for key, val in data.items():
+            if isinstance(val, list) and len(val) > min_items and items is None:
+                items = val
+            else:
+                wrapper_keys[key] = val
+
+    if not items or not isinstance(items[0], dict):
+        return None
+
+    sample_keys = list(items[0].keys())
+    fields: dict[str, dict[str, Any]] = {}
+
+    for key in sample_keys:
+        values = [item[key] for item in items if item.get(key) is not None]
+        if not values:
+            continue
+
+        if all(isinstance(v, (int, float)) for v in values):
+            fields[key] = {
+                "type": "numeric",
+                "count": len(values),
+                "sum": sum(values),
+                "min": min(values),
+                "max": max(values),
+                "avg": round(sum(values) / len(values), 2),
+            }
+        elif all(isinstance(v, str) for v in values):
+            counts = Counter(values)
+            fields[key] = {
+                "type": "categorical",
+                "unique_count": len(counts),
+                "top_values": dict(counts.most_common(10)),
+            }
+
+    return {
+        "_summary": True,
+        "total_count": len(items),
+        "fields": fields,
+        "sample_items": items[:sample_count],
+        "wrapper": wrapper_keys,
+    }
+
+
 @dataclass
 class AgentContext:
     """Lightweight context for an agent run."""
@@ -179,12 +245,62 @@ def _check_budget(ctx: AgentContext) -> float:
     return remaining
 
 
+_REFLECTION_RE = re.compile(
+    r"<lucy_reflection>\s*(.*?)\s*</lucy_reflection>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _parse_reflection(
+    text: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Extract and strip the <lucy_reflection> block from the model's response.
+
+    Returns (clean_text, reflection_data). If no reflection block is found,
+    returns the original text with an empty reflection dict.
+    """
+    if not text:
+        return text or "", {}
+
+    match = _REFLECTION_RE.search(text)
+    if not match:
+        return text, {}
+
+    block = match.group(1)
+    clean = text[: match.start()] + text[match.end() :]
+    clean = clean.strip()
+
+    reflection: dict[str, Any] = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip().lower()
+        val = val.strip()
+        if key == "confidence":
+            try:
+                reflection["confidence"] = int(val)
+            except ValueError:
+                reflection["confidence"] = 5
+        elif key in ("thought", "weakness"):
+            reflection["weakness"] = val
+        elif key in (
+            "helpful", "value_first", "accurate", "complete",
+            "personalized", "insight_beyond_question",
+        ):
+            reflection[key] = val.lower().startswith("yes")
+
+    return clean, reflection
+
+
 class LucyAgent:
     """Lean agent: classify → read skills → prompt → LLM + meta-tools → respond."""
 
     def __init__(self, openclaw: OpenClawClient | None = None) -> None:
         self.openclaw = openclaw
         self._recent_tool_calls: list[tuple[str, dict, float]] = []
+        self._last_run_metadata: dict[str, Any] = {}
 
     async def _get_client(self) -> OpenClawClient:
         if self.openclaw is None:
@@ -206,12 +322,15 @@ class LucyAgent:
         ctx.budget_start_time = time.monotonic()
         ctx.budget_remaining_s = ABSOLUTE_MAX_SECONDS
         self._capped_tools = set()
+        self._last_run_metadata = {}
+        self._current_run_tool_count = 0
 
         self._current_slack_client = slack_client
         self._current_channel_id = ctx.channel_id
         self._current_thread_ts = ctx.thread_ts
         self._current_user_slack_id = ctx.user_slack_id
         self._uploaded_files: set[str] = set()
+        self._pending_uploads: list[str] = []
 
         trace = Trace.start()
         trace.user_message = message
@@ -261,7 +380,7 @@ class LucyAgent:
             ws = await ensure_workspace(ctx.workspace_id, slack_client)
 
         # 3. Fetch connected services + meta-tools in parallel
-        from lucy.pipeline.prompt import build_system_prompt
+        from lucy.pipeline.prompt import build_lightweight_prompt, build_system_prompt
 
         connected_services: list[str] = []
         tools: list[dict[str, Any]] = []
@@ -743,13 +862,28 @@ class LucyAgent:
         }
 
         # 4. Build system prompt (SOUL + skills + instructions + environment)
+        _LIGHTWEIGHT_INTENTS = {"chat", "lookup", "confirmation", "followup"}
         async with trace.span("build_prompt"):
-            system_prompt = await build_system_prompt(
-                ws,
-                connected_services=connected_services,
-                user_message=message,
-                prompt_modules=route.prompt_modules,
-            )
+            if route.intent in _LIGHTWEIGHT_INTENTS and not route.prompt_modules:
+                system_prompt = await build_lightweight_prompt(
+                    ws,
+                    user_slack_id=ctx.user_slack_id,
+                    user_message=message,
+                )
+            else:
+                # Use compact SOUL on tool_use intents when many tools are
+                # registered — those prompts are already 85KB+, saving ~6KB.
+                use_compact = (
+                    route.intent == "tool_use"
+                    and len(self._tool_registry) > 15
+                )
+                system_prompt = await build_system_prompt(
+                    ws,
+                    connected_services=connected_services,
+                    user_message=message,
+                    prompt_modules=route.prompt_modules,
+                    compact=use_compact,
+                )
             utc_now = datetime.now(timezone.utc)
             time_block = (
                 f"\n\n## Current Time\nUTC: "
@@ -925,10 +1059,20 @@ class LucyAgent:
 
         # Company + team knowledge (truncated to keep costs low)
         try:
-            from lucy.workspace.skills import get_key_skill_content
+            from lucy.workspace.skills import (
+                get_key_skill_content,
+                get_skill_descriptions_for_prompt,
+            )
             knowledge = await get_key_skill_content(ws)
             if knowledge:
                 planner_context_parts.append(knowledge[:1000])
+
+            # Skill catalog — helps the planner know what specialized knowledge Lucy has
+            skill_descs = await get_skill_descriptions_for_prompt(ws)
+            if skill_descs:
+                planner_context_parts.append(
+                    f"### Available Skills\n{skill_descs[:500]}"
+                )
         except Exception as e:
             logger.warning("component_failed", component="planner_company_knowledge", error=str(e))
 
@@ -942,6 +1086,19 @@ class LucyAgent:
                 planner_context_parts.append(session_ctx[:1000])
         except Exception as e:
             logger.warning("component_failed", component="planner_session_memory", error=str(e))
+
+        # Workspace learnings — past mistakes and corrections (highest priority context)
+        try:
+            from lucy.workspace.memory import LEARNINGS_PATH
+            learnings = await ws.read_file(LEARNINGS_PATH)
+            if learnings and learnings.strip():
+                # Strip the preamble, keep sections only
+                trimmed = learnings.strip()[:600]
+                planner_context_parts.append(
+                    f"### What Lucy Has Learned (apply these)\n{trimmed}"
+                )
+        except Exception as e:
+            logger.warning("component_failed", component="planner_learnings", error=str(e))
 
         # Thread summary (condense earlier messages into a one-liner)
         if len(messages) > 2:
@@ -1008,23 +1165,40 @@ class LucyAgent:
                     "to continue from where I left off."
                 )
 
-        # 6b. Quality gate: catch service confusion and escalate if needed
+        # 6b. Parse embedded reflection from the model's response (zero-cost)
+        response_text, reflection = _parse_reflection(response_text)
+
+        # 6b2. Heuristic quality gate (free, no LLM call)
+        gate: dict[str, Any] = {"confidence": 10, "issues": [], "should_escalate": False}
+        verification: dict[str, Any] = {"passed": True, "issues": [], "should_retry": False}
         if route.tier != "frontier":
             gate = _assess_response_quality(message, response_text)
-            if gate["should_escalate"]:
-                logger.info(
-                    "quality_gate_escalation",
-                    reason=gate["reason"],
-                    confidence=gate["confidence"],
-                    original_model=model,
-                )
-                corrected = await self._escalate_response(
-                    message, response_text, gate["reason"], ctx,
-                )
-                if corrected:
-                    response_text = corrected
 
-        # 6b2. Verification gate: check completeness and retry if needed
+        refl_confidence = reflection.get("confidence", 10)
+        refl_helpful = reflection.get("helpful", True)
+        effective_confidence = min(gate.get("confidence", 10), refl_confidence)
+
+        # 6b3. Double-gated escalation: only when BOTH heuristic gate AND
+        # reflection signal very low quality (avoids expensive frontier calls)
+        if (
+            gate["should_escalate"]
+            and refl_confidence < 3
+            and route.tier != "frontier"
+        ):
+            logger.info(
+                "quality_gate_escalation",
+                reason=gate["reason"],
+                heuristic_confidence=gate["confidence"],
+                reflection_confidence=refl_confidence,
+                original_model=model,
+            )
+            corrected = await self._escalate_response(
+                message, response_text, gate["reason"], ctx,
+            )
+            if corrected:
+                response_text = corrected
+
+        # 6b4. Verification gate: check completeness and retry if needed
         _MAX_RETRY_DEPTH = 1
         if not failure_context and _retry_depth < _MAX_RETRY_DEPTH:
             verification = _verify_output(
@@ -1066,25 +1240,78 @@ class LucyAgent:
                         error=str(e),
                     )
 
-        # 6b3. Self-critique gate: LLM reviews complex responses before delivery
-        _CRITIQUE_INTENTS = {"data", "research", "document", "code", "reasoning"}
+        # 6b5. Abort mechanism: if the model flagged itself as unhelpful
+        # with very low confidence, retry once (like Viktor's do_send=False)
         if (
-            response_text
-            and route.intent in _CRITIQUE_INTENTS
-            and not failure_context
+            reflection
+            and not refl_helpful
+            and refl_confidence <= 2
             and _retry_depth == 0
-            and len(response_text) > 200
+            and not failure_context
         ):
+            thought = reflection.get("thought", "low quality self-assessment")
+            logger.warning(
+                "reflection_abort_retry",
+                workspace_id=ctx.workspace_id,
+                reflection=reflection,
+                intent=route.intent,
+            )
             try:
-                response_text = await self._self_critique(
-                    message, response_text, route.intent, model, ctx,
+                from lucy.pipeline.router import MODEL_TIERS
+                retried = await self.run(
+                    message=message,
+                    ctx=ctx,
+                    slack_client=slack_client,
+                    model_override=MODEL_TIERS.get("code", model),
+                    failure_context=(
+                        f"Your previous attempt was self-assessed as unhelpful "
+                        f"(confidence {refl_confidence}/10): {thought}. "
+                        f"Fix these issues and deliver a genuinely helpful answer."
+                    ),
+                    _retry_depth=_retry_depth + 1,
                 )
+                if retried and len(retried) > 20:
+                    response_text = retried
+                    _, reflection = _parse_reflection(response_text)
+                    refl_confidence = reflection.get("confidence", 10)
+                    effective_confidence = min(
+                        gate.get("confidence", 10), refl_confidence,
+                    )
             except Exception as exc:
                 logger.warning(
-                    "self_critique_failed",
+                    "reflection_abort_retry_failed",
                     workspace_id=ctx.workspace_id,
                     error=str(exc) or type(exc).__name__,
                 )
+
+        # High-confidence reflections can skip tone validation
+        skip_tone = (
+            effective_confidence >= 8
+            and reflection.get("helpful", False)
+            and reflection.get("value_first", False)
+        )
+        self._last_run_metadata = {
+            "confidence": effective_confidence,
+            "quality_issues": gate.get("issues", []),
+            "verification_passed": verification.get("passed", True),
+            "verification_issues": verification.get("issues", []),
+            "reflection": reflection,
+            "should_skip_tone_validation": skip_tone,
+        }
+        logger.info(
+            "response_reflection",
+            workspace_id=ctx.workspace_id,
+            effective_confidence=effective_confidence,
+            quality_gate_confidence=gate.get("confidence", 10),
+            model_confidence=refl_confidence,
+            reflection=reflection,
+            quality_issues=gate.get("issues", []),
+            verification_passed=verification.get("passed", True),
+            verification_issues=verification.get("issues", []),
+            response_length=len(response_text or ""),
+            intent=route.intent,
+            model=model,
+        )
 
         # 6c. Post-response: persist memorable facts to memory
         try:
@@ -1131,6 +1358,32 @@ class LucyAgent:
                 )
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
+
+        # 6d. Post-response: auto-write learnings from quality signals
+        try:
+            from lucy.workspace.memory import (
+                _CORRECTION_SIGNALS,
+                append_learning,
+            )
+            # Write to Mistakes when Lucy's own reflection flags low confidence
+            if effective_confidence <= 4 and reflection:
+                weakness = reflection.get("weakness", "")
+                if not weakness:
+                    weakness = reflection.get("thought", "low confidence response")
+                entry = (
+                    f"Intent '{route.intent}': low confidence ({effective_confidence}/10). "
+                    f"{weakness}"
+                )
+                await append_learning(ws, entry, section="Mistakes")
+
+            # Write to Corrections when the user is correcting a previous response
+            if _CORRECTION_SIGNALS.search(message):
+                correction = message.strip()
+                if len(correction) > 300:
+                    correction = correction[:300] + "..."
+                await append_learning(ws, correction, section="Corrections")
+        except Exception as e:
+            logger.warning("learnings_persist_error", error=str(e))
 
         # 7. Log activity
         from lucy.workspace.activity_log import log_activity
@@ -1678,17 +1931,30 @@ class LucyAgent:
             tool_results = await self._execute_tools_parallel(
                 tool_calls, tool_names, ctx, trace, slack_client,
             )
+            self._current_run_tool_count += len(tool_calls)
 
             for call_id, result_str in tool_results:
                 if len(result_str) > TOOL_RESULT_SUMMARY_THRESHOLD:
-                    head_chars = 4000
-                    tail_chars = 2000
-                    trimmed_count = len(result_str) - head_chars - tail_chars
-                    result_str = (
-                        result_str[:head_chars]
-                        + f"...(trimmed {trimmed_count} chars)..."
-                        + result_str[-tail_chars:]
-                    )
+                    try:
+                        parsed = json.loads(result_str)
+                        structured = _extract_structured_summary(parsed)
+                        if structured:
+                            result_str = json.dumps(
+                                structured, ensure_ascii=False, default=str,
+                            )
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    if len(result_str) > TOOL_RESULT_SUMMARY_THRESHOLD:
+                        head_chars = 4000
+                        tail_chars = 2000
+                        trimmed_count = (
+                            len(result_str) - head_chars - tail_chars
+                        )
+                        result_str = (
+                            result_str[:head_chars]
+                            + f"...(trimmed {trimmed_count} chars)..."
+                            + result_str[-tail_chars:]
+                        )
                 all_messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -1992,6 +2258,22 @@ class LucyAgent:
                     "clarifying question that would help you try a different "
                     "angle. Be warm and action-oriented, not apologetic.",
                 )
+
+        # Flush deferred file uploads after response text is finalized
+        for fpath in getattr(self, "_pending_uploads", []):
+            try:
+                from lucy.tools.file_generator import upload_file_to_slack
+                await upload_file_to_slack(
+                    slack_client=self._current_slack_client,
+                    file_path=Path(fpath),
+                    channel_id=self._current_channel_id,
+                    thread_ts=self._current_thread_ts,
+                    title=Path(fpath).stem.replace("_", " "),
+                )
+                logger.info("deferred_upload_complete", file=Path(fpath).name)
+            except Exception as e:
+                logger.warning("deferred_upload_failed", error=str(e))
+        self._pending_uploads = []
 
         return response_text
 
@@ -3040,32 +3322,23 @@ class LucyAgent:
         excel_path = out.get("excel_file_path")
         if not hasattr(self, "_uploaded_files"):
             self._uploaded_files: set[str] = set()
+        if not hasattr(self, "_pending_uploads"):
+            self._pending_uploads: list[str] = []
         if (
             excel_path
             and self._current_slack_client
             and self._current_channel_id
             and excel_path not in self._uploaded_files
         ):
-            try:
-                from lucy.tools.file_generator import upload_file_to_slack
-                upload_res = await upload_file_to_slack(
-                    slack_client=self._current_slack_client,
-                    file_path=Path(excel_path),
-                    channel_id=self._current_channel_id,
-                    thread_ts=self._current_thread_ts,
-                    title=Path(excel_path).stem.replace("_", " "),
-                )
-                out["upload_status"] = "uploaded_to_slack"
-                self._uploaded_files.add(excel_path)
-                out.pop("excel_file_path", None)
-                logger.info(
-                    "auto_uploaded_excel",
-                    file=Path(excel_path).name,
-                    channel=self._current_channel_id,
-                )
-            except Exception as e:
-                logger.warning("auto_upload_failed", error=str(e))
-                out["upload_status"] = f"upload failed: {e}"
+            self._pending_uploads.append(excel_path)
+            self._uploaded_files.add(excel_path)
+            out["upload_status"] = "queued_for_upload_after_response"
+            out.pop("excel_file_path", None)
+            logger.info(
+                "excel_upload_queued",
+                file=Path(excel_path).name,
+                channel=self._current_channel_id,
+            )
 
         return out
 
@@ -3303,14 +3576,29 @@ class LucyAgent:
         """
         from lucy.pipeline.router import MODEL_TIERS
 
+        from datetime import datetime, timedelta, timezone as _tz
+
+        _utc = datetime.now(_tz.utc)
+        _ist = _utc.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
+        time_ctx = (
+            f"Current date: {_utc.strftime('%A, %B %d, %Y')}. "
+            f"Current time: {_utc.strftime('%I:%M %p UTC')} / "
+            f"{_ist.strftime('%I:%M %p IST')}."
+        )
+
         correction_prompt = (
             f"A user sent this message:\n\"{user_message}\"\n\n"
-            f"An AI assistant responded:\n\"{original_response}\"\n\n"
+            f"An AI assistant (Lucy) responded:\n\"{original_response}\"\n\n"
             f"Quality check detected these issues:\n{issues}\n\n"
-            f"If the response has real problems (wrong services, "
-            f"incorrect information, service name confusion), provide "
-            f"a CORRECTED response that addresses the user's actual "
-            f"request. Keep the same tone and style.\n\n"
+            f"Context Lucy has access to:\n"
+            f"- {time_ctx}\n"
+            f"- Lucy has 100+ tools for calendar, email, search, etc.\n"
+            f"- Lucy should NEVER say 'As an AI, I can't' — she is a "
+            f"high-agency assistant that always finds a way.\n\n"
+            f"If the response has real problems, provide a CORRECTED "
+            f"response that addresses the user's actual request. "
+            f"Keep the same warm, sharp tone. Do NOT prefix with "
+            f"'CORRECTED RESPONSE:' — just write the corrected text.\n\n"
             f"If the original response is actually fine and the issues "
             f"are false positives, respond with exactly: RESPONSE_OK\n\n"
             f"CRITICAL: Output ONLY the corrected text — no "
@@ -3356,6 +3644,7 @@ class LucyAgent:
             # Strip any meta-commentary the quality checker may have
             # prepended despite instructions
             corrected = self._strip_quality_gate_meta(corrected)
+
 
             logger.info(
                 "quality_gate_corrected",
@@ -3419,117 +3708,6 @@ class LucyAgent:
             text = pattern.sub("", text)
 
         return text.strip()
-
-    # ── Self-critique gate ──────────────────────────────────────────────
-
-    async def _self_critique(
-        self,
-        user_message: str,
-        response_text: str,
-        intent: str,
-        model: str,
-        ctx: "AgentContext",
-    ) -> str:
-        """Cheap LLM self-review for complex responses before delivery.
-
-        Uses the fast model to check completeness and value-first framing.
-        Returns the improved response if changes are warranted, or the
-        original if it passes. Never blocks delivery on failure.
-        """
-        from lucy.pipeline.router import MODEL_TIERS
-
-        critique_prompt = (
-            f"A user asked:\n\"{user_message[:400]}\"\n\n"
-            f"Here is the response that was generated (intent: {intent}):\n"
-            f"\"\"\"\n{response_text[:1500]}\n\"\"\"\n\n"
-            f"Quickly review this response. Check:\n"
-            f"1. Does it answer EVERY part of the user's question?\n"
-            f"2. Does it lead with the most important information (not preamble)?\n"
-            f"3. Is anything obviously missing or incomplete?\n"
-            f"4. Does it give actual data/results, not just say what was done?\n"
-            f"5. HIGH-AGENCY CHECK: Does the response end with a dead end "
-            f"anywhere? Does it say 'I can't' or 'I wasn't able to' without "
-            f"offering an alternative path? A high-agency response always "
-            f"provides a next step, a workaround, or what would unblock it.\n\n"
-            f"If the response is solid, reply with exactly: RESPONSE_OK\n"
-            f"If there's a clear, specific issue, reply with: ISSUE: [one sentence "
-            f"describing what's missing or wrong, and how to fix it]\n\n"
-            f"Be strict but fair. Don't flag minor style issues. Only flag substantive "
-            f"completeness or accuracy problems, and dead-end responses.\n\n"
-            f"CRITICAL: Your output goes into a pipeline. Reply ONLY with "
-            f"'RESPONSE_OK' or 'ISSUE: ...' — no other commentary, no "
-            f"meta-discussion, no 'the original response is...' preamble."
-        )
-
-        try:
-            client = await get_openclaw_client()
-            result = await asyncio.wait_for(
-                client.chat_completion(
-                    messages=[{"role": "user", "content": critique_prompt}],
-                    config=ChatConfig(
-                        model=MODEL_TIERS.get("fast", model),
-                        system_prompt=(
-                            "You are a strict quality reviewer for AI responses. "
-                            "Your job: catch substantive failures (incomplete answers, "
-                            "missing deliverables, preamble without results). "
-                            "Ignore minor style issues. Be decisive and concise. "
-                            "Output ONLY 'RESPONSE_OK' or 'ISSUE: [description]' — "
-                            "no meta-commentary, no explanations of the original "
-                            "response, no preamble. Your output is parsed by code."
-                        ),
-                        max_tokens=LLMPresets.CLASSIFIER.max_tokens,
-                        temperature=LLMPresets.CLASSIFIER.temperature,
-                    ),
-                ),
-                timeout=12.0,
-            )
-
-            critique = (result.content or "").strip()
-
-            if "RESPONSE_OK" in critique or not critique.startswith("ISSUE:"):
-                logger.debug(
-                    "self_critique_passed",
-                    workspace_id=ctx.workspace_id,
-                    intent=intent,
-                )
-                return response_text
-
-            issue = critique.replace("ISSUE:", "").strip()
-            logger.info(
-                "self_critique_issue_detected",
-                workspace_id=ctx.workspace_id,
-                issue=issue[:200],
-                intent=intent,
-            )
-
-            # One retry pass with the critique injected
-            from lucy.pipeline.router import MODEL_TIERS
-            retried = await self.run(
-                message=user_message,
-                ctx=ctx,
-                slack_client=getattr(self, "_current_slack_client", None),
-                model_override=MODEL_TIERS.get("code", model),
-                failure_context=(
-                    f"Self-review found an issue with the previous response: {issue}. "
-                    f"Fix this specific problem and deliver a complete answer."
-                ),
-                _retry_depth=1,
-            )
-            if retried and len(retried) > len(response_text) * 0.5:
-                logger.info(
-                    "self_critique_retry_succeeded",
-                    workspace_id=ctx.workspace_id,
-                )
-                return retried
-
-        except Exception as exc:
-            logger.warning(
-                "self_critique_error",
-                workspace_id=ctx.workspace_id,
-                error=str(exc) or type(exc).__name__,
-            )
-
-        return response_text
 
     # ── Slack thread history ────────────────────────────────────────────
 
@@ -3754,10 +3932,10 @@ class LucyAgent:
     def _serialize_result(result: Any) -> str:
         """Serialize a tool result, compacting if too large.
 
-        Auth/redirect URLs are extracted and preserved even when the
-        result body is truncated.  For dict/list results that exceed
-        the limit, strip verbose nested fields before falling back
-        to hard truncation so the LLM sees more useful data.
+        For large list-of-dict payloads (typical API responses), computes
+        aggregates in Python so the LLM receives exact counts/sums/averages
+        instead of truncated fragments.  Falls back to compact → truncate
+        only for data shapes that aren't summarizable.
         """
         raw = result
 
@@ -3765,6 +3943,13 @@ class LucyAgent:
             text = json.dumps(raw, ensure_ascii=False, default=str)
         else:
             text = str(raw)
+
+        if len(text) > TOOL_RESULT_MAX_CHARS and isinstance(raw, (dict, list)):
+            structured = _extract_structured_summary(raw)
+            if structured:
+                text = json.dumps(
+                    structured, ensure_ascii=False, default=str,
+                )
 
         if len(text) > TOOL_RESULT_MAX_CHARS and isinstance(raw, (dict, list)):
             compact = _compact_data(raw)
@@ -4101,7 +4286,31 @@ def _assess_response_quality(
     # 4. Response is very short for a complex question
     if len(user_message) > 60 and len(response_text) < 100:
         issues.append("Suspiciously short response for complex question")
-        confidence -= 4  # Aggressive penalty for clearly broken responses
+        confidence -= 4
+
+    # 5. Semantic relevance: check that response addresses the user's topic
+    user_keywords = {
+        w for w in re.findall(r"[a-z]{4,}", user_lower)
+        if w not in {
+            "what", "does", "have", "this", "that", "with", "from",
+            "about", "they", "them", "your", "their", "been", "were",
+            "will", "would", "could", "should", "which", "where",
+            "when", "some", "many", "much", "also", "just", "than",
+            "more", "most", "very", "each", "every", "list", "show",
+            "give", "tell", "want", "need", "make", "please", "right",
+            "connected", "currently", "today",
+        }
+    }
+    if len(user_keywords) >= 2 and len(response_text) > 80:
+        resp_words = set(re.findall(r"[a-z]{4,}", resp_lower))
+        overlap = user_keywords & resp_words
+        overlap_ratio = len(overlap) / len(user_keywords) if user_keywords else 1.0
+        if overlap_ratio < 0.15 and len(user_keywords) >= 3:
+            issues.append(
+                f"Response may be off-topic: only {len(overlap)}/{len(user_keywords)} "
+                f"user keywords appear in the response"
+            )
+            confidence -= 3
 
     confidence = max(1, min(10, confidence))
     should_escalate = confidence <= 6 and len(issues) > 0

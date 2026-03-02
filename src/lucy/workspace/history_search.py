@@ -28,7 +28,7 @@ logger = structlog.get_logger()
 
 MAX_RESULTS = 30
 MAX_CONTEXT_LINES = 3  # Lines of context around each match
-SNIPPET_MAX_CHARS = 200
+SNIPPET_MAX_CHARS = 500
 
 
 @dataclass

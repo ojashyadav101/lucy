@@ -72,6 +72,23 @@ _SKILL_TRIGGERS: dict[str, list[str]] = {
         r"\bwho\s+(?:are\s+we|is)\b",
         r"\bwhat\s+do\s+(?:we|you)\s+(?:do|know)\b",
     ],
+    "spaces": [
+        r"\bspace\b", r"\blanding\s*page\b", r"\bmini[- ]site\b",
+        r"\bpublic\s+page\b",
+    ],
+    "skill-creation": [
+        r"\bcreate\s+(?:a\s+)?(?:new\s+)?skill\b", r"\bnew\s+skill\b",
+        r"\bsave\s+(?:this|what\s+(?:you|we)\s+learned)\b",
+        r"\bremember\s+how\s+to\b",
+    ],
+    "thread-orchestration": [
+        r"\bthread\b", r"\borchestrat\b", r"\bparallel\s+task\b",
+        r"\bmultiple\s+(?:tasks?|agents?)\b",
+    ],
+    "async-workflows": [
+        r"\basync\b", r"\bbackground\s+task\b", r"\blong[- ]running\b",
+        r"\bwhen\s+(?:it'?s?\s+done|finished|complete)\b",
+    ],
 }
 
 _COMPILED_TRIGGERS: dict[str, list[re.Pattern[str]]] = {

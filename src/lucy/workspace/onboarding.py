@@ -64,14 +64,17 @@ async def onboard_workspace(
     # Step 5: Create company/SKILL.md (enriched from Slack metadata if available)
     await _create_company_profile(ws, slack_client)
 
-    # Step 6: Update state
+    # Step 6: Create workspace-level LEARNINGS.md
+    await _create_learnings_stub(ws)
+
+    # Step 7: Update state
     await ws.update_state({
         "onboarded_at": datetime.now(timezone.utc).isoformat(),
         "skills_seeded": skill_count,
         "status": "onboarded",
     })
 
-    # Step 7: Reload cron scheduler so new crons are picked up immediately
+    # Step 8: Reload cron scheduler so new crons are picked up immediately
     try:
         from lucy.crons.scheduler import get_scheduler
 
@@ -92,6 +95,28 @@ async def onboard_workspace(
         crons=cron_count,
     )
     return ws
+
+
+async def _create_learnings_stub(ws: WorkspaceFS) -> None:
+    """Create the workspace-level data/LEARNINGS.md if it doesn't exist yet."""
+    path = "data/LEARNINGS.md"
+    existing = await ws.read_file(path)
+    if existing:
+        return
+    content = (
+        "# Lucy Learnings\n\n"
+        "This file accumulates what Lucy has learned about this workspace "
+        "through conversations — corrections, mistakes to avoid, and discovered "
+        "preferences. Updated automatically during conversations.\n\n"
+        "## Corrections\n\n"
+        "(Facts the user corrected mid-conversation — apply these going forward.)\n\n"
+        "## Mistakes\n\n"
+        "(Things that went wrong and how to avoid them next time.)\n\n"
+        "## Preferences\n\n"
+        "(Discovered user and team preferences — tone, format, detail level, etc.)\n"
+    )
+    await ws.write_file(path, content)
+    logger.info("learnings_stub_created", workspace_id=ws.workspace_id)
 
 
 async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:

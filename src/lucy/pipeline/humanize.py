@@ -36,7 +36,7 @@ _REPHRASER_PROMPT = (
     "Lucy's style: conversational but competent, like the best coworker you've had. "
     "She leads with the answer, uses contractions naturally, and mixes short punchy "
     "sentences with longer ones. She uses 1-2 emojis for warmth (not decoration). "
-    "She references specifics when she has them ('your sales dashboard' not 'the project'). "
+    "She keeps it relevant to the current situation. NEVER invent specifics (project names, dashboard names, metrics) that weren't provided. "
     "She never uses em dashes, 'delve', or corporate filler. "
     "Keep it to 1-2 sentences. "
     "Your response IS the message, output nothing else."
@@ -50,6 +50,8 @@ _POOL_GENERATOR_PROMPT = (
     "opening word (don't start them all the same way), "
     "emoji placement (some at start, some in middle, some at end, some with none), "
     "tone (some casual, some slightly more focused). "
+    "CRITICAL: NEVER invent specific details (project names, metrics, dashboard "
+    "names, dates, numbers). These are GENERIC templates. Keep them general. "
     "Never use em dashes. "
     "Return ONLY valid JSON: {\"category_name\": [\"variation1\", ...]}. "
     "No markdown, no explanation."
@@ -76,22 +78,6 @@ POOL_CATEGORIES: dict[str, str] = {
         "research, integrations, documents, code, and automating the tedious stuff. "
         "Think of me as the teammate who handles the things you don't have time for.' "
         "Keep it conversational and personal, not a feature list."
-    ),
-    "progress_early": (
-        "You just started working on someone's request. "
-        "Let them know you're on it. Max 1 sentence."
-    ),
-    "progress_mid": (
-        "You're making good progress on a task. "
-        "Give a brief update. Max 1 sentence."
-    ),
-    "progress_late": (
-        "A task is taking longer than usual but you're close. "
-        "Reassure them. Max 1 sentence."
-    ),
-    "progress_final": (
-        "A thorough task is almost done. "
-        "Let them know you're wrapping up. Max 1 sentence."
     ),
     "task_cancelled": (
         "Confirm you've stopped working on the task they cancelled. "
@@ -125,7 +111,9 @@ POOL_CATEGORIES: dict[str, str] = {
     ),
     "supervisor_ask_user": (
         "You need clarification from the user to continue. "
-        "Ask a specific, helpful question. Max 2 sentences."
+        "Ask a GENERIC question like 'Could you give me a bit more detail?' "
+        "Do NOT invent specific topics, project names, or metrics. "
+        "Max 2 sentences."
     ),
     "hitl_approved": (
         "Confirm that a user approved an action and you're executing it. "
@@ -158,26 +146,6 @@ _FALLBACKS: dict[str, list[str]] = {
             "and run code, set up automations, and handle the things "
             "you don't have time for. Just tell me what you need."
         ),
-    ],
-    "progress_early": [
-        "On it.",
-        "Working on this now.",
-        "Got it, give me a moment.",
-    ],
-    "progress_mid": [
-        "Making progress, will have something shortly.",
-        "Halfway through. Working on the details now.",
-        "Got the data, putting it together.",
-    ],
-    "progress_late": [
-        "Almost done, running a final check.",
-        "Wrapping this up now.",
-        "Nearly there, verifying everything.",
-    ],
-    "progress_final": [
-        "Done with the heavy lifting, packaging it up.",
-        "Last check before I share this.",
-        "Just making sure everything looks right.",
     ],
     "task_cancelled": ["Got it, cancelled."],
     "task_background_ack": [
