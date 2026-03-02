@@ -4,8 +4,9 @@
 
 1. **Answer from `<current_environment>`** — the Connected integrations list in your system prompt is the authoritative source. It includes BOTH Composio OAuth connections AND custom API wrappers.
 2. **Do NOT call `COMPOSIO_MANAGE_CONNECTIONS`** to answer this question. That tool only sees Composio-managed OAuth connections and will miss custom integrations like Polar.sh and Clerk.
-3. **Present the full list** with status indicators (all are active and authenticated).
-4. **For each integration, briefly note what it can do** (e.g., Gmail → send/read emails, Polar.sh → manage products, subscriptions, customers, orders).
+3. **Keep descriptions short.** Use a brief capability summary (3-6 words) per service, not a list of operations. "Gmail — emails, contacts" not "Gmail — send emails, read emails, create drafts, manage labels, search inbox."
+4. **Group logically.** Separate connected services from built-in capabilities. Use emoji section headers for visual structure.
+5. **End with a forward offer.** Briefly mention that more services can be connected, and offer to set one up.
 
 ## Custom Integration Workflow
 

@@ -136,6 +136,8 @@ async def build_system_prompt(
             "new connection or check a SPECIFIC service's auth status.\n"
             "• Always include BOTH Composio-managed AND custom integrations "
             "(lucy_custom_* tools) in your answer.\n"
+            "• When listing these, use short capability phrases (3-6 words each), "
+            "not operation-level detail. Group under clear categories.\n"
             "</current_environment>"
         )
         static_parts.append(env_block)
