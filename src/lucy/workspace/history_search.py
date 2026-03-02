@@ -88,6 +88,9 @@ async def search_slack_history(
 
     pattern = re.compile(re.escape(query), re.IGNORECASE)
     results: list[SearchResult] = []
+    # Dedup key: (time, user, text) — thread replies appear in both the daily
+    # log and the per-thread file, so we skip the duplicate on second encounter.
+    seen: set[tuple[str, str, str]] = set()
 
     for ch_dir in channel_dirs:
         if not ch_dir.is_dir():
@@ -116,6 +119,11 @@ async def search_slack_history(
                     continue
 
                 time_str, user, text = parsed
+                dedup_key = (time_str, user, text)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
                 results.append(SearchResult(
                     channel=channel_name,
                     date=date_str,
@@ -133,6 +141,7 @@ async def search_slack_history(
 
         # Also search thread reply files (slack_logs/{channel}/threads/*.md)
         # These contain replies synced per-thread for complete context.
+        # The seen set above prevents duplicates with the daily log.
         threads_dir = ch_dir / "threads"
         if threads_dir.is_dir() and len(results) < max_results:
             thread_files = sorted(threads_dir.glob("*.md"), reverse=True)
@@ -151,6 +160,11 @@ async def search_slack_history(
                         continue
 
                     time_str, user, text = parsed
+                    dedup_key = (time_str, user, text)
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+
                     results.append(SearchResult(
                         channel=f"{channel_name}/thread",
                         date=thread_file.stem,
