@@ -77,7 +77,6 @@ _COMPANY_SIGNALS = re.compile(
 
 _TEAM_SIGNALS = re.compile(
     r"\b(?:"
-    r"(?:i|my) (?:name|role|title|email|timezone|tz)|"
     r"i(?:'m| am) (?:the|a|an|responsible)|"
     r"(?:he|she|they)(?:'s| is| are) (?:the|our|a)|"
     r"(?:works?|working) on|reports? to|"
@@ -120,6 +119,29 @@ _PROJECT_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
+def _has_hypothetical_signals(message: str) -> bool:
+    """Return True if the message appears to be hypothetical or testing.
+
+    The check is deliberately conservative: words like 'test' and 'sample'
+    that appear inside email addresses (e.g. test@example.com) must not
+    trigger this filter, so we first strip any email addresses from the
+    message before checking for signal words.
+    """
+    _EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+    _HYPO_PATTERN = re.compile(
+        r"\b(?:"
+        r"what if|imagine|hypothetically|suppose|let's say|pretend|"
+        r"for example|e\.g\.|(?:^|\s)test(?:ing)?\b|dummy|fake|sample|mock|"
+        r"i'll ask (?:about )?this later|ask (?:me|you) (?:about )?(?:this|it) later"
+        r")\b",
+        re.IGNORECASE,
+    )
+    text_without_emails = _EMAIL_PATTERN.sub("EMAIL", message)
+    return bool(_HYPO_PATTERN.search(text_without_emails))
+
+
+# Keep the compiled pattern for legacy code paths that use it directly,
+# but the public API should use _has_hypothetical_signals().
 _HYPOTHETICAL_SIGNALS = re.compile(
     r"\b(?:"
     r"(?:what if|imagine|hypothetically|suppose|let's say|pretend|"
@@ -132,8 +154,9 @@ _HYPOTHETICAL_SIGNALS = re.compile(
 # ── Structured fact extractors ────────────────────────────────────────────
 # Patterns to extract concrete facts from messages for richer categorization
 _FACT_EXTRACTORS: list[tuple[re.Pattern[str], str, str]] = [
-    (re.compile(r"(?:my name is|i'm|i am)\s+([A-Z][a-z]+(?: [A-Z][a-z]+)?)", re.IGNORECASE),
-     "user_preferences", "User's name is {0}"),
+    # Only match explicit "my name is X" — NOT "I'm based in X" to avoid false positives
+    (re.compile(r"(?:my name is|i am called|i go by|call me)\s+([A-Z][a-zA-Z]+(?: [A-Z][a-zA-Z]+)?)", re.IGNORECASE),
+     "user_preferences", "User name: {0}"),
     (re.compile(r"(?:my role is|i'm the|i am the|i work as(?: a| an)?)\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
      "facts", "User's role: {0}"),
     (re.compile(r"(?:we use|our (?:stack|tech|tools?) (?:is|are|includes?))\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
@@ -148,8 +171,29 @@ _FACT_EXTRACTORS: list[tuple[re.Pattern[str], str, str]] = [
      "user_preferences", "Preference: {0}"),
     (re.compile(r"(?:my (?:timezone|tz|time ?zone) is|i'm in)\s+([A-Z][A-Za-z/_+-]{2,30})", re.IGNORECASE),
      "user_preferences", "User timezone: {0}"),
-    (re.compile(r"(?:my email is|email me at|reach me at)\s+([^\s,]+@[^\s,]+)", re.IGNORECASE),
-     "user_preferences", "User email: {0}"),
+    (re.compile(
+        r"(?:my (?:new |updated |current )?email(?: address)? is"
+        r"|email me at|reach me at|contact me at"
+        r"|(?:my )?email(?: address)? (?:changed|updated|switched) to"
+        r"|i(?:'m| am) (?:switching|changing|updating) (?:my )?email to"
+        r"|switched (?:email providers?;? *[—–-]+ *)?(?:my new email is)?"
+        r")\s*([^\s,<>]+@[^\s,<>]+)",
+        re.IGNORECASE,
+    ), "user_preferences", "User email: {0}"),
+    # Bare email address (entire message is just an email — e.g. reply to "what's your email?")
+    (re.compile(r"^\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\s*$", re.IGNORECASE),
+     "user_preferences", "User email address: {0}"),
+    # LLM confirmation patterns: "noted that X as your email", "X is your email address"
+    (re.compile(
+        r"\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
+        r"(?:\s+is\s+(?:your|my|the)\s+email(?:\s+address)?|\s+as\s+(?:your|my)\s+email)",
+        re.IGNORECASE,
+    ), "user_preferences", "User email address: {0}"),
+    # "noted/stored/saved X" where X contains an email
+    (re.compile(
+        r"(?:noted|stored|saved|recorded)\s+(?:that\s+)?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b",
+        re.IGNORECASE,
+    ), "user_preferences", "User email address: {0}"),
 ]
 
 # ── Memory categories ─────────────────────────────────────────────────────
@@ -165,9 +209,19 @@ MEMORY_CATEGORIES: dict[str, str] = {
 def should_persist_memory(message: str) -> bool:
     """Quick check: does this message contain facts worth persisting?
 
-    Returns False for hypothetical or test scenarios that shouldn't
-    be stored as real facts.
+    Returns False for:
+    - Questions (the user is asking, not stating a fact)
+    - Hypothetical or test scenarios that shouldn't be stored as real facts.
     """
+    text = message.strip()
+
+    # Questions are requests for information, not statements of fact.
+    if text.endswith("?"):
+        return False
+    # Common interrogative openings
+    if re.match(r"^(?:what|where|when|who|how|why|which|can you|could you|do you|did you|is there|are there)\b", text, re.IGNORECASE):
+        return False
+
     if not _REMEMBER_SIGNALS.search(message):
         # Also check category-specific signals not covered by _REMEMBER_SIGNALS
         if not any(sig.search(message) for sig in (
@@ -211,41 +265,148 @@ def classify_memory_category(message: str) -> str:
 
 
 def extract_facts_from_message(message: str) -> list[tuple[str, str]]:
-    """Extract structured facts from a single message.
+    """Extract structured facts from a single message using regex patterns.
 
     Returns list of (fact_text, category) tuples.
     Skips hypothetical/test messages entirely.
+
+    This is the fast, zero-cost first pass. For semantic extraction on memory-
+    signalled messages where regex finds nothing, see extract_facts_llm().
     """
-    if _HYPOTHETICAL_SIGNALS.search(message):
+    if _has_hypothetical_signals(message):
         return []
 
     facts: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for pattern, category, template in _FACT_EXTRACTORS:
         match = pattern.search(message)
         if match:
             groups = match.groups()
             if groups:
-                fact_text = template.format(*groups)
-                facts.append((fact_text.strip(), category))
+                fact_text = template.format(*groups).strip()
+                if fact_text.lower() not in seen:
+                    seen.add(fact_text.lower())
+                    facts.append((fact_text, category))
 
     return facts
 
 
+async def extract_facts_llm(message: str) -> list[tuple[str, str]]:
+    """Semantic fact extraction using the LLM — second-pass fallback.
+
+    Called only when regex extraction found nothing but the message has
+    explicit memory signals (should_persist_memory() returned True).
+    Uses the fast model to keep latency low (~100 token call).
+
+    Returns list of (fact_text, category) tuples in the same format as
+    extract_facts_from_message(), ready to be stored via add_session_fact().
+    """
+    if _has_hypothetical_signals(message):
+        return []
+
+    from lucy.config import settings
+
+    api_key = settings.openrouter_api_key
+    if not api_key:
+        return []
+
+    _VALID_CATEGORIES = frozenset({
+        "user_preferences", "project_context", "decisions", "facts", "general",
+    })
+
+    prompt = (
+        "Extract memorable facts from the following message. "
+        "Return a JSON array where each item has:\n"
+        '  "fact": a concise, self-contained fact statement\n'
+        '  "category": one of user_preferences, project_context, decisions, facts, general\n\n'
+        "Rules:\n"
+        "- Only extract genuine facts, preferences, decisions, or project context.\n"
+        "- Do NOT extract questions, pleasantries, or vague statements.\n"
+        "- Use category user_preferences for personal facts (name, email, timezone, role).\n"
+        "- Use decisions for explicit choices made.\n"
+        "- Use project_context for project-related facts (deadlines, milestones, goals).\n"
+        "- Use facts for factual claims about the company, product, or business.\n"
+        "- Use general for everything else that is genuinely worth remembering.\n"
+        "- Return [] if there are no clear facts worth remembering.\n"
+        "- Return only valid JSON, no commentary.\n\n"
+        f"Message: {message[:400]}"
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.model_tier_fast,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 256,
+                    "temperature": 0,
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+
+        import json as _json
+        raw = _json.loads(content)
+        if not isinstance(raw, list):
+            return []
+
+        results: list[tuple[str, str]] = []
+        for item in raw:
+            fact = str(item.get("fact", "")).strip()
+            cat = str(item.get("category", "general")).strip()
+            if fact and cat in _VALID_CATEGORIES:
+                results.append((fact, cat))
+
+        if results:
+            logger.debug(
+                "llm_fact_extraction",
+                count=len(results),
+                source_preview=message[:60],
+            )
+        return results
+
+    except Exception as _exc:
+        logger.debug("llm_fact_extraction_failed", error=str(_exc))
+        return []
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SESSION MEMORY — Bridge between threads and permanent knowledge
+#
+# ARCHITECTURE: Two-tier storage for proper user isolation
+#
+#   data/session_memory.json          — workspace-shared context
+#     categories: decisions, project_context, facts, general
+#     visible to all workspace members (team knowledge)
+#
+#   data/session/{user_id}.json       — per-user personal facts
+#     category: user_preferences only
+#     hard-isolated: never leaked to other users
+#
+# This mirrors the existing preferences.py pattern (data/preferences/{user_id}.json)
+# and prevents Alice's email/timezone/name from appearing in Bob's context window.
 # ═══════════════════════════════════════════════════════════════════════════
 
 SESSION_MEMORY_PATH = "data/session_memory.json"
+_SESSION_USER_PATH = "data/session/{user_id}.json"
 MAX_SESSION_ITEMS = 50
+MAX_USER_ITEMS = 100  # personal facts per user; higher limit since they're isolated
 MAX_MEMORY_CONTEXT_CHARS = 1500  # ~500 tokens at ~3 chars/token
 
 
-async def read_session_memory(ws: WorkspaceFS) -> list[dict[str, Any]]:
-    """Read session memory items.
+def _user_session_path(user_id: str) -> str:
+    return _SESSION_USER_PATH.format(user_id=user_id)
 
-    Each item: {"fact": str, "source": str, "ts": str, "category": str}
-    """
-    content = await ws.read_file(SESSION_MEMORY_PATH)
+
+async def _read_json_list(ws: WorkspaceFS, path: str) -> list[dict[str, Any]]:
+    """Read a JSON list from a workspace file, safely."""
+    content = await ws.read_file(path)
     if not content:
         return []
     try:
@@ -255,16 +416,75 @@ async def read_session_memory(ws: WorkspaceFS) -> list[dict[str, Any]]:
         return []
 
 
+async def read_session_memory(
+    ws: WorkspaceFS,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read session memory items.
+
+    When user_id is provided, merges:
+    - Workspace-shared facts from data/session_memory.json
+    - User-personal facts from data/session/{user_id}.json
+
+    When user_id is absent, returns only workspace-shared facts.
+    Personal (user_preferences) facts from other users are never included.
+    """
+    shared = await _read_json_list(ws, SESSION_MEMORY_PATH)
+    if user_id:
+        personal = await _read_json_list(ws, _user_session_path(user_id))
+        return shared + personal
+    return shared
+
+
 async def write_session_memory(
     ws: WorkspaceFS,
     items: list[dict[str, Any]],
+    user_id: str | None = None,
 ) -> None:
-    """Write session memory, keeping only the most recent MAX_SESSION_ITEMS."""
-    trimmed = items[-MAX_SESSION_ITEMS:]
-    await ws.write_file(
-        SESSION_MEMORY_PATH,
-        json.dumps(trimmed, indent=2, ensure_ascii=False),
-    )
+    """Write session memory.
+
+    When user_id is provided, personal (user_preferences) items are written to
+    the user-scoped file; all other items go to the shared workspace file.
+    When user_id is absent, all items are written to the shared file.
+    """
+    if user_id:
+        personal = [i for i in items if i.get("category") == "user_preferences"]
+        shared = [i for i in items if i.get("category") != "user_preferences"]
+        if personal:
+            await ws.write_file(
+                _user_session_path(user_id),
+                json.dumps(personal[-MAX_USER_ITEMS:], indent=2, ensure_ascii=False),
+            )
+        await ws.write_file(
+            SESSION_MEMORY_PATH,
+            json.dumps(shared[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
+        )
+    else:
+        trimmed = items[-MAX_SESSION_ITEMS:]
+        await ws.write_file(
+            SESSION_MEMORY_PATH,
+            json.dumps(trimmed, indent=2, ensure_ascii=False),
+        )
+
+
+# Facts where only one value should ever be active at a time.
+# When a new fact shares this key prefix, the old one is replaced.
+_SINGLETON_FACT_KEYS: frozenset[str] = frozenset({
+    "user email",
+    "user email address",
+    "user timezone",
+    "user's name is",
+    "user name",
+    "user phone",
+    "user role",
+    "user title",
+    "user location",
+})
+
+
+def _fact_key(fact: str) -> str:
+    """Return the normalised key prefix of a 'Key: value' structured fact."""
+    return fact.split(":", 1)[0].strip().lower()
 
 
 async def add_session_fact(
@@ -275,19 +495,51 @@ async def add_session_fact(
     thread_ts: str | None = None,
     user_id: str | None = None,
 ) -> None:
-    """Add a fact to session memory. Deduplicates by content.
+    """Add a fact to session memory with routing based on category.
 
-    Uses a per-workspace lock to prevent concurrent read-modify-write
-    races that could lose data.
+    Routing:
+    - category == "user_preferences" AND user_id provided
+        → data/session/{user_id}.json  (hard-isolated per user)
+    - all other categories
+        → data/session_memory.json  (workspace-shared)
+
+    Within each store:
+    - Exact-text duplicates are silently dropped.
+    - Singleton keys (email, timezone, name…) replace the old entry rather
+      than accumulating stale facts when the user updates them.
+
+    Uses a per-workspace lock to prevent concurrent read-modify-write races.
     """
+    is_personal = (category == "user_preferences" and bool(user_id))
     lock = _get_workspace_lock(ws.workspace_id)
+
     async with lock:
-        items = await read_session_memory(ws)
+        if is_personal:
+            items = await _read_json_list(ws, _user_session_path(user_id))  # type: ignore[arg-type]
+        else:
+            items = await _read_json_list(ws, SESSION_MEMORY_PATH)
 
         fact_lower = fact.lower().strip()
         for existing in items:
             if existing.get("fact", "").lower().strip() == fact_lower:
-                return
+                return  # exact duplicate — nothing to do
+
+        # For singleton keys, evict any older fact that shares the same key
+        # so the memory reflects the current value, not the old one.
+        key = _fact_key(fact)
+        if key in _SINGLETON_FACT_KEYS:
+            before = len(items)
+            items = [
+                item for item in items
+                if _fact_key(item.get("fact", "")) != key
+            ]
+            if len(items) < before:
+                logger.info(
+                    "session_fact_replaced",
+                    key=key,
+                    new_value=fact[:80],
+                    workspace_id=ws.workspace_id,
+                )
 
         entry: dict[str, Any] = {
             "fact": fact,
@@ -301,8 +553,25 @@ async def add_session_fact(
             entry["user_id"] = user_id
 
         items.append(entry)
-        await write_session_memory(ws, items)
-        logger.info("session_fact_added", fact=fact[:100], category=category)
+
+        if is_personal:
+            await ws.write_file(
+                _user_session_path(user_id),  # type: ignore[arg-type]
+                json.dumps(items[-MAX_USER_ITEMS:], indent=2, ensure_ascii=False),
+            )
+        else:
+            await ws.write_file(
+                SESSION_MEMORY_PATH,
+                json.dumps(items[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
+            )
+
+        logger.info(
+            "session_fact_added",
+            fact=fact[:100],
+            category=category,
+            store="personal" if is_personal else "shared",
+            workspace_id=ws.workspace_id,
+        )
 
 
 async def get_session_context_for_prompt(
@@ -360,7 +629,7 @@ async def load_relevant_memories(
     Returns formatted string capped at MAX_MEMORY_CONTEXT_CHARS.
     This supersedes get_session_context_for_prompt() for prompt injection.
     """
-    items = await read_session_memory(ws)
+    items = await read_session_memory(ws, user_id=user_id)
     if not items:
         return ""
 
@@ -379,6 +648,18 @@ async def load_relevant_memories(
     for item in items:
         score = 0.0
         fact = item.get("fact", "")
+
+        # Hard isolation: skip personal facts that belong to a different user.
+        # user_preferences stored under user isolation (data/session/{user_id}.json)
+        # already contain only this user's facts. But if a legacy shared-file entry
+        # exists with a mismatched user_id, exclude it here too.
+        if (
+            item.get("category") == "user_preferences"
+            and user_id
+            and item.get("user_id")
+            and item.get("user_id") != user_id
+        ):
+            continue
 
         if thread_ts and item.get("thread_ts") == thread_ts:
             score += 10.0
@@ -643,16 +924,28 @@ async def append_learning(
 async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     """Promote high-value session facts to permanent knowledge files.
 
-    Returns the number of facts promoted.  The per-workspace lock is
-    acquired by the individual write helpers, so we only hold the session
-    lock for the read-then-write-back of the remaining items.
+    Promotion rules (facts must be at least 24 hours old to be stable):
+    - category "decisions"       → team/SKILL.md  (team-wide decisions persist)
+    - category "project_context" → team/SKILL.md  (project info belongs to team)
+    - category "facts"           → company/SKILL.md  (hard facts about the business)
+    - category "user_preferences" → kept in per-user file indefinitely (not promoted)
+    - category "general"          → kept in shared pool (not promoted)
+
+    Returns the number of facts promoted.
     """
+    from datetime import timedelta
+
     lock = _get_workspace_lock(ws.workspace_id)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    _PROMOTE_TO_TEAM: frozenset[str] = frozenset({"decisions", "project_context"})
+    _PROMOTE_TO_COMPANY: frozenset[str] = frozenset({"facts"})
 
     async with lock:
-        items = await read_session_memory(ws)
-        promoted = 0
-        remaining = []
+        items = await _read_json_list(ws, SESSION_MEMORY_PATH)
+        remaining: list[dict] = []
+        to_team: list[str] = []
+        to_company: list[str] = []
 
         for item in items:
             cat = item.get("category", "general")
@@ -661,31 +954,37 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
             if not fact:
                 continue
 
-            if cat in ("company", "team"):
-                promoted += 1
+            try:
+                ts = datetime.fromisoformat(item.get("ts", ""))
+                old_enough = ts < cutoff
+            except (ValueError, TypeError):
+                old_enough = True  # malformed timestamp — assume old
+
+            if old_enough and cat in _PROMOTE_TO_TEAM:
+                to_team.append(fact)
+            elif old_enough and cat in _PROMOTE_TO_COMPANY:
+                to_company.append(fact)
             else:
                 remaining.append(item)
 
-        promote_items = [
-            item for item in items
-            if item.get("category") in ("company", "team") and item.get("fact", "").strip()
-        ]
-
+        promoted = len(to_team) + len(to_company)
         if promoted > 0:
-            await write_session_memory(ws, remaining)
+            await ws.write_file(
+                SESSION_MEMORY_PATH,
+                json.dumps(remaining[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
+            )
 
-    for item in promote_items:
-        fact = item["fact"].strip()
-        if item["category"] == "company":
-            await append_to_company_knowledge(ws, fact)
-        else:
-            await append_to_team_knowledge(ws, fact)
+    for fact in to_team:
+        await append_to_team_knowledge(ws, fact)
+    for fact in to_company:
+        await append_to_company_knowledge(ws, fact)
 
     if promoted > 0:
         logger.info(
             "memory_consolidation_complete",
             workspace_id=ws.workspace_id,
-            promoted=promoted,
+            promoted_to_team=len(to_team),
+            promoted_to_company=len(to_company),
             remaining=len(remaining),
         )
 

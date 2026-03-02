@@ -112,8 +112,7 @@ class CronScheduler:
         self.slack_client = slack_client
         self._running = False
 
-    @staticmethod
-    def _on_job_missed(event: Any) -> None:
+    def _on_job_missed(self, event: Any) -> None:
         logger.warning(
             "cron_job_missed",
             job_id=event.job_id,
@@ -659,10 +658,16 @@ class CronScheduler:
         if not crons_dir.is_dir():
             return []
 
+        # These slugs are handled by dedicated internal scheduler methods and
+        # must not be double-scheduled as agent-type crons.
+        _INTERNAL_CRON_SLUGS = frozenset({"slack-sync", "slack_sync"})
+
         configs: list[CronConfig] = []
         for entry in sorted(crons_dir.iterdir()):
             if not entry.is_dir():
                 continue
+            if entry.name in _INTERNAL_CRON_SLUGS:
+                continue  # managed internally — skip to avoid duplicate scheduling
             task_file = entry / "task.json"
             if not task_file.is_file():
                 continue
@@ -797,12 +802,30 @@ class CronScheduler:
 
         Priority:
         1. delivery_mode=dm + requesting_user_id -> DM the user
-        2. delivery_mode=channel + delivery_channel -> post to channel
-        3. delivery_channel exists -> post to channel (default)
-        4. No delivery info -> log only (system crons)
+        2. delivery_mode=dm, no requesting_user_id -> DM workspace owner (fallback)
+        3. delivery_mode=channel + delivery_channel -> post to channel
+        4. delivery_channel exists -> post to channel (default)
+        5. No delivery info -> log only (system crons)
         """
         if cron.delivery_mode == "dm" and cron.requesting_user_id:
             return cron.requesting_user_id
+        if cron.delivery_channel:
+            return cron.delivery_channel
+        return None
+
+    async def _resolve_delivery_target_async(self, cron: CronConfig) -> str | None:
+        """Async version of _resolve_delivery_target with workspace owner fallback.
+
+        Used by _run_cron() so that DM-mode seed crons without a requesting_user_id
+        can still deliver to the workspace owner rather than being silently dropped.
+        """
+        if cron.delivery_mode == "dm" and cron.requesting_user_id:
+            return cron.requesting_user_id
+        if cron.delivery_mode == "dm":
+            # Fallback: find the workspace owner and DM them
+            owner_id = await self._resolve_workspace_owner(cron.workspace_dir)
+            if owner_id:
+                return owner_id
         if cron.delivery_channel:
             return cron.delivery_channel
         return None
@@ -916,14 +939,44 @@ class CronScheduler:
                 global_context_parts.append(f"\n[Connected Integrations]\n{', '.join(connected_apps)}")
         except Exception as e:
             logger.debug("failed_to_inject_integrations", error=str(e))
-            
+
+        # For the heartbeat, inject proactive events and a channel activity summary.
+        # This gives the heartbeat agent rich awareness of what has happened since
+        # the last run without requiring it to call APIs.
+        is_heartbeat = cron.path.strip("/") == "heartbeat"
+        proactive_event_ctx: str | None = None
+        channel_summary_ctx: str | None = None
+        if is_heartbeat:
+            try:
+                from lucy.workspace.proactive_events import (
+                    format_events_for_prompt,
+                    read_and_clear_proactive_events,
+                )
+                events = await read_and_clear_proactive_events(ws)
+                if events:
+                    proactive_event_ctx = format_events_for_prompt(events)
+            except Exception as e:
+                logger.debug("proactive_events_inject_failed", error=str(e))
+
+            try:
+                from lucy.workspace.slack_local_reader import get_channel_summary, get_last_heartbeat_time
+                last_hb = await get_last_heartbeat_time(ws)
+                channel_summary_ctx = await get_channel_summary(ws, hours_back=1 if last_hb else 4)
+            except Exception as e:
+                logger.debug("channel_summary_inject_failed", error=str(e))
+
+        if proactive_event_ctx:
+            global_context_parts.append(f"\n[Proactive Events Queue]\n{proactive_event_ctx}")
+        if channel_summary_ctx:
+            global_context_parts.append(f"\n[Recent Channel Activity]\n{channel_summary_ctx}")
+
         global_context = "\n".join(global_context_parts)
-        
+
         instruction = self._build_cron_instruction(cron, learnings, global_context)
 
         last_error: Exception | None = None
         max_attempts = 1 if cron.type == "script" else (1 + cron.max_retries)
-        delivery_target = self._resolve_delivery_target(cron)
+        delivery_target = await self._resolve_delivery_target_async(cron)
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -989,17 +1042,54 @@ class CronScheduler:
                     or _upper.startswith("HEARTBEAT_OK")
                 )
 
+                delivery_succeeded = False
                 if not skip and response and response.strip() and delivery_target and self.slack_client:
-                    await self._deliver_to_slack(delivery_target, response)
+                    try:
+                        await self._deliver_to_slack(delivery_target, response)
+                        delivery_succeeded = True
+                    except Exception as _del_err:
+                        logger.warning(
+                            "cron_delivery_failed",
+                            workspace_id=workspace_id,
+                            cron_path=cron.path,
+                            error=str(_del_err),
+                        )
+                elif not skip and response and response.strip() and not delivery_target:
+                    logger.warning(
+                        "cron_delivery_dropped_no_target",
+                        workspace_id=workspace_id,
+                        cron_path=cron.path,
+                        response_length=len(response),
+                    )
 
                 now = datetime.now(timezone.utc).isoformat()
-                status = "skipped" if skip else "delivered"
+                if skip:
+                    status = "skipped"
+                elif not delivery_target:
+                    status = "no_target"
+                elif delivery_succeeded:
+                    status = "delivered"
+                else:
+                    status = "delivery_failed"
                 log_entry = f"\n## {now} (elapsed: {elapsed_ms}ms, status: {status})"
                 if attempt > 1:
                     log_entry += f" [succeeded on attempt {attempt}]"
                 log_entry += f"\n{(response or '')[:500]}\n"
-                
-                await ws.append_file(f"crons/{cron_dir_name}/execution.log", log_entry)
+
+                log_path = f"crons/{cron_dir_name}/execution.log"
+                await ws.append_file(log_path, log_entry)
+
+                # Cap log size: keep the most recent MAX_LOG_BYTES bytes.
+                # Older runs are trimmed by removing lines from the beginning.
+                _MAX_LOG_BYTES = 32_768  # 32 KB per cron
+                existing_log = await ws.read_file(log_path) or ""
+                if len(existing_log) > _MAX_LOG_BYTES:
+                    # Find the first `## ` section header after the trim point and
+                    # discard everything before it so we keep complete entries.
+                    trim_target = existing_log[-(int(_MAX_LOG_BYTES * 0.75)):]
+                    first_entry = trim_target.find("\n## ")
+                    trimmed_log = trim_target[first_entry:] if first_entry >= 0 else trim_target
+                    await ws.write_file(log_path, trimmed_log)
 
                 from lucy.workspace.activity_log import log_activity
                 await log_activity(ws, f"Cron '{cron.title}' {status} in {elapsed_ms}ms")
@@ -1016,13 +1106,20 @@ class CronScheduler:
                 )
 
                 # --- Phase 1.3: Max Runs / Self-deleting ---
-                if cron.max_runs > 0:
-                    log_content = await ws.read_file(f"crons/{cron_dir_name}/execution.log")
-                    run_count = sum(
-                        1 for line in log_content.splitlines()
-                        if line.startswith("## ") and "FAILED" not in line
-                    )
-                    if run_count >= cron.max_runs:
+                # Track run count in task.json (run_count field) instead of parsing
+                # the log file to avoid O(n) reads that grow with every execution.
+                if cron.max_runs > 0 and not skip:
+                    from lucy.workspace.filesystem import WorkspaceFS
+                    _task_path = f"crons/{cron_dir_name}/task.json"
+                    try:
+                        _task_raw = await ws.read_file(_task_path)
+                        _task_data: dict = json.loads(_task_raw or "{}")
+                        _run_count = int(_task_data.get("run_count", 0)) + 1
+                        _task_data["run_count"] = _run_count
+                        await ws.write_file(_task_path, json.dumps(_task_data, indent=2))
+                    except Exception:
+                        _run_count = 1
+                    if _run_count >= cron.max_runs:
                         logger.info("cron_max_runs_reached", workspace_id=workspace_id, cron_path=cron.path)
                         await self.delete_cron(workspace_id, cron.path)
 
@@ -1107,66 +1204,61 @@ class CronScheduler:
 
         Supports raw text (passed through the output pipeline) OR
         raw JSON string containing {"blocks": [...] } for rich Block Kit output.
+
+        Raises on Slack API failures so the caller can accurately record status.
         """
-        try:
-            # Check if output is a Block Kit JSON payload
-            text_trimmed = text.strip()
-            if text_trimmed.startswith("{") and text_trimmed.endswith("}") and '"blocks"' in text_trimmed:
-                try:
-                    payload = json.loads(text_trimmed)
-                    if "blocks" in payload:
-                        await self.slack_client.chat_postMessage(
-                            channel=channel,
-                            blocks=payload["blocks"],
-                            text=payload.get("text", "Automated report"),
-                        )
-                        logger.info("cron_result_delivered_blocks", channel=channel, blocks=len(payload["blocks"]))
-                        return
-                except json.JSONDecodeError:
-                    pass  # Fallback to plain text processing if invalid JSON
-
+        # Check if output is a Block Kit JSON payload
+        text_trimmed = text.strip()
+        if text_trimmed.startswith("{") and text_trimmed.endswith("}") and '"blocks"' in text_trimmed:
             try:
-                from lucy.pipeline.output import process_output
-                from lucy.slack.blockkit import text_to_blocks
-                from lucy.slack.rich_output import enhance_blocks, format_links
+                payload = json.loads(text_trimmed)
+                if "blocks" in payload:
+                    await self.slack_client.chat_postMessage(
+                        channel=channel,
+                        blocks=payload["blocks"],
+                        text=payload.get("text", "Automated report"),
+                    )
+                    logger.info("cron_result_delivered_blocks", channel=channel, blocks=len(payload["blocks"]))
+                    return
+            except json.JSONDecodeError:
+                pass  # fallback to plain text processing
 
-                formatted = await process_output(text)
-                formatted = format_links(formatted)
+        try:
+            from lucy.pipeline.output import process_output
+            from lucy.slack.blockkit import text_to_blocks
+            from lucy.slack.rich_output import enhance_blocks, format_links
 
-                blocks = text_to_blocks(formatted)
-                blocks = enhance_blocks(blocks) if blocks else blocks
-            except Exception as fmt_exc:
-                logger.warning(
-                    "cron_delivery_formatting_failed",
-                    channel=channel,
-                    error=str(fmt_exc),
-                )
-                formatted = text
-                blocks = None
+            formatted = await process_output(text)
+            formatted = format_links(formatted)
 
-            if blocks:
-                await self.slack_client.chat_postMessage(
-                    channel=channel,
-                    blocks=blocks,
-                    text=formatted[:200],
-                )
-            else:
-                await self.slack_client.chat_postMessage(
-                    channel=channel,
-                    text=formatted,
-                )
-            logger.info(
-                "cron_result_delivered",
-                channel=channel,
-                text_length=len(formatted),
-                blocks=len(blocks) if blocks else 0,
-            )
-        except Exception as e:
+            blocks = text_to_blocks(formatted)
+            blocks = enhance_blocks(blocks) if blocks else blocks
+        except Exception as fmt_exc:
             logger.warning(
-                "cron_delivery_failed",
+                "cron_delivery_formatting_failed",
                 channel=channel,
-                error=str(e),
+                error=str(fmt_exc),
             )
+            formatted = text
+            blocks = None
+
+        if blocks:
+            await self.slack_client.chat_postMessage(
+                channel=channel,
+                blocks=blocks,
+                text=formatted[:200],
+            )
+        else:
+            await self.slack_client.chat_postMessage(
+                channel=channel,
+                text=formatted,
+            )
+        logger.info(
+            "cron_result_delivered",
+            channel=channel,
+            text_length=len(formatted),
+            blocks=len(blocks) if blocks else 0,
+        )
 
     async def _fuzzy_find_cron(
         self, workspace_id: str, query: str

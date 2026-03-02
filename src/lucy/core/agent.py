@@ -17,7 +17,7 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -234,6 +234,14 @@ class AgentContext:
     is_cron_execution: bool = False
     budget_remaining_s: float = 14400.0
     budget_start_time: float = 0.0
+    # Tool calls that have already been HITL-approved and must bypass the gate.
+    # Each entry: {"tool_name": str, "parameters": dict}.
+    # The gate consumes (pops) the first matching entry when found.
+    pre_approved_tools: list[dict[str, Any]] = field(default_factory=list)
+    # When True, skip ALL confirmation gates for every tool call in this run.
+    # Set by _execute_approved_action — the user already approved this agent run
+    # by clicking the Approve button, so no further gating is needed.
+    skip_confirmation_gates: bool = False
 
 
 def _check_budget(ctx: AgentContext) -> float:
@@ -329,6 +337,7 @@ class LucyAgent:
         self._current_channel_id = ctx.channel_id
         self._current_thread_ts = ctx.thread_ts
         self._current_user_slack_id = ctx.user_slack_id
+        self._current_ws: Any = None  # set after workspace is ensured
         self._uploaded_files: set[str] = set()
         self._pending_uploads: list[str] = []
 
@@ -377,7 +386,12 @@ class LucyAgent:
         from lucy.workspace.onboarding import ensure_workspace
 
         async with trace.span("ensure_workspace"):
-            ws = await ensure_workspace(ctx.workspace_id, slack_client)
+            ws = await ensure_workspace(
+                ctx.workspace_id,
+                slack_client,
+                owner_slack_id=ctx.user_slack_id,
+            )
+            self._current_ws = ws
 
         # 3. Fetch connected services + meta-tools in parallel
         from lucy.pipeline.prompt import build_lightweight_prompt, build_system_prompt
@@ -414,6 +428,11 @@ class LucyAgent:
             from lucy.tools.services import get_services_tool_definitions
             if settings.openclaw_base_url and settings.openclaw_api_key:
                 tools.extend(get_services_tool_definitions())
+
+            # Proactive Slack tools (react, post, DM) -- available always so cron
+            # agents can take visible actions without going through Composio.
+            from lucy.tools.slack_proactive import get_slack_proactive_tool_definitions
+            tools.extend(get_slack_proactive_tool_definitions())
 
             tools.append({
                 "type": "function",
@@ -754,25 +773,68 @@ class LucyAgent:
                 },
             })
 
+            # Load per-workspace MCP connections first so their service slugs
+            # are known before we add custom wrappers. MCP tools always take
+            # precedence — any custom wrapper whose service slug matches an
+            # active MCP connection is suppressed to prevent the agent from
+            # routing through stale wrappers.
+            mcp_service_slugs: set[str] = set()
+            try:
+                from lucy.workspace.connections import load_mcp_connections
+                mcp_connections = await load_mcp_connections(ws)
+                for _conn in mcp_connections:
+                    tools.extend(_conn.tools_cache)
+                    mcp_service_slugs.add(_conn.service.lower())
+            except Exception as _mcp_load_err:
+                logger.warning(
+                    "mcp_connections_load_failed_during_assembly",
+                    workspace_id=ctx.workspace_id,
+                    error=str(_mcp_load_err),
+                )
+
             from lucy.integrations.custom_wrappers import load_custom_wrapper_tools
-            tools.extend(load_custom_wrapper_tools())
+            for wrapper_tool in load_custom_wrapper_tools():
+                # Suppress wrapper tools whose service is covered by an active MCP.
+                # e.g. if mcp_craft_* tools are loaded, skip any lucy_craft_* wrapper.
+                try:
+                    tool_name_lower = (
+                        wrapper_tool.get("function", {}).get("name", "").lower()
+                    )
+                    shadowed = any(
+                        tool_name_lower.startswith(f"lucy_{slug}_")
+                        or tool_name_lower == f"lucy_{slug}"
+                        for slug in mcp_service_slugs
+                    )
+                    if shadowed:
+                        logger.debug(
+                            "custom_wrapper_suppressed_by_mcp",
+                            tool=tool_name_lower,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        continue
+                except Exception:
+                    pass
+                tools.append(wrapper_tool)
 
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "lucy_resolve_custom_integration",
                     "description": (
-                        "Build a custom API integration for a service that "
-                        "Composio does not support natively. Call this when: "
-                        "(1) COMPOSIO_MANAGE_CONNECTIONS could not find the "
-                        "toolkit, AND (2) the user has agreed to attempt a "
-                        "custom connection. This tool researches the service's "
-                        "API, generates a Python wrapper, tests it, and "
-                        "deploys it as a new set of callable tools. After it "
-                        "succeeds, ask the user for their API key and store "
-                        "it with lucy_store_api_key. NEVER use Bright Data, "
-                            "web scraping, or any other workaround. This is the "
-                        "ONLY correct path for unsupported services."
+                        "Research a service and find the best integration path. "
+                        "Call this IMMEDIATELY when COMPOSIO_MANAGE_CONNECTIONS "
+                        "cannot find a service — no user consent needed to research. "
+                        "The tool runs grounded web research to discover whether the "
+                        "service has: (1) MCP support (preferred), (2) an OpenAPI "
+                        "spec, or (3) a REST API for a custom wrapper. It then "
+                        "attempts the best path automatically and returns specific "
+                        "findings. For MCP services it returns setup instructions; "
+                        "for API services it builds and deploys a wrapper. "
+                        "NEVER ask the user 'want me to give it a shot?' before "
+                        "calling this — do the research first, then present the "
+                        "specific option found. After it succeeds and needs an API "
+                        "key, ask the user and store it with lucy_store_api_key. "
+                        "NEVER use Bright Data, web scraping, or any workaround."
                     ),
                     "parameters": {
                         "type": "object",
@@ -823,6 +885,106 @@ class LucyAgent:
                             },
                         },
                         "required": ["service_slug"],
+                    },
+                },
+            })
+
+            # MCP management tools
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_connect_mcp",
+                    "description": (
+                        "Connect to a service that exposes an MCP (Model Context Protocol) "
+                        "server over HTTP/SSE. Call this after the user provides their MCP URL. "
+                        "On success, new mcp_{service}_* tools will be available for future "
+                        "requests. Use when: (1) the user pastes an MCP URL, OR (2) "
+                        "lucy_resolve_custom_integration returns status=needs_user_mcp_url. "
+                        "Do NOT guess MCP URLs — always use a URL provided by the user or "
+                        "returned by the resolver."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service": {
+                                "type": "string",
+                                "description": (
+                                    "Short slug for the service, e.g. 'craft', 'notion', 'linear'. "
+                                    "Used to prefix the discovered tools as mcp_{service}_*."
+                                ),
+                            },
+                            "mcp_url": {
+                                "type": "string",
+                                "description": (
+                                    "The HTTP or SSE URL of the MCP server, as provided by the user "
+                                    "or returned by the service settings page."
+                                ),
+                            },
+                        },
+                        "required": ["service", "mcp_url"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_disconnect_mcp",
+                    "description": (
+                        "Remove an active MCP connection. Deletes the stored URL and cached "
+                        "tool schemas for the service. The mcp_{service}_* tools will no "
+                        "longer be available after disconnection. Always confirm with the "
+                        "user before calling this."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service": {
+                                "type": "string",
+                                "description": "Service slug to disconnect, e.g. 'craft'.",
+                            },
+                        },
+                        "required": ["service"],
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_list_mcp_connections",
+                    "description": (
+                        "List all active MCP connections for this workspace. "
+                        "Returns each service name, the number of available tools, "
+                        "and when the connection was established. Call this when "
+                        "the user asks what MCP integrations are connected."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            })
+
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "lucy_refresh_mcp",
+                    "description": (
+                        "Re-discover tools for an existing MCP connection. Use this when "
+                        "the user says the service added new capabilities, or when tool "
+                        "calls are failing with 'unknown tool' errors from the MCP server. "
+                        "Re-connects to the MCP server and updates the cached tool schemas."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "service": {
+                                "type": "string",
+                                "description": "Service slug to refresh, e.g. 'craft'.",
+                            },
+                        },
+                        "required": ["service"],
                     },
                 },
             })
@@ -961,9 +1123,12 @@ class LucyAgent:
             preflight_parts: list[str] = []
 
             try:
-                from lucy.workspace.memory import get_session_context_for_prompt
-                session_ctx = await get_session_context_for_prompt(
-                    ws, thread_ts=ctx.thread_ts,
+                from lucy.workspace.memory import load_relevant_memories
+                session_ctx = await load_relevant_memories(
+                    ws,
+                    user_id=ctx.user_slack_id,
+                    thread_ts=ctx.thread_ts,
+                    topic_hint=message,
                 )
                 if session_ctx:
                     preflight_parts.append(session_ctx)
@@ -1081,9 +1246,12 @@ class LucyAgent:
 
         # Session memory (recent facts from this conversation)
         try:
-            from lucy.workspace.memory import get_session_context_for_prompt
-            session_ctx = await get_session_context_for_prompt(
-                ws, thread_ts=ctx.thread_ts,
+            from lucy.workspace.memory import load_relevant_memories
+            session_ctx = await load_relevant_memories(
+                ws,
+                user_id=ctx.user_slack_id,
+                thread_ts=ctx.thread_ts,
+                topic_hint=message,
             )
             if session_ctx:
                 planner_context_parts.append(session_ctx[:1000])
@@ -1322,8 +1490,6 @@ class LucyAgent:
                 add_session_fact,
                 append_to_company_knowledge,
                 append_to_team_knowledge,
-                check_fact_contradictions,
-                classify_memory_category,
                 classify_memory_target,
                 extract_facts_from_message,
                 should_persist_memory,
@@ -1334,12 +1500,9 @@ class LucyAgent:
             # without explicit memory signals.
             extracted = extract_facts_from_message(message)
             for fact_text, category in extracted:
-                target = classify_memory_target(message)
-                if target == "company":
-                    await append_to_company_knowledge(ws, fact_text)
-                elif target == "team":
-                    await append_to_team_knowledge(ws, fact_text)
-                else:
+                # user_preferences always go to session memory — they are
+                # personal facts about this user, never company/team-wide.
+                if category == "user_preferences":
                     await add_session_fact(
                         ws, fact_text,
                         source="structured_extract",
@@ -1347,6 +1510,20 @@ class LucyAgent:
                         thread_ts=ctx.thread_ts,
                         user_id=ctx.user_slack_id,
                     )
+                else:
+                    target = classify_memory_target(message)
+                    if target == "company":
+                        await append_to_company_knowledge(ws, fact_text)
+                    elif target == "team":
+                        await append_to_team_knowledge(ws, fact_text)
+                    else:
+                        await add_session_fact(
+                            ws, fact_text,
+                            source="structured_extract",
+                            category=category,
+                            thread_ts=ctx.thread_ts,
+                            user_id=ctx.user_slack_id,
+                        )
             if extracted:
                 logger.debug(
                     "structured_facts_extracted",
@@ -1354,45 +1531,105 @@ class LucyAgent:
                     workspace_id=ctx.workspace_id,
                 )
 
-            # Strategy 2: signal-based persistence (broader catch for
-            # messages with explicit memory signals but no structured facts)
-            if should_persist_memory(message) and not extracted:
-                target = classify_memory_target(message)
-                fact = message.strip()
-                if len(fact) > 500:
-                    fact = fact[:500] + "..."
-
-                if target in ("company", "team"):
-                    warning = await check_fact_contradictions(
-                        ws, fact, target,
+            # Strategy 1b: extract structured facts from the LLM's own response text.
+            #
+            # Fires when:
+            # (a) Strategy 1 found no structured facts in the user message, OR
+            # (b) The user message has an explicit memory signal (should_persist_memory)
+            #     regardless of Strategy 1 — so LLM-confirmed values are always captured.
+            #
+            # This replaces the former Strategy 2 (which stored raw 500-char message text).
+            # Raw text is never stored; only structured facts the LLM echoes back are kept.
+            # Examples: "my email is X" → LLM replies "Got it, I've noted X as your email"
+            #           "remember our Q3 target is $50K MRR" → LLM confirms → fact stored
+            memory_signal = should_persist_memory(message)
+            if response_text and (not extracted or memory_signal):
+                response_extracted = extract_facts_from_message(response_text)
+                new_facts = [
+                    (ft, cat) for ft, cat in response_extracted
+                    if not any(ft.lower() == ef.lower() for ef, _ in extracted)
+                ]
+                for fact_text, category in new_facts:
+                    if category == "user_preferences":
+                        await add_session_fact(
+                            ws, fact_text,
+                            source="response_extract",
+                            category=category,
+                            thread_ts=ctx.thread_ts,
+                            user_id=ctx.user_slack_id,
+                        )
+                    else:
+                        target = classify_memory_target(response_text)
+                        if target == "company":
+                            await append_to_company_knowledge(ws, fact_text)
+                        elif target == "team":
+                            await append_to_team_knowledge(ws, fact_text)
+                        else:
+                            await add_session_fact(
+                                ws, fact_text,
+                                source="response_extract",
+                                category=category,
+                                thread_ts=ctx.thread_ts,
+                                user_id=ctx.user_slack_id,
+                            )
+                if new_facts:
+                    if not extracted:
+                        extracted = new_facts
+                    logger.debug(
+                        "response_facts_extracted",
+                        count=len(new_facts),
+                        workspace_id=ctx.workspace_id,
                     )
-                    if warning:
-                        logger.warning(
-                            "memory_contradiction_detected",
-                            fact=fact[:100],
-                            warning=warning,
-                            target=target,
+
+            # Strategy 1c: LLM-based semantic extraction — third-pass fallback.
+            #
+            # Fires only when:
+            # - The message has an explicit memory signal (should_persist_memory=True)
+            # - Both regex passes (user message + LLM response) found nothing
+            #
+            # This uses a fast LLM micro-call (~100 tokens) to handle natural-language
+            # facts that don't match any regex pattern, e.g.:
+            # "remember, our board meeting is March 20th at 2pm"
+            # "I handle all SEO for the company"
+            # "we're targeting $50K MRR by Q3"
+            #
+            # Raw text is NEVER stored — only structured (fact, category) pairs are.
+            if memory_signal and not extracted:
+                try:
+                    from lucy.workspace.memory import extract_facts_llm
+                    llm_extracted = await extract_facts_llm(message)
+                    for fact_text, category in llm_extracted:
+                        if category == "user_preferences":
+                            await add_session_fact(
+                                ws, fact_text,
+                                source="llm_extract",
+                                category=category,
+                                thread_ts=ctx.thread_ts,
+                                user_id=ctx.user_slack_id,
+                            )
+                        else:
+                            target = classify_memory_target(message)
+                            if target == "company":
+                                await append_to_company_knowledge(ws, fact_text)
+                            elif target == "team":
+                                await append_to_team_knowledge(ws, fact_text)
+                            else:
+                                await add_session_fact(
+                                    ws, fact_text,
+                                    source="llm_extract",
+                                    category=category,
+                                    thread_ts=ctx.thread_ts,
+                                    user_id=ctx.user_slack_id,
+                                )
+                    if llm_extracted:
+                        logger.debug(
+                            "llm_facts_extracted",
+                            count=len(llm_extracted),
                             workspace_id=ctx.workspace_id,
                         )
+                except Exception as _llm_exc:
+                    logger.debug("llm_extract_strategy_failed", error=str(_llm_exc))
 
-                if target == "company":
-                    await append_to_company_knowledge(ws, fact)
-                elif target == "team":
-                    await append_to_team_knowledge(ws, fact)
-                else:
-                    category = classify_memory_category(message)
-                    await add_session_fact(
-                        ws, fact,
-                        source="conversation",
-                        category=category,
-                        thread_ts=ctx.thread_ts,
-                        user_id=ctx.user_slack_id,
-                    )
-                logger.debug(
-                    "memory_persisted",
-                    target=target,
-                    workspace_id=ctx.workspace_id,
-                )
         except Exception as e:
             logger.warning("memory_persist_error", error=str(e))
 
@@ -1970,6 +2207,93 @@ class LucyAgent:
             )
             self._current_run_tool_count += len(tool_calls)
 
+            # Check for pending_approval BEFORE appending to messages.
+            # If any tool was gated, we must stop here — not give the LLM
+            # more turns to find an alternative path around the user's decision.
+            _pending_approval_action_id: str | None = None
+            for _call_id, _result_str in tool_results:
+                try:
+                    _r = json.loads(_result_str)
+                    if isinstance(_r, dict) and _r.get("status") == "pending_approval":
+                        _pending_approval_action_id = _r.get("action_id", "")
+                        break
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if _pending_approval_action_id is not None:
+                # Collect the blocks and narrative from the gated result.
+                _pending_blocks: list[dict[str, Any]] | None = None
+                _pending_narrative = ""
+                for _cid, _rs in tool_results:
+                    try:
+                        _r = json.loads(_rs)
+                        if isinstance(_r, dict) and _r.get("status") == "pending_approval":
+                            _pending_blocks = _r.get("blocks")
+                            _pending_narrative = _r.get("description", "")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                # response_text holds whatever the LLM produced alongside the
+                # tool call (e.g. "Sure, I can connect Craft via MCP — go ahead?").
+                # Prefer that; fall back to the template narrative when it's empty.
+                _hitl_text = response_text.strip() or _pending_narrative
+
+                # Compose ONE Slack message: LLM/narrative section + divider +
+                # the action buttons from the pending result.
+                if _pending_blocks:
+                    _action_blocks = [b for b in _pending_blocks if b.get("type") == "actions"]
+                    _hitl_blocks: list[dict[str, Any]] = []
+                    if _hitl_text:
+                        _hitl_blocks.append({
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": _hitl_text},
+                        })
+                        _hitl_blocks.append({"type": "divider"})
+                    _hitl_blocks.extend(_action_blocks)
+                else:
+                    _hitl_blocks = []
+
+                if slack_client and _hitl_blocks:
+                    _channel = getattr(ctx, "channel_id", None) or self._current_channel_id
+                    _thread  = getattr(ctx, "thread_ts",  None) or self._current_thread_ts
+                    if _channel:
+                        try:
+                            await slack_client.chat_postMessage(
+                                channel=_channel,
+                                thread_ts=_thread,
+                                blocks=_hitl_blocks,
+                                text=_hitl_text[:300] if _hitl_text else "Action requires approval",
+                            )
+                            logger.info(
+                                "hitl_blocks_posted",
+                                action_id=_pending_approval_action_id,
+                                channel=_channel,
+                                llm_text_used=bool(response_text.strip()),
+                            )
+                        except Exception as _post_err:
+                            logger.warning(
+                                "hitl_blocks_post_failed",
+                                error=str(_post_err)[:200],
+                            )
+
+                # Append tool results to message history so the agent has context
+                # if the approved action eventually re-enters the loop.
+                for call_id, result_str in tool_results:
+                    all_messages.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": result_str,
+                    })
+
+                # Suppress main handler's say() — the blocks ARE the response.
+                response_text = "__hitl_pending__"
+                logger.info(
+                    "agent_loop_halted_for_hitl",
+                    action_id=_pending_approval_action_id,
+                    workspace_id=ctx.workspace_id,
+                )
+                break
+
             for call_id, result_str in tool_results:
                 if len(result_str) > TOOL_RESULT_SUMMARY_THRESHOLD:
                     try:
@@ -2528,10 +2852,45 @@ class LucyAgent:
             from lucy.core.confirmation_gate import should_gate, create_gated_result
             from lucy.core.action_classifier import get_classification_summary
 
-            gate_needed, action_type = should_gate(
-                name, params,
-                is_cron_execution=getattr(ctx, "is_cron_execution", False),
-            )
+            # Check if this entire agent run is pre-authorized (user clicked Approve
+            # on the parent action). If so, skip all gates — no further HITL prompts.
+            _skip_all_gates = getattr(ctx, "skip_confirmation_gates", False)
+
+            if _skip_all_gates:
+                gate_needed = False
+                from lucy.core.action_classifier import ActionType as _AT
+                action_type = _AT.WRITE
+                logger.info(
+                    "confirmation_gate_skipped_approved_run",
+                    tool=name,
+                    workspace_id=ctx.workspace_id,
+                )
+            else:
+                # Check if this specific tool call was pre-approved via HITL.
+                # _execute_approved_action populates ctx.pre_approved_tools as a
+                # fallback for one-time single-call bypass.
+                _pre_approved = getattr(ctx, "pre_approved_tools", [])
+                _pre_approved_idx: int | None = None
+                for _i, _pa in enumerate(_pre_approved):
+                    if _pa.get("tool_name") == name and _pa.get("parameters") == params:
+                        _pre_approved_idx = _i
+                        break
+
+                if _pre_approved_idx is not None:
+                    _pre_approved.pop(_pre_approved_idx)
+                    gate_needed = False
+                    from lucy.core.action_classifier import ActionType as _AT
+                    action_type = _AT.WRITE
+                    logger.info(
+                        "confirmation_gate_skipped_pre_approved",
+                        tool=name,
+                        workspace_id=ctx.workspace_id,
+                    )
+                else:
+                    gate_needed, action_type = should_gate(
+                        name, params,
+                        is_cron_execution=getattr(ctx, "is_cron_execution", False),
+                    )
 
             logger.debug(
                 "action_classified",
@@ -2548,7 +2907,16 @@ class LucyAgent:
                     action_type=action_type,
                     workspace_id=ctx.workspace_id,
                 )
-                return call_id, json.dumps(gated_result, default=str)
+                # Do NOT post to Slack here. The agent loop's pending-approval
+                # break will combine the LLM's own response_text with these
+                # blocks and post ONE combined message. Return the full result
+                # so the outer loop can extract blocks and description.
+                return call_id, json.dumps({
+                    "status": "pending_approval",
+                    "action_id": gated_result.get("action_id"),
+                    "blocks": gated_result.get("blocks"),
+                    "description": gated_result.get("description", ""),
+                })
 
             if name == "COMPOSIO_MULTI_EXECUTE_TOOL":
                 tools_list = params.get("tools") or params.get("actions") or []
@@ -2565,7 +2933,11 @@ class LucyAgent:
                             or act.get("tool") or ""
                         )
                     act_name_lower = str(act_name).lower()
-                    if act_name_lower.startswith("lucy_custom_") or act_name_lower.startswith("lucy_"):
+                    if (
+                        act_name_lower.startswith("lucy_custom_")
+                        or act_name_lower.startswith("lucy_")
+                        or act_name_lower.startswith("mcp_")
+                    ):
                         misrouted.append(act if isinstance(act, dict) else {"tool_slug": act})
                     else:
                         clean_actions.append(act)
@@ -2623,17 +2995,18 @@ class LucyAgent:
                     result["_dynamic_integration_hint"] = {
                         "unresolved_services": unresolved,
                         "instruction": (
-                            f"These services ({svc_list}) do NOT exist in Composio. "
-                            "Tell the user honestly: 'These services don't have "
-                            "a native integration that I can connect to directly. "
-                            "However, I can try to build a custom connection for "
-                            "you. I can't guarantee it will work, but I'll do my "
-                            "best. Want me to give it a shot?' "
-                            "Do NOT attempt web scraping, Bright Data, or any "
-                            "other workaround. Do NOT generate fake connection "
-                            "links. When the user says yes, call "
-                            "lucy_resolve_custom_integration with the service "
-                            "names. That is the ONLY correct next step."
+                            f"These services ({svc_list}) are NOT in Composio. "
+                            "Do NOT tell the user 'I can build a custom integration' "
+                            "or ask 'want me to give it a shot?' — you do not yet "
+                            "know what options exist. "
+                            "IMMEDIATELY call lucy_resolve_custom_integration with "
+                            f"the service names {unresolved}. This will run grounded "
+                            "research to discover whether the service has MCP support, "
+                            "an OpenAPI spec, or a REST API — and will attempt the "
+                            "best path automatically. "
+                            "Only AFTER you have the research results should you tell "
+                            "the user what was found and what the next step is. "
+                            "MCP is always preferred over a custom API wrapper."
                         ),
                     }
 
@@ -2945,7 +3318,7 @@ class LucyAgent:
         # ── Delegation to sub-agents ─────────────────────────────────
         if tool_name.startswith("delegate_to_") and tool_name.endswith("_agent"):
             return await self._handle_delegation(
-                tool_name, parameters, workspace_id,
+                tool_name, parameters, workspace_id, ctx=ctx,
             )
 
         # ── External tools (via Composio) ────────────────────────────
@@ -3230,30 +3603,43 @@ class LucyAgent:
                         "timing_ms": r.timing_ms,
                         **r.result_data,
                     }
+                    # Add a grounding instruction — model MUST use this data,
+                    # NOT its training knowledge about the service
+                    entry["GROUNDING_INSTRUCTION"] = (
+                        "CRITICAL: Base your response ENTIRELY on the data "
+                        "above from this tool result. Do NOT use your training "
+                        f"data knowledge about {r.service_name}. The tool ran "
+                        "live research and its findings take precedence over "
+                        "anything you 'know' about this service."
+                    )
                     if r.success and r.needs_api_key:
                         slug = r.service_name.lower().replace(
                             " ", ""
                         ).replace(".", "").replace("-", "")
-                        entry["next_step"] = (
-                            f"Describe what you built and what you can now "
-                            f"help with IN YOUR OWN WORDS based on the data "
-                            f"above. Then ask for their {r.service_name} API "
-                            f"key. When they provide it, call "
-                            f"lucy_store_api_key with service_slug='{slug}' "
-                            f"and the key. Do NOT skip this step."
-                        )
+                        # Only set next_step if the resolver didn't already set one
+                        if "next_step" not in entry:
+                            entry["next_step"] = (
+                                f"Tell the user what integration path was found "
+                                f"(stage={r.stage.value}) and ask for their "
+                                f"{r.service_name} API key. When they provide "
+                                f"it, call lucy_store_api_key with "
+                                f"service_slug='{slug}' and the key."
+                            )
                     elif r.success:
-                        entry["next_step"] = (
-                            "Describe the result to the user IN YOUR OWN "
-                            "WORDS. Mention what capabilities are now "
-                            "available based on the data above."
-                        )
+                        # Only set next_step if the resolver didn't already set one
+                        # (the resolver sets specific instructions for MCP HTTP etc.)
+                        if "next_step" not in entry:
+                            entry["next_step"] = (
+                                "Tell the user what was found and the next "
+                                "step based on the data above."
+                            )
                     else:
-                        entry["next_step"] = (
-                            "Explain honestly that you could not build the "
-                            "integration. Use the reasons from the data "
-                            "above. Offer alternatives if appropriate."
-                        )
+                        if "next_step" not in entry:
+                            entry["next_step"] = (
+                                "Explain honestly that you could not build the "
+                                "integration. Use the reasons from the data "
+                                "above. Offer alternatives if appropriate."
+                            )
                     formatted.append(entry)
                 return {"results": formatted}
 
@@ -3262,6 +3648,25 @@ class LucyAgent:
 
             if tool_name == "lucy_delete_custom_integration":
                 return self._delete_custom_integration(parameters)
+
+            if tool_name == "lucy_connect_mcp":
+                return await self._handle_connect_mcp(parameters, workspace_id)
+
+            if tool_name == "lucy_disconnect_mcp":
+                return await self._handle_disconnect_mcp(parameters, workspace_id)
+
+            if tool_name == "lucy_list_mcp_connections":
+                return await self._handle_list_mcp_connections(workspace_id)
+
+            if tool_name == "lucy_refresh_mcp":
+                return await self._handle_refresh_mcp(parameters, workspace_id)
+
+            from lucy.tools.slack_proactive import is_slack_proactive_tool
+            if is_slack_proactive_tool(tool_name):
+                from lucy.tools.slack_proactive import execute_slack_proactive_tool
+                return await execute_slack_proactive_tool(
+                    tool_name, parameters, self._current_slack_client,
+                )
 
             from lucy.tools.spaces import is_spaces_tool
             if is_spaces_tool(tool_name):
@@ -3287,6 +3692,11 @@ class LucyAgent:
 
             if tool_name.startswith("lucy_custom_"):
                 return await self._execute_custom_wrapper_tool(
+                    tool_name, parameters, workspace_id,
+                )
+
+            if tool_name.startswith("mcp_"):
+                return await self._execute_mcp_tool(
                     tool_name, parameters, workspace_id,
                 )
 
@@ -3378,6 +3788,260 @@ class LucyAgent:
             )
 
         return out
+
+    # ── MCP tool execution ────────────────────────────────────────────────────
+
+    async def _execute_mcp_tool(
+        self,
+        tool_name: str,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Execute an MCP tool (mcp_{service}_{native_name}).
+
+        Looks up the MCP connection record for the service, strips the prefix,
+        then calls the MCP server using the stored URL and transport hint.
+        """
+        from lucy.integrations.mcp_client import call_tool, parse_mcp_tool_name
+        from lucy.workspace.connections import get_mcp_connection
+
+        service_slug, native_name = parse_mcp_tool_name(tool_name)
+        if not native_name:
+            return {"error": f"Cannot parse MCP tool name: {tool_name}"}
+
+        conn = await get_mcp_connection(ws=self._current_ws, service=service_slug)
+        if conn is None:
+            # Try prefix-match for multi-word slugs (e.g. mcp_craft_do_search → craft_do)
+            from lucy.workspace.connections import load_mcp_connections
+            all_conns = await load_mcp_connections(self._current_ws)
+            remaining = tool_name.removeprefix("mcp_")
+            for candidate in all_conns:
+                if remaining.startswith(candidate.service + "_"):
+                    conn = candidate
+                    native_name = remaining.removeprefix(candidate.service + "_")
+                    break
+
+        if conn is None:
+            return {
+                "error": (
+                    f"No MCP connection found for service '{service_slug}'. "
+                    "Use lucy_list_mcp_connections to see connected services, "
+                    "or lucy_connect_mcp to connect a new one."
+                )
+            }
+
+        result = await call_tool(
+            url=conn.mcp_url,
+            tool_name=native_name,
+            arguments=parameters,
+            transport_hint=conn.transport,
+        )
+
+        logger.info(
+            "mcp_tool_executed",
+            tool=tool_name,
+            service=conn.service,
+            native=native_name,
+            workspace_id=workspace_id,
+            success="error" not in result,
+        )
+        return result
+
+    # ── MCP management handlers ───────────────────────────────────────────────
+
+    async def _handle_connect_mcp(
+        self,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Connect to an MCP server and cache its tool schemas."""
+        from lucy.integrations.mcp_client import connect_and_discover
+        from lucy.workspace.connections import MCPConnectionRecord, save_mcp_connection
+
+        service = parameters.get("service", "").strip().lower().replace(" ", "_")
+        mcp_url = parameters.get("mcp_url", "").strip()
+
+        if not service:
+            return {"error": "service is required (e.g. 'craft', 'notion')"}
+        if not mcp_url:
+            return {"error": "mcp_url is required"}
+
+        result = await connect_and_discover(mcp_url, service)
+        if not result.success:
+            # Detect the specific case of an expired/invalid link (HTTP 404)
+            _err = result.error or ""
+            if "MCP_LINK_EXPIRED" in _err or "404" in _err:
+                return {
+                    "error": "mcp_link_expired",
+                    "detail": _err,
+                    "next_step": (
+                        "Tell the user their MCP link has expired (it returned 404). "
+                        "Ask them to generate a fresh MCP link from "
+                        "Craft → Settings → Integrations → MCP, "
+                        "then paste the new URL here. "
+                        "Do NOT suggest or attempt any other integration method "
+                        "(API key, custom wrapper, etc.) — the user wants MCP."
+                    ),
+                }
+            return {
+                "error": _err,
+                "next_step": (
+                    "Tell the user the MCP connection failed with the error above. "
+                    "Ask them to check the URL and try again. "
+                    "Do NOT suggest or attempt any other integration method — "
+                    "the user wants MCP."
+                ),
+            }
+
+        record = MCPConnectionRecord(
+            service=result.service,
+            mcp_url=mcp_url,
+            transport=result.transport,
+            tools_cache=result.tools,
+            tool_count=result.tool_count,
+        )
+        await save_mcp_connection(ws=self._current_ws, record=record)
+
+        tool_names = [
+            t["function"]["name"].removeprefix(f"mcp_{result.service}_")
+            for t in result.tools[:10]
+            if isinstance(t, dict) and "function" in t
+        ]
+        more = f" (+{result.tool_count - 10} more)" if result.tool_count > 10 else ""
+
+        logger.info(
+            "mcp_connected",
+            service=service,
+            tool_count=result.tool_count,
+            transport=result.transport,
+            workspace_id=workspace_id,
+        )
+        return {
+            "status": "connected",
+            "service": result.service,
+            "tool_count": result.tool_count,
+            "transport": result.transport,
+            "sample_tools": tool_names,
+            "more_tools": more,
+            "next_step": (
+                f"Tell the user you connected to {service.title()} successfully. "
+                f"You discovered {result.tool_count} tools{more}. "
+                f"Give 2-3 example things you can now do for them using these tools. "
+                f"The tools are now available as mcp_{result.service}_* in your tool list "
+                f"(they will appear on the next request)."
+            ),
+        }
+
+    async def _handle_disconnect_mcp(
+        self,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Remove an MCP connection."""
+        from lucy.workspace.connections import delete_mcp_connection
+
+        service = parameters.get("service", "").strip().lower().replace(" ", "_")
+        if not service:
+            return {"error": "service is required"}
+
+        deleted = await delete_mcp_connection(ws=self._current_ws, service=service)
+        if not deleted:
+            return {
+                "error": f"No MCP connection found for '{service}'.",
+                "hint": "Use lucy_list_mcp_connections to see connected services.",
+            }
+
+        logger.info("mcp_disconnected", service=service, workspace_id=workspace_id)
+        return {
+            "status": "disconnected",
+            "service": service,
+            "message": f"MCP connection to {service} has been removed.",
+        }
+
+    async def _handle_list_mcp_connections(
+        self,
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """List all MCP connections for this workspace."""
+        from lucy.workspace.connections import load_mcp_connections
+
+        connections = await load_mcp_connections(ws=self._current_ws)
+        if not connections:
+            return {
+                "connections": [],
+                "message": (
+                    "No MCP connections yet. If you want to connect a service "
+                    "that has MCP support, use lucy_resolve_custom_integration "
+                    "to find out how, or ask the user for their MCP URL and call "
+                    "lucy_connect_mcp directly."
+                ),
+            }
+
+        return {
+            "connections": [
+                {
+                    "service": c.service,
+                    "tool_count": c.tool_count,
+                    "transport": c.transport,
+                    "installed_at": c.installed_at,
+                    "updated_at": c.updated_at,
+                }
+                for c in connections
+            ],
+            "total": len(connections),
+        }
+
+    async def _handle_refresh_mcp(
+        self,
+        parameters: dict[str, Any],
+        workspace_id: str,
+    ) -> dict[str, Any]:
+        """Re-discover tools for an existing MCP connection."""
+        from lucy.integrations.mcp_client import connect_and_discover
+        from lucy.workspace.connections import MCPConnectionRecord, get_mcp_connection, save_mcp_connection
+
+        service = parameters.get("service", "").strip().lower().replace(" ", "_")
+        if not service:
+            return {"error": "service is required"}
+
+        conn = await get_mcp_connection(ws=self._current_ws, service=service)
+        if conn is None:
+            return {
+                "error": f"No MCP connection found for '{service}'.",
+                "hint": "Use lucy_list_mcp_connections to see connected services.",
+            }
+
+        result = await connect_and_discover(conn.mcp_url, service)
+        if not result.success:
+            return {
+                "error": result.error,
+                "suggestion": "The MCP server may be down. Ask the user to verify their URL.",
+            }
+
+        updated = MCPConnectionRecord(
+            service=result.service,
+            mcp_url=conn.mcp_url,
+            transport=result.transport,
+            tools_cache=result.tools,
+            tool_count=result.tool_count,
+            installed_at=conn.installed_at,
+        )
+        await save_mcp_connection(ws=self._current_ws, record=updated)
+
+        logger.info(
+            "mcp_refreshed",
+            service=service,
+            old_count=conn.tool_count,
+            new_count=result.tool_count,
+            workspace_id=workspace_id,
+        )
+        return {
+            "status": "refreshed",
+            "service": service,
+            "previous_tool_count": conn.tool_count,
+            "new_tool_count": result.tool_count,
+            "transport": result.transport,
+        }
 
     @staticmethod
     def _validate_custom_tool_result(
@@ -3516,6 +4180,7 @@ class LucyAgent:
         tool_name: str,
         parameters: dict[str, Any],
         workspace_id: str,
+        ctx: AgentContext | None = None,
     ) -> dict[str, Any]:
         """Handle a delegate_to_*_agent tool call."""
         from lucy.core.sub_agents import REGISTRY, SUB_TIMEOUT_SECONDS, run_subagent
@@ -3584,13 +4249,16 @@ class LucyAgent:
 
                 if should_persist_memory(result):
                     ws = get_workspace(workspace_id)
-                    fact = result[:300]
-                    await add_session_fact(
-                        ws, fact,
-                        source=f"sub_agent:{agent_type}",
-                        category="session",
-                        thread_ts=getattr(self, "_current_thread_ts", None),
-                    )
+                    from lucy.workspace.memory import extract_facts_from_message
+                    extracted_from_result = extract_facts_from_message(result)
+                    for fact_text, category in extracted_from_result:
+                        await add_session_fact(
+                            ws, fact_text,
+                            source=f"sub_agent:{agent_type}",
+                            category=category,
+                            thread_ts=ctx.thread_ts if ctx else None,
+                            user_id=ctx.user_slack_id if ctx else None,
+                        )
             except Exception as e:
                 logger.warning("subagent_memory_persist_error", error=str(e))
 
@@ -4169,9 +4837,10 @@ def _validate_search_relevance(
             f"IMPORTANT: You searched for '{search_query}' but the results "
             f"returned are for different services: {mismatch_str}. "
             f"These are NOT the same as '{search_query}'. Do NOT suggest "
-            f"connecting to these services. Instead, acknowledge that "
-            f"'{search_query}' is not available as a native integration "
-            f"and offer to build a custom connection."
+            f"connecting to these services. Do NOT say 'I can build a custom "
+            f"integration' without researching first. Instead, call "
+            f"lucy_resolve_custom_integration(['{search_query}']) immediately "
+            f"to research what integration options exist (MCP, OpenAPI, or API)."
         )
         logger.warning(
             "search_relevance_mismatch",
@@ -4230,8 +4899,10 @@ def _validate_connection_relevance(
         result["_correction_instruction"] = (
             "WARNING: Some service name matches are INCORRECT. "
             + " ".join(corrections)
-            + " If the correct service is not available, acknowledge "
-            "honestly and offer to build a custom integration."
+            + " If the correct service is not in Composio, do NOT say "
+            "'I can build a custom integration' before researching. "
+            "Call lucy_resolve_custom_integration with the correct service "
+            "name immediately to discover what options exist."
         )
 
     return result
