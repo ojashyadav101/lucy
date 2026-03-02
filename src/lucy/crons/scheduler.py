@@ -110,6 +110,9 @@ class CronScheduler:
         )
         self.scheduler.add_listener(self._on_job_missed, EVENT_JOB_MISSED)
         self.slack_client = slack_client
+        # The Slack team_id that self.slack_client's bot token belongs to.
+        # Populated lazily on first use. slack_sync only runs for this workspace.
+        self._client_team_id: str = ""
         self._running = False
 
     def _on_job_missed(self, event: Any) -> None:
@@ -611,9 +614,40 @@ class CronScheduler:
                 error=str(e),
             )
 
-    async def _run_slack_sync(self, workspace_id: str) -> None:
-        """Execute the Slack message sync (no agent needed — direct I/O)."""
+    async def _get_client_team_id(self) -> str:
+        """Return the Slack team_id that self.slack_client is authorized for.
+
+        Result is cached after the first successful auth.test call.
+        """
+        if self._client_team_id:
+            return self._client_team_id
         if not self.slack_client:
+            return ""
+        try:
+            result = await self.slack_client.auth_test()
+            self._client_team_id = result.get("team_id", "")
+        except Exception as e:
+            logger.warning("slack_sync_auth_test_failed", error=str(e))
+        return self._client_team_id
+
+    async def _run_slack_sync(self, workspace_id: str) -> None:
+        """Execute the Slack message sync (no agent needed — direct I/O).
+
+        Only runs when workspace_id matches the Slack team the bot token belongs
+        to. Using the wrong token returns channels from the wrong workspace or an
+        empty list, causing silent data loss or cross-workspace contamination.
+        """
+        if not self.slack_client:
+            return
+
+        # Guard: only sync for the workspace that matches this client's token.
+        client_team = await self._get_client_team_id()
+        if client_team and workspace_id != client_team:
+            logger.debug(
+                "slack_sync_skipped_wrong_workspace",
+                workspace_id=workspace_id,
+                client_team=client_team,
+            )
             return
 
         import time as _time
