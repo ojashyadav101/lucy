@@ -96,54 +96,8 @@ def _load_prompt_modules(
     return "\n\n".join(parts)
 
 
-def _load_memory_context_template() -> str:
-    """Load the memory context prompt module template."""
-    path = _PROMPT_MODULES_DIR / "memory_context.md"
-    if path and path.exists():
-        return path.read_text(encoding="utf-8")
-    return (
-        "## What You Remember\n"
-        "{memory_items}\n\n"
-        "Use this context naturally in your responses. "
-        "Don't explicitly reference \"remembering\" unless asked. "
-        "Reference past context with phrases like \"as we discussed\" "
-        "or \"building on what you mentioned\"."
-    )
-
-
 # Modules loaded into the static prefix for all non-chat intents.
 _COMMON_MODULES = ["tool_use", "memory"]
-
-
-async def _build_memory_context(
-    ws: WorkspaceFS,
-    *,
-    user_id: str | None = None,
-    thread_ts: str | None = None,
-    topic_hint: str | None = None,
-) -> str:
-    """Build formatted memory context for prompt injection.
-
-    Uses scored retrieval: same-thread > same-user > topic-relevant > recent.
-    Returns empty string if no memories found.
-    """
-    try:
-        from lucy.workspace.memory import load_relevant_memories
-
-        formatted = await load_relevant_memories(
-            ws,
-            user_id=user_id,
-            thread_ts=thread_ts,
-            topic_hint=topic_hint,
-        )
-        if not formatted:
-            return ""
-
-        template = _load_memory_context_template()
-        return template.replace("{memory_items}", formatted)
-    except Exception as e:
-        logger.warning("memory_context_build_failed", error=str(e))
-        return ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -205,25 +159,15 @@ async def build_lightweight_prompt(
 
     key_content = await get_key_skill_content(ws)
 
-    memory_context = await _build_memory_context(
-        ws,
-        user_id=user_slack_id,
-        thread_ts=thread_ts,
-        topic_hint=user_message,
-    )
-
     parts = [soul, core + time_block]
     if key_content:
         parts.append(f"<knowledge>\n{key_content}\n</knowledge>")
-    if memory_context:
-        parts.append(f"<memory>\n{memory_context}\n</memory>")
 
     prompt = _SECTION_SEP.join(p for p in parts if p.strip())
     logger.debug(
         "lightweight_prompt_built",
         workspace_id=ws.workspace_id,
         prompt_length=len(prompt),
-        has_memory=bool(memory_context),
     )
     return prompt
 
@@ -504,15 +448,9 @@ async def build_system_prompt(
         ctx_lines.append("</invocation_context>")
         dynamic_parts.append("\n".join(ctx_lines))
 
-    # ── Memory context injection ─────────────────────────────────
-    memory_context = await _build_memory_context(
-        ws,
-        user_id=user_id,
-        thread_ts=thread_ts,
-        topic_hint=user_message,
-    )
-    if memory_context:
-        dynamic_parts.append(f"<memory>\n{memory_context}\n</memory>")
+    # Memory context is injected via the preflight_context system message in
+    # agent.py (positioned right before the user's message for relevance).
+    # Injecting it here in the static system prompt would duplicate tokens.
 
     # Build the reflection suffix dynamically. If the workspace has recent
     # ToolFailures in its LEARNINGS.md, extract their tool names and inject
@@ -586,7 +524,6 @@ async def build_system_prompt(
         compact=compact,
         connected_services=connected_services or [],
         has_relevant_skills=bool(relevant_skills),
-        has_memory=bool(memory_context),
         prompt_modules=prompt_modules or [],
     )
     return full_prompt

@@ -875,6 +875,9 @@ class CronScheduler:
 
         Used by _run_cron() so that DM-mode seed crons without a requesting_user_id
         can still deliver to the workspace owner rather than being silently dropped.
+
+        For channel-mode crons without a delivery_channel, falls back to DMing the
+        workspace owner so output is not silently lost.
         """
         if cron.delivery_mode == "dm" and cron.requesting_user_id:
             return cron.requesting_user_id
@@ -885,6 +888,16 @@ class CronScheduler:
                 return owner_id
         if cron.delivery_channel:
             return cron.delivery_channel
+        # Channel-mode cron with no delivery_channel set — fall back to DMing the owner
+        # rather than silently dropping the output.
+        owner_id = await self._resolve_workspace_owner(cron.workspace_dir)
+        if owner_id:
+            logger.info(
+                "cron_channel_delivery_fallback_to_owner_dm",
+                workspace_id=cron.workspace_dir,
+                cron=cron.path,
+            )
+            return owner_id
         return None
 
     async def _run_cron(self, workspace_id: str, cron: CronConfig) -> None:

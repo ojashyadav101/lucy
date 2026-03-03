@@ -315,27 +315,26 @@ class TestEdgeCaseHandlers:
             "GITHUB_CREATE_ISSUE", {"title": "Feature"}, recent
         )
 
-    # --- Test T: graceful degradation messages ---
+    # --- Test T: graceful degradation via error_strategy ---
     def test_t_degradation_messages(self):
-        """get_degradation_message returns warm messages for each type."""
-        from lucy.pipeline.edge_cases import (
-            classify_error_for_degradation,
-            get_degradation_message,
+        """error_strategy classifies errors and provides actionable messages."""
+        from lucy.pipeline.error_strategy import (
+            ErrorCategory,
+            classify_error,
+            get_actionable_degradation_message,
         )
 
         # Rate limit
-        assert classify_error_for_degradation(Exception("429 Too Many Requests")) == "rate_limited"
-        msg = get_degradation_message("rate_limited")
-        assert "moment" in msg.lower() or "right now" in msg.lower()
+        result = classify_error(Exception("429 Too Many Requests"))
+        assert result.category == ErrorCategory.RATE_LIMIT
 
         # Timeout
-        assert classify_error_for_degradation(Exception("Request timed out")) == "tool_timeout"
-        msg = get_degradation_message("tool_timeout")
-        assert "longer" in msg.lower() or "different" in msg.lower()
+        result = classify_error(Exception("Request timed out"))
+        assert result.category == ErrorCategory.TIMEOUT
 
-        # Unknown
-        msg = get_degradation_message("some_random_type")
-        assert msg  # Should still return something
+        # Actionable messages exist
+        msg = get_actionable_degradation_message(classify_error(Exception("429 rate limit")))
+        assert msg  # Should return something non-empty
 
 
 # ═══════════════════════════════════════════════════════════════════════════

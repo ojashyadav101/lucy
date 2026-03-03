@@ -54,9 +54,6 @@ class Settings(BaseSettings):
     openclaw_base_url: str = "http://167.86.82.46:18791"
     openclaw_api_key: str = ""
 
-    # CamoFox browser
-    camofox_url: str = "http://localhost:9377"
-
     # Database
     database_url: str = "postgresql+asyncpg://lucy:lucy@localhost:5432/lucy"
 
@@ -111,18 +108,14 @@ class Settings(BaseSettings):
     connection_max_concurrent_watches: int = 20
 
     # ── External service timeouts ─────────────────────────────
-    composio_timeout_s: float = 60.0
     mcp_timeout_s: float = 30.0
     vercel_timeout_s: float = 60.0
     convex_timeout_s: float = 30.0
-    camofox_request_timeout_s: float = 30.0
-    camofox_navigate_timeout_s: float = 45.0
     clerk_api_timeout_s: float = 60.0
     polar_api_timeout_s: float = 60.0
     openclaw_gateway_timeout_s: float = 120.0
 
     # Application
-    log_level: str = "INFO"
     env: str = "development"
 
     def model_post_init(self, __context: object) -> None:

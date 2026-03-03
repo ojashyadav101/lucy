@@ -68,3 +68,8 @@ dmypy.json
 # Ruff
 .ruff_cache/
 Archive.zip
+
+# Ad-hoc test/stress scripts
+stress_test*
+mock_mcps.py
+test_10_mcps.py

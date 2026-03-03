@@ -221,10 +221,3 @@ async def get_gateway_client() -> OpenClawGatewayClient:
     if _client is None:
         _client = OpenClawGatewayClient()
     return _client
-
-
-async def close_gateway_client() -> None:
-    global _client
-    if _client is not None:
-        await _client.close()
-        _client = None

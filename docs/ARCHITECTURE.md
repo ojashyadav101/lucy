@@ -1,8 +1,14 @@
 # Lucy — System Architecture
 
-> **Last updated:** 2026-02-26
+> **Last updated:** 2026-03-03 — Clean Sweep Audit Completed.
 >
-> This is the master document. Each section links to a detailed deep-dive.
+> **2026-03-03 Clean Sweep Highlights:**
+> - Full health and optimization audit completed across all packages.
+> - Resolved model escalation resolution (tier name to model ID mapping).
+> - Wired and routed local code execution tools (Python, Bash).
+> - Deduplicated memory injection in prompts.
+> - Removed `request_queue.py` and other dead infrastructure.
+> - Fixed middleware and handler bugs for Slack event processing.
 
 ---
 
@@ -62,8 +68,7 @@ User @mentions Lucy in Slack
 ┌─────────────────────────────────────────────────────────┐
 │  3. EDGE CASE CHECK (pipeline/edge_cases.py)            │
 │     ├─ Status query → format_task_status()              │
-│     ├─ Task cancellation → handle_task_cancellation()   │
-│     └─ Thread interrupt → decide_thread_interrupt()     │
+│     └─ Task cancellation → handle_task_cancellation()   │
 └───────────────────────┬─────────────────────────────────┘
                         │ (normal message)
                         ▼
@@ -167,8 +172,7 @@ User @mentions Lucy in Slack
      │          │ memory           │    │ resolver       │
      │          │ skills           │    │ mcp_manager    │
      │          │ executor         │    │ wrapper_gen    │
-     │          │ onboarding       │    │ camofox        │
-     │          │ snapshots        │    │ agentmail      │
+     │          │ onboarding       │    │ agentmail      │
      │          └──────────────────┘    └────────────────┘
      │                  ▲
      │                  │ persists to filesystem
@@ -224,7 +228,6 @@ Model escalation happens automatically when:
 | `SUB_MAX_TURNS` | 10 | `core/sub_agents.py` | Sub-agent max iterations |
 | `SUB_TIMEOUT_SECONDS` | 120 | `core/sub_agents.py` | Sub-agent timeout |
 | `MAX_BACKGROUND_TASKS` | 5 | `core/task_manager.py` | Per-workspace background task limit |
-| `MAX_QUEUE_DEPTH_PER_WORKSPACE` | 50 | `infra/request_queue.py` | Queue backpressure limit |
 | `SUPERVISOR_CHECK_INTERVAL_TURNS` | 3 | `core/supervisor.py` | Supervisor checkpoint frequency |
 | `_LLM_REWRITE_THRESHOLD` | 999 | `pipeline/output.py` | Disabled (set to 999) |
 
@@ -266,7 +269,6 @@ src/lucy/
 │   ├── memory.py           # Three-tier memory system
 │   ├── onboarding.py       # New workspace scaffolding
 │   ├── executor.py         # Code execution (Composio + local)
-│   ├── snapshots.py        # Snapshot persistence and deltas
 │   ├── activity_log.py     # Daily activity logging
 │   ├── slack_reader.py     # Channel listing
 │   ├── slack_sync.py       # Message sync to filesystem
@@ -289,7 +291,6 @@ src/lucy/
 │   ├── mcp_manager.py      # MCP server management
 │   ├── openapi_registrar.py# OpenAPI spec registration
 │   ├── wrapper_generator.py# LLM-generated API wrappers
-│   ├── camofox.py          # Headless browser for scraping
 │   ├── agentmail_client.py # Email send/receive
 │   ├── email_listener.py   # Inbound email polling
 │   ├── grounded_search.py  # Gemini grounded search
@@ -297,7 +298,6 @@ src/lucy/
 │
 ├── infra/                  # Infrastructure utilities
 │   ├── rate_limiter.py     # Token bucket per model/API
-│   ├── request_queue.py    # Priority queue with worker pool
 │   └── trace.py            # Per-request tracing with spans
 │
 ├── spaces/                 # Lucy Spaces web app platform
@@ -329,7 +329,7 @@ src/lucy/
 | [AGENT_LOOP.md](./AGENT_LOOP.md) | Agent orchestrator, supervisor system, sub-agents, model escalation, safety nets |
 | [MESSAGE_PIPELINE.md](./MESSAGE_PIPELINE.md) | Router, fast path, prompt builder, output pipeline (4 layers), humanize pool, edge cases |
 | [SLACK_LAYER.md](./SLACK_LAYER.md) | Event handling, Block Kit conversion, rich output, HITL approvals, reactions, middleware |
-| [WORKSPACE_MEMORY.md](./WORKSPACE_MEMORY.md) | Workspace filesystem, three-tier memory, skills, onboarding, Slack sync, timezone, snapshots |
+| [WORKSPACE_MEMORY.md](./WORKSPACE_MEMORY.md) | Workspace filesystem, three-tier memory, skills, onboarding, Slack sync, timezone |
 | [CRONS_HEARTBEAT.md](./CRONS_HEARTBEAT.md) | Cron scheduler, heartbeat monitors, condition evaluators |
 | [TOOLS_INTEGRATIONS.md](./TOOLS_INTEGRATIONS.md) | File generation, web search, email, Spaces, Composio internals, OpenClaw client, resolver chain |
 | [INFRASTRUCTURE.md](./INFRASTRUCTURE.md) | Rate limiting (TokenBucket), request queue (priority, dedup), request tracing (spans, logs) |

@@ -154,10 +154,10 @@ class TestComposioToolClassification:
         """COMPOSIO_MULTI_EXECUTE_TOOL defaults to WRITE without params."""
         assert classify("COMPOSIO_MULTI_EXECUTE_TOOL") == ActionType.WRITE
 
-    def test_remote_bash_is_destructive(self) -> None:
-        # Bash execution can run arbitrary commands (rm -rf, etc.)
-        # and must be classified as DESTRUCTIVE to trigger HITL approval.
-        assert classify("COMPOSIO_REMOTE_BASH_TOOL") == ActionType.DESTRUCTIVE
+    def test_remote_bash_classified_by_content(self) -> None:
+        # Bash execution is classified by command content, not blanket DESTRUCTIVE.
+        # Without parameters (or benign commands), it defaults to WRITE.
+        assert classify("COMPOSIO_REMOTE_BASH_TOOL") == ActionType.WRITE
 
 
 class TestPrefixHandling:

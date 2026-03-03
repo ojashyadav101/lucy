@@ -610,37 +610,6 @@ async def read_session_memory(
     return shared
 
 
-async def write_session_memory(
-    ws: WorkspaceFS,
-    items: list[dict[str, Any]],
-    user_id: str | None = None,
-) -> None:
-    """Write session memory.
-
-    When user_id is provided, personal (user_preferences) items are written to
-    the user-scoped file; all other items go to the shared workspace file.
-    When user_id is absent, all items are written to the shared file.
-    """
-    if user_id:
-        personal = [i for i in items if i.get("category") == "user_preferences"]
-        shared = [i for i in items if i.get("category") != "user_preferences"]
-        if personal:
-            await ws.write_file(
-                _user_session_path(user_id),
-                json.dumps(personal[-MAX_USER_ITEMS:], indent=2, ensure_ascii=False),
-            )
-        await ws.write_file(
-            SESSION_MEMORY_PATH,
-            json.dumps(shared[-MAX_SESSION_ITEMS:], indent=2, ensure_ascii=False),
-        )
-    else:
-        trimmed = items[-MAX_SESSION_ITEMS:]
-        await ws.write_file(
-            SESSION_MEMORY_PATH,
-            json.dumps(trimmed, indent=2, ensure_ascii=False),
-        )
-
-
 # Facts where only one value should ever be active at a time.
 # When a new fact shares this key prefix, the old one is replaced.
 _SINGLETON_FACT_KEYS: frozenset[str] = frozenset(
@@ -745,38 +714,6 @@ async def add_session_fact(
             store="personal" if is_personal else "shared",
             workspace_id=ws.workspace_id,
         )
-
-
-async def get_session_context_for_prompt(
-    ws: WorkspaceFS,
-    thread_ts: str | None = None,
-) -> str:
-    """Format session memory for injection into the system prompt.
-
-    If thread_ts is provided, only include facts from that thread
-    plus global facts (no thread_ts). This prevents cross-thread
-    contamination.
-
-    Kept for backward compatibility. Prefer load_relevant_memories()
-    when user_id and topic_hint are available.
-    """
-    items = await read_session_memory(ws)
-    if not items:
-        return ""
-
-    filtered: list[dict] = []
-    for item in items:
-        item_thread = item.get("thread_ts")
-        if item_thread is None or thread_ts and item_thread == thread_ts:
-            filtered.append(item)
-
-    if not filtered:
-        return ""
-
-    recent = filtered[-20:]
-    lines = [f"• {item['fact']}" for item in recent]
-
-    return "### Recent Context (from earlier conversations)\n" + "\n".join(lines)
 
 
 async def load_relevant_memories(

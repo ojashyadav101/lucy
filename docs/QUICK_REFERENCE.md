@@ -101,7 +101,6 @@
 | Change supervisor behavior | `src/lucy/core/supervisor.py` — `evaluate_progress()`, `_needs_plan()` |
 | Change supervisor check frequency | `src/lucy/core/supervisor.py:30-31` — `SUPERVISOR_CHECK_INTERVAL_*` |
 | Change rate limits | `src/lucy/infra/rate_limiter.py` — `_MODEL_LIMITS`, `_API_LIMITS` |
-| Change request queue workers | `src/lucy/infra/request_queue.py:86` — `NUM_WORKERS` |
 | Add a new cron template | Create YAML in `workspace_seeds/crons/`, it auto-loads on onboarding |
 | Add a new heartbeat evaluator | `src/lucy/crons/heartbeat.py` — add `_eval_*` function + type |
 | Add a new workspace skill | Create `SKILL.md` in `workspace_seeds/skills/` |
@@ -128,9 +127,6 @@
 | `MAX_SINGLE_MESSAGE_CHARS` | `slack/rich_output.py` | `3000` |
 | `PENDING_TTL_SECONDS` | `slack/hitl.py:21` | `300` (5 min) |
 | `_MAX_INJECTED_SKILLS` | `workspace/skills.py:82` | `3` |
-| `MAX_QUEUE_DEPTH_PER_WORKSPACE` | `infra/request_queue.py:84` | `50` |
-| `MAX_TOTAL_QUEUE_DEPTH` | `infra/request_queue.py:85` | `200` |
-| `NUM_WORKERS` | `infra/request_queue.py:86` | `10` |
 | `SYNC_LIMIT_PER_CHANNEL` | `workspace/slack_sync.py` | `100` |
 | `MAX_RESULTS` (history search) | `workspace/history_search.py` | `30` |
 
@@ -279,12 +275,10 @@ src/lucy/
 │   ├── composio_client.py          # Composio SDK wrapper (5 meta-tools)
 │   ├── openclaw_gateway.py         # OpenClaw Gateway client (VPS ops only)
 │   ├── resolver.py                 # 3-stage integration resolver
-│   ├── camofox.py                  # Anti-detection browser
 │   ├── agentmail_client.py         # AgentMail SDK wrapper
 │   └── email_listener.py           # WebSocket email listener
 ├── infra/
 │   ├── rate_limiter.py             # Token bucket rate limiting
-│   ├── request_queue.py            # Priority request queue
 │   └── trace.py                    # Per-request tracing
 ├── db/
 │   ├── models.py                   # 18 SQLAlchemy models

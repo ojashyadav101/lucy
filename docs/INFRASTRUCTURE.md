@@ -1,7 +1,7 @@
 # Infrastructure Layer — Deep Dive
 
-> Rate limiting, request queuing, and request tracing.
-> Files: `src/lucy/infra/rate_limiter.py`, `request_queue.py`, `trace.py`
+> Rate limiting and request tracing.
+> Files: `src/lucy/infra/rate_limiter.py`, `trace.py`
 
 ---
 
@@ -92,67 +92,6 @@ created lazily on first access for each model/API.
 
 ---
 
-## Request Queue
-
-**File:** `src/lucy/infra/request_queue.py`
-
-Priority queue with a worker pool that processes incoming Slack messages.
-Prevents thread starvation and provides per-workspace fairness.
-
-### Priority Levels
-
-| Priority | Value | Use Case |
-|----------|-------|----------|
-| `HIGH` | 0 | Greetings, simple lookups, react-only confirmations |
-| `NORMAL` | 1 | Tool-calling tasks, general requests |
-| `LOW` | 2 | Research, analysis, background tasks |
-
-### Priority Classification
-
-`classify_priority(message, route_tier)` assigns priority:
-
-- `fast` tier → `HIGH`
-- `frontier` tier → `LOW`
-- Everything else → `NORMAL`
-
-### Queue Limits
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `MAX_QUEUE_DEPTH_PER_WORKSPACE` | 50 | Prevents one workspace from monopolizing |
-| `MAX_TOTAL_QUEUE_DEPTH` | 200 | Global backpressure limit |
-| `NUM_WORKERS` | 10 | Concurrent handler goroutines |
-
-### Backpressure
-
-`is_busy` returns True when backlog exceeds `workers * 2` (20 items).
-When busy, the handler can throttle incoming messages or send a
-"I'm busy, will get to this shortly" response.
-
-### Enqueue Flow
-
-```
-Message arrives in handlers.py
-    │
-    ├── classify_priority(message, route_tier)
-    ├── queue.enqueue(workspace_id, priority, handler, ...)
-    │     ├── Check per-workspace limit (50)
-    │     ├── Check total limit (200)
-    │     ├── If rejected → return False
-    │     └── Push to asyncio.PriorityQueue
-    │
-    └── Worker picks from queue (priority-ordered)
-          └── Calls handler(*args, **kwargs)
-```
-
-### Deduplication
-
-The `request_id` parameter enables deduplication. If a request with the
-same ID is already queued, the new one is silently dropped. This prevents
-duplicate processing when Slack retries event delivery.
-
----
-
 ## Request Tracing
 
 **File:** `src/lucy/infra/trace.py`
@@ -239,7 +178,5 @@ parameter passing. Agent code can call `Trace.current()` to access it.
 |-----------------|---------------|
 | Model rate limits | `_MODEL_LIMITS` dict in `rate_limiter.py` |
 | API rate limits | `_API_LIMITS` dict in `rate_limiter.py` |
-| Worker count | `NUM_WORKERS` in `request_queue.py` |
-| Queue limits | `MAX_QUEUE_DEPTH_PER_WORKSPACE`, `MAX_TOTAL_QUEUE_DEPTH` |
 | Span names | Trace log consumers (monitoring dashboards) |
 | Thread log format | Any log analysis scripts |

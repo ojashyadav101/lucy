@@ -591,16 +591,15 @@ Handles concurrency issues, interrupts, and graceful degradation.
 
 ### Thread Interrupt Handling
 
-`decide_thread_interrupt(message, has_active_bg_task, thread_depth)`
-determines what to do when a new message arrives during an active task:
+When a new message arrives during an active background task, Lucy checks
+whether it's a status query or cancellation request, then handles it
+independently or queues it accordingly.
 
-| Condition | Decision |
+| Condition | Handling |
 |-----------|----------|
-| Message is a status query | `status_reply` — respond with task status |
-| Message is a cancellation | `cancel_task` — cancel the background task |
-| `thread_depth == 0` (new thread) | `respond_independently` — handle separately |
-| Background task active + same thread | `queue` — wait for task to finish |
-| No background task | `respond_independently` |
+| Message is a status query | Respond with task status |
+| Message is a cancellation | Cancel the background task |
+| No background task | Handle independently |
 
 ### Task Status Queries
 

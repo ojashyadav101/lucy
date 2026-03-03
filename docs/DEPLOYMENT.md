@@ -175,7 +175,6 @@ Description: "AI coworker for Slack — proactive, skill-driven, built on OpenCl
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | `postgres` | `postgres:16` | 5432 | Primary database |
-| `camofox` | CamoFox image | 9377 | Anti-detection browser |
 
 PostgreSQL credentials: `lucy:lucy`, database: `lucy`
 
@@ -210,7 +209,6 @@ All environment variables are prefixed with `LUCY_`.
 | `LUCY_MODEL_TIER_FRONTIER` | No | `google/gemini-3.1-pro-preview` | Frontier tier model |
 | `LUCY_OPENCLAW_BASE_URL` | No | `http://167.86.82.46:18791` | OpenClaw Gateway URL |
 | `LUCY_OPENCLAW_API_KEY` | No | — | OpenClaw Gateway token |
-| `LUCY_CAMOFOX_URL` | No | `http://localhost:9377` | CamoFox browser URL |
 | `LUCY_DATABASE_URL` | No | `postgresql+asyncpg://...` | Database connection string |
 | `LUCY_COMPOSIO_API_KEY` | No | — | Composio SDK key |
 | `LUCY_AGENTMAIL_API_KEY` | No | — | AgentMail API key |
@@ -315,11 +313,6 @@ Exception
 │   Raised: Gateway exec/file/web_fetch failures
 │   Caught: mcp_manager.py
 │
-├── CamoFoxError                       (src/lucy/integrations/camofox.py)
-│   Attributes: status_code (int), detail (str)
-│   Raised: Browser API call failures
-│   Caught: camofox.py internally
-│
 └── _RetryableComposioError            (src/lucy/integrations/composio_client.py)
     Internal only — triggers retry logic in Composio client
 ```
@@ -338,14 +331,10 @@ Tool execution fails
     │     → MCP installation aborted
     │     → Falls back to next resolution stage
     │
-    ├── CamoFoxError (browser failure)
-    │     → Heartbeat marks consecutive failure
-    │     → After 3 failures: status = "error"
-    │
     └── General Exception
           → _run_with_recovery() catches
-          → classify_error_for_degradation()
-          → get_degradation_message()
+          → error_strategy.classify_error()
+          → error_strategy.get_recovery_action()
           → User sees friendly error
 ```
 

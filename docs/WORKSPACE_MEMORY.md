@@ -1,7 +1,7 @@
 # Workspace & Memory — Deep Dive
 
 > How Lucy manages per-workspace filesystems, three-tier memory, skills,
-> onboarding, code execution, snapshots, and Slack history.
+> onboarding, code execution, and Slack history.
 
 ---
 
@@ -31,9 +31,7 @@ workspaces/
     ├── scripts/
     │   └── *.py               # User-created workspace scripts
     ├── data/
-    │   ├── session_memory.json # Session-level facts
-    │   └── {category}/
-    │       └── YYYY-MM-DD.json # Snapshots
+    │   └── session_memory.json # Session-level facts
     ├── logs/
     │   ├── YYYY-MM-DD.md      # Daily activity logs
     │   └── threads/
@@ -122,9 +120,7 @@ Lucy has three layers of memory, each with different scope and persistence:
 | `should_persist_memory(message)` | Quick check if message has facts worth saving |
 | `classify_memory_target(message)` | Returns "company", "team", or "session" |
 | `read_session_memory(ws)` | Load all session facts |
-| `write_session_memory(ws, items)` | Save session facts (max 50) |
 | `add_session_fact(ws, fact, ...)` | Add fact with deduplication |
-| `get_session_context_for_prompt(ws, thread_ts?)` | Format for prompt injection |
 | `append_to_company_knowledge(ws, fact)` | Promote to company SKILL.md |
 | `append_to_team_knowledge(ws, fact)` | Promote to team SKILL.md |
 | `consolidate_session_to_knowledge(ws)` | Auto-promote categorized facts |
@@ -334,54 +330,6 @@ class ExecutionResult:
 
 ---
 
-## Snapshots
-
-**File:** `src/lucy/workspace/snapshots.py`
-
-Snapshots store periodic data for trend analysis and comparison.
-
-### Storage
-
-```
-data/
-└── {category}/
-    ├── 2026-02-24.json
-    ├── 2026-02-25.json
-    └── 2026-02-26.json
-```
-
-Each file:
-```json
-{
-    "category": "seo_performance",
-    "captured_at": "2026-02-26T09:00:00",
-    "data": { ... }
-}
-```
-
-### Functions
-
-| Function | Purpose |
-|----------|---------|
-| `save_snapshot(ws, category, data, date?)` | Save data for today (or specific date) |
-| `load_latest(ws, category)` | Load most recent snapshot |
-| `load_snapshot(ws, category, date)` | Load specific date's snapshot |
-| `compute_delta(ws, category, key, days_back)` | Compute numeric delta between today and N days ago |
-| `list_categories(ws)` | List all snapshot categories |
-
-### Delta Output
-
-```python
-{
-    "current": 1250.0,
-    "previous": 1180.0,
-    "delta": 70.0,
-    "pct_change": 5.93
-}
-```
-
----
-
 ## Activity Log
 
 **File:** `src/lucy/workspace/activity_log.py`
@@ -407,7 +355,6 @@ Format:
 | Function | Purpose |
 |----------|---------|
 | `log_activity(ws, message)` | Append timestamped entry |
-| `get_recent_activity(ws, days)` | Read recent log(s) |
 
 ---
 
@@ -736,26 +683,3 @@ Written by the tracing system (`infra/trace.py`) to:
 `logs/threads/{thread_ts}.jsonl`
 
 Each line is a JSON object with trace data for one agent turn.
-
----
-
-## Snapshots
-
-**File:** `src/lucy/workspace/snapshots.py`
-
-### `save_snapshot(ws, category, data, label)`
-
-Saves data snapshot to: `data/snapshots/{category}/{YYYY-MM-DD}_{label}.json`
-
-### Categories
-
-Snapshots are organized by type:
-- `analytics` — Traffic, metrics data
-- `users` — User lists, subscriber data
-- `reports` — Generated analysis results
-- `exports` — Data exports
-
-### Delta Computation
-
-`compute_delta(old, new)` compares two snapshot files and returns
-a diff showing additions, removals, and changes.

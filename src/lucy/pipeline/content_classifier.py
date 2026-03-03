@@ -1,6 +1,7 @@
 """Content classifier for Lucy's output pipeline.
 
-Classifies response content into USER_CONTENT (keep) vs INTERNAL (strip).
+Strips internal content (planning, self-correction, meta-commentary) from
+LLM responses, leaving only user-facing text.
 
 Internal content includes:
 - Planning, self-correction, and quality-gate critique
@@ -15,23 +16,10 @@ patterns to avoid false positives on legitimate user content.
 from __future__ import annotations
 
 import re
-from enum import Enum
-from typing import NamedTuple
 
 import structlog
 
 logger = structlog.get_logger()
-
-
-class ContentType(Enum):
-    USER_CONTENT = "user_content"
-    INTERNAL = "internal"
-
-
-class ClassifiedBlock(NamedTuple):
-    text: str
-    content_type: ContentType
-    reason: str  # Why it was classified this way
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -218,55 +206,6 @@ def _is_internal_line(line: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
-
-
-def classify_content(text: str) -> list[ClassifiedBlock]:
-    """Classify each paragraph/section of a response.
-
-    Splits on double-newlines (paragraph boundaries) and classifies
-    each block. XML-tagged internal blocks are handled first as
-    contiguous regions, then remaining paragraphs are checked for
-    meta-referential patterns.
-
-    Returns a list of ClassifiedBlock tuples preserving order.
-    """
-    if not text or not text.strip():
-        return []
-
-    # Phase 1: Strip XML-tagged internal blocks so they don't bleed into paragraph splits
-    cleaned = _INTERNAL_XML_BLOCK_RE.sub("", text)
-    xml_regions: list[tuple[int, int]] = []
-    for match in _INTERNAL_XML_BLOCK_RE.finditer(text):
-        xml_regions.append((match.start(), match.end()))
-
-    # Phase 2: Split into paragraphs and classify (use cleaned text to avoid
-    # XML tags appearing as user-visible paragraphs)
-    paragraphs = re.split(r"\n\n+", cleaned)
-    results: list[ClassifiedBlock] = []
-
-    for para in paragraphs:
-        if not para.strip():
-            continue
-
-        is_internal, reason = _is_internal_paragraph(para)
-        if is_internal:
-            results.append(
-                ClassifiedBlock(
-                    text=para,
-                    content_type=ContentType.INTERNAL,
-                    reason=reason,
-                )
-            )
-        else:
-            results.append(
-                ClassifiedBlock(
-                    text=para,
-                    content_type=ContentType.USER_CONTENT,
-                    reason="",
-                )
-            )
-
-    return results
 
 
 def strip_internal_content(text: str) -> str:

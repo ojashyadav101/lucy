@@ -191,35 +191,3 @@ def validate_wrapper_runtime(
             result.add_check("name_convention", True, f"All tools prefixed with '{slug}_'")
 
     return result
-
-
-def validate_all_wrappers(wrappers_dir: Path) -> dict[str, RuntimeValidationResult]:
-    """Validate all wrapper directories under the given path.
-
-    Returns a dict mapping slug → RuntimeValidationResult.
-    """
-    results: dict[str, RuntimeValidationResult] = {}
-
-    if not wrappers_dir.exists():
-        return results
-
-    for meta_path in wrappers_dir.glob("*/meta.json"):
-        slug_dir = meta_path.parent
-        wrapper_path = slug_dir / "wrapper.py"
-
-        if not wrapper_path.exists():
-            slug = slug_dir.name
-            r = RuntimeValidationResult(slug=slug, healthy=False)
-            r.add_check("file_exists", False, "wrapper.py not found")
-            results[slug] = r
-            continue
-
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            slug = meta.get("slug", slug_dir.name)
-        except Exception:
-            slug = slug_dir.name
-
-        results[slug] = validate_wrapper_runtime(slug, wrapper_path, meta_path)
-
-    return results

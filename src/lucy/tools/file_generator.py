@@ -592,7 +592,21 @@ async def execute_file_tool(
             ws_root = str(settings.workspace_root)
 
             if not _is_within_workspace_root(p, ws_root):
-                p = _resolve_mangled_path(path_str, ws_root, workspace_id)
+                # Try interpreting as a workspace-relative path first
+                # (e.g. "crons/heartbeat/LEARNINGS.md" → workspace_root/workspace_id/crons/...)
+                if workspace_id and not p.is_absolute():
+                    candidate = Path(ws_root) / workspace_id / path_str
+                    if _is_within_workspace_root(candidate, ws_root):
+                        p = candidate
+                        logger.info(
+                            "file_write_path_resolved_relative",
+                            original=path_str,
+                            resolved=str(p),
+                        )
+                    else:
+                        p = _resolve_mangled_path(path_str, ws_root, workspace_id)
+                else:
+                    p = _resolve_mangled_path(path_str, ws_root, workspace_id)
                 if p is None:
                     logger.warning(
                         "file_write_rejected",
@@ -643,7 +657,15 @@ async def execute_file_tool(
             from lucy.config import settings as _settings
             _ws_root = str(_settings.workspace_root)
             if not _is_within_workspace_root(p, _ws_root):
-                p = _resolve_mangled_path(path_str, _ws_root, workspace_id)
+                # Try interpreting as workspace-relative first
+                if workspace_id and not p.is_absolute():
+                    _candidate = Path(_ws_root) / workspace_id / path_str
+                    if _is_within_workspace_root(_candidate, _ws_root):
+                        p = _candidate
+                    else:
+                        p = _resolve_mangled_path(path_str, _ws_root, workspace_id)
+                else:
+                    p = _resolve_mangled_path(path_str, _ws_root, workspace_id)
                 if p is None:
                     logger.warning(
                         "file_edit_rejected",

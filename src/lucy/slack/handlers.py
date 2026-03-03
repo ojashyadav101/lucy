@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 from slack_bolt.async_app import AsyncAck, AsyncApp, AsyncBoltContext, AsyncSay
+from slack_sdk.errors import SlackApiError
 
 from lucy.config import settings
 
@@ -30,8 +31,6 @@ APPROVED_ACTION_TIMEOUT = settings.approved_action_timeout
 
 _agent_semaphore: asyncio.Semaphore | None = None
 MAX_CONCURRENT_AGENTS = settings.max_concurrent_agents
-
-_request_queue_started = False
 
 _thread_locks: dict[str, asyncio.Lock] = {}
 _thread_lock_registry: asyncio.Lock | None = None
@@ -102,7 +101,7 @@ def register_handlers(app: AsyncApp) -> None:
                     f"Re-send your original message if you still want me to do this."
                 ),
             )
-        except Exception as exc:
+        except SlackApiError as exc:
             logger.debug("hitl_expiry_notify_failed", error=str(exc))
 
     from lucy.slack.hitl import PENDING_TTL_SECONDS, register_expiry_callback
@@ -823,35 +822,6 @@ async def _handle_message(
     from lucy.infra.trace import Trace
     trace = Trace.current()
 
-    # ── Route through priority queue if available ─────────────────────
-    from lucy.infra.request_queue import (
-        Priority,
-        classify_priority,
-        get_request_queue,
-    )
-    from lucy.pipeline.router import classify_and_route
-
-    route = classify_and_route(text)
-    priority = classify_priority(text, route.tier)
-
-    # If queue is busy and this is a HIGH priority request, tell the user
-    queue = get_request_queue()
-    if queue.is_busy and priority == Priority.LOW:
-        logger.info(
-            "backpressure_signaled",
-            workspace_id=workspace_id,
-            queue_size=queue.metrics["queue_size"],
-        )
-        if client and channel_id and event_ts:
-            try:
-                await client.reactions_add(
-                    channel=channel_id,
-                    name="hourglass_flowing_sand",
-                    timestamp=event_ts,
-                )
-            except Exception as e:
-                logger.warning("slack_hourglass_reaction_add_failed", error=str(e))
-
     try:
         from lucy.core.agent import AgentContext, get_agent
 
@@ -1022,13 +992,24 @@ async def _handle_message(
             error=str(e),
             exc_info=True,
         )
-        error_str = str(e).lower()
-        if "timeout" in error_str or "timed out" in error_str:
+        error_str = str(e)
+        error_lower = error_str.lower()
+        # _run_with_recovery raises RuntimeError(degradation_msg) after exhausting all
+        # retries. The degradation message is already user-facing first-person text —
+        # use it directly rather than replacing it with a generic fallback.
+        _is_degradation_msg = (
+            error_str.startswith("I ")
+            or error_str.startswith("I'")
+            or "I'm " in error_str[:30]
+        )
+        if _is_degradation_msg:
+            fallback = error_str
+        elif "timeout" in error_lower or "timed out" in error_lower:
             fallback = (
                 "A service I was reaching out to was slow. "
                 "Want me to give it another try?"
             )
-        elif "rate limit" in error_str or "429" in error_str:
+        elif "rate limit" in error_lower or "429" in error_lower:
             fallback = (
                 "I'm getting rate limited right now. "
                 "I'll be ready again in a moment."

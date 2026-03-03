@@ -1,6 +1,6 @@
-"""Filesystem-based workspace: skills, memory, activity logs, snapshots, timezone, Slack sync."""
+"""Filesystem-based workspace: skills, memory, activity logs, timezone, Slack sync."""
 
-from lucy.workspace.activity_log import get_recent_activity, log_activity
+from lucy.workspace.activity_log import log_activity
 from lucy.workspace.connections import (
     MCPConnectionRecord,
     delete_mcp_connection,
@@ -18,12 +18,6 @@ from lucy.workspace.skills import (
     parse_frontmatter,
     read_skill,
     write_skill,
-)
-from lucy.workspace.snapshots import (
-    compute_delta,
-    list_categories,
-    load_latest,
-    save_snapshot,
 )
 from lucy.workspace.timezone import (
     find_best_meeting_time,
@@ -51,12 +45,7 @@ __all__ = [
     "parse_frontmatter",
     "read_skill",
     "write_skill",
-    "get_recent_activity",
     "log_activity",
-    "save_snapshot",
-    "load_latest",
-    "compute_delta",
-    "list_categories",
     "get_user_local_time",
     "get_user_timezone_name",
     "get_all_user_timezones",

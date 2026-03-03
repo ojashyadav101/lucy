@@ -5,7 +5,6 @@ before they reach users.  Import the top-level functions from here:
 
     from lucy.integrations.validation import (
         validate_wrapper,
-        validate_all,
         WrapperHealth,
     )
 """
@@ -156,69 +155,9 @@ def validate_wrapper(
     return health
 
 
-def validate_all(wrappers_dir: Path) -> dict[str, WrapperHealth]:
-    """Validate all wrappers in a directory.
-
-    Combines runtime and schema validation for each discovered wrapper.
-    Returns a dict mapping slug → WrapperHealth.
-    """
-    import importlib.util
-    import json
-
-    results: dict[str, WrapperHealth] = {}
-
-    if not wrappers_dir.exists():
-        return results
-
-    for meta_path in wrappers_dir.glob("*/meta.json"):
-        slug_dir = meta_path.parent
-        wrapper_path = slug_dir / "wrapper.py"
-
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            slug = meta.get("slug", slug_dir.name)
-            service_name = meta.get("service_name", slug)
-        except Exception:
-            slug = slug_dir.name
-            service_name = slug
-
-        if not wrapper_path.exists():
-            health = WrapperHealth(slug=slug, service_name=service_name, healthy=False)
-            health.error_count = 1
-            results[slug] = health
-            continue
-
-        # Try loading the module to get TOOLS and execute
-        tools = None
-        execute_fn = None
-        try:
-            spec = importlib.util.spec_from_file_location(
-                f"wrapper_validate_all_{slug}", str(wrapper_path)
-            )
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                tools = getattr(mod, "TOOLS", None)
-                execute_fn = getattr(mod, "execute", None)
-        except Exception:
-            pass  # Runtime validator will catch and report this
-
-        results[slug] = validate_wrapper(
-            slug=slug,
-            wrapper_path=wrapper_path,
-            meta_path=meta_path,
-            tools=tools,
-            execute_fn=execute_fn,
-            service_name=service_name,
-        )
-
-    return results
-
-
 # Public API
 __all__ = [
     "validate_wrapper",
-    "validate_all",
     "WrapperHealth",
     "SchemaValidationResult",
     "RuntimeValidationResult",

@@ -50,6 +50,9 @@ dependencies = [
 
     # SSL
     "certifi",
+
+    # Process management (scripts/run.py single-instance locking)
+    "psutil>=6.0,<7",
 ]
 
 [project.optional-dependencies]

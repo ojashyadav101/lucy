@@ -29,19 +29,3 @@ async def log_activity(ws: WorkspaceFS, message: str) -> None:
 
     entry = f"- **{time_str}** — {message}\n"
     await ws.append_file(log_path, entry)
-
-
-async def get_recent_activity(ws: WorkspaceFS, days: int = 1) -> str:
-    """Read the most recent activity log(s)."""
-    now = datetime.now(UTC)
-    lines: list[str] = []
-
-    for offset in range(days):
-        from datetime import timedelta
-        date = now - timedelta(days=offset)
-        date_str = date.strftime("%Y-%m-%d")
-        content = await ws.read_file(f"logs/{date_str}.md")
-        if content:
-            lines.append(content)
-
-    return "\n".join(lines) if lines else "(No recent activity)"

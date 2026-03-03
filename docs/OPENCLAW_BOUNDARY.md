@@ -71,10 +71,8 @@ and Slack handlers never depend on the Gateway being available.
 | **Sub-agents** | `core/sub_agents.py` — shared LLM client | Need custom delegation + context trimming |
 | **Output pipeline** | `pipeline/output.py` — 4-layer processing | Personality-preserving post-processing |
 | **Rate limiting** | `infra/rate_limiter.py` — token bucket | Per-model + per-API control |
-| **Request queue** | `infra/request_queue.py` — priority queue | Per-workspace fairness |
 | **Email** | `integrations/agentmail_client.py` + `email_listener.py` | Native email identity (zeeyamail.com) |
 | **Spaces (app builder)** | `spaces/` — Convex + Vercel deployment | Custom deployment pipeline |
-| **CamoFox browser** | `integrations/camofox.py` | Anti-detection headless browser |
 
 ---
 

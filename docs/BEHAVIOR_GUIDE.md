@@ -186,10 +186,10 @@ _run_with_recovery() in handlers.py
 ```
 Both attempts failed
     │
-    ├── classify_error_for_degradation(exception)
+    ├── error_strategy.classify_error(exception)
     │     → rate_limited / tool_timeout / service_unavailable / ...
     │
-    ├── get_degradation_message(error_type)
+    ├── error_strategy.get_recovery_action(error_type)
     │     → Friendly message from humanize pool
     │
     └── Post to user: "I ran into an issue while working on
@@ -570,13 +570,6 @@ LucyError (src/lucy/core/__init__.py)
 │       - mcp_manager.py (aborts MCP installation)
 │       - executor.py (falls back to local execution)
 │
-├── CamoFoxError (src/lucy/integrations/camofox.py)
-│     Attributes: status_code (int), detail (str)
-│     Raised when: Browser API calls fail (non-200 status)
-│     Caught in:
-│       - camofox.py internally (logged, re-raised)
-│       - heartbeat.py _eval_page_content (marks check failure)
-│
 └── _RetryableComposioError (src/lucy/integrations/composio_client.py)
       Internal only — not exported
       Raised when: Composio SDK returns transient error
@@ -599,8 +592,8 @@ Tool execution fails
             ├── Attempt 1: agent.run() fails
             ├── Wait 2s
             ├── Attempt 2: agent.run(failure_context=...)
-            └── Both fail → classify_error_for_degradation()
-                  → get_degradation_message()
+            └── Both fail → error_strategy.classify_error()
+                  → error_strategy.get_recovery_action()
                   → Post friendly error to user
 ```
 

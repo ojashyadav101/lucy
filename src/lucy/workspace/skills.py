@@ -43,10 +43,6 @@ _SKILL_TRIGGERS: dict[str, list[str]] = {
         r"\bpptx?\b", r"\bpowerpoint\b", r"\bslide\b", r"\bpresentation\b",
         r"\bdeck\b", r"\bpitch\b",
     ],
-    "browser": [
-        r"\bbrowse\b", r"\bscrape\b", r"\bwebsite\b", r"\bweb\s*page\b",
-        r"\bfill.*form\b", r"\bnavigate\b",
-    ],
     "codebase-engineering": [
         r"\bgit(?:hub)?\b", r"\bpull\s*request\b", r"\bPR\b", r"\bcommit\b",
         r"\bbranch\b", r"\brepository\b", r"\brepo\b", r"\bcode\s*review\b",

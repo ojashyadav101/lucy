@@ -94,10 +94,10 @@ When both attempts in `_run_with_recovery()` fail:
 ```
 Exception caught
     │
-    ├── classify_error_for_degradation(error)
+    ├── error_strategy.classify_error(error)
     │     → rate_limited / tool_timeout / service_unavailable / ...
     │
-    ├── get_degradation_message(error_type)
+    ├── error_strategy.get_recovery_action(error_type)
     │     → User-friendly message from humanize pool
     │
     └── Post error message with task hint:
@@ -188,21 +188,6 @@ Converts processed text into Slack Block Kit blocks.
 - Max 50 blocks (truncates with "...continued")
 - Sections split at 2800 chars to stay under 3000 limit
 - Returns `None` if ≤ 1 block (falls back to plain text)
-
-### `approval_blocks(action_id, summary, details?)`
-
-Builds HITL approval prompt:
-
-```
-┌────────────────────────────────────────────┐
-│ ⚠️ {summary}                              │
-│                                            │
-│ {details if provided}                      │
-│                                            │
-│  [✅ Approve]  [❌ Cancel]                 │
-│   (primary)     (danger)                   │
-└────────────────────────────────────────────┘
-```
 
 Button action IDs: `lucy_action_approve_{action_id}`,
 `lucy_action_cancel_{action_id}`
@@ -332,7 +317,7 @@ LLM wants to call destructive tool
     │     Stores in _pending_actions dict
     │     TTL: 300 seconds (5 minutes)
     │
-    ├── Post approval_blocks() to Slack
+    ├── Post HITL approval blocks to Slack
     │     [Approve] [Cancel] buttons
     │
     ├── User clicks button...
@@ -435,21 +420,6 @@ The parser scans the text and builds blocks based on patterns:
 
 `_truncate(text, max_len)` ensures no block exceeds Slack's 3000-character
 limit per block. Truncated text gets a `...truncated` suffix.
-
-### `approval_blocks(action_summary, action_id, details)` — HITL Buttons
-
-Builds an approval prompt with Approve and Cancel buttons:
-
-```json
-[
-    {"type": "section", "text": {"type": "mrkdwn", "text": "Summary of action"}},
-    {"type": "section", "text": {"type": "mrkdwn", "text": "Details (optional)"}},
-    {"type": "actions", "elements": [
-        {"type": "button", "text": "Approve", "action_id": "lucy_action_approve_{id}", "style": "primary"},
-        {"type": "button", "text": "Cancel", "action_id": "lucy_action_cancel_{id}", "style": "danger"}
-    ]}
-]
-```
 
 ---
 
@@ -616,7 +586,7 @@ Agent wants to execute destructive tool
     │     ├── Stores action data in memory dict
     │     └── Returns action_id
     │
-    ├── Post approval_blocks() to Slack with [Approve] [Cancel]
+    ├── Post HITL approval blocks to Slack with [Approve] [Cancel]
     │
     ├── User clicks button
     │     ├── Approve → resolve_pending_action(id, approved=True)

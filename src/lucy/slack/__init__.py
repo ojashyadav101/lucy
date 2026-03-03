@@ -1,6 +1,6 @@
 """Slack integration: handlers, middleware, Block Kit, human-in-the-loop."""
 
-from lucy.slack.blockkit import approval_blocks, text_to_blocks
+from lucy.slack.blockkit import text_to_blocks
 from lucy.slack.handlers import register_handlers
 from lucy.slack.hitl import (
     create_pending_action,
@@ -14,7 +14,6 @@ from lucy.slack.middleware import (
 )
 
 __all__ = [
-    "approval_blocks",
     "create_pending_action",
     "get_pending_action_metadata",
     "is_destructive_tool_call",

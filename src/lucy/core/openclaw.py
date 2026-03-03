@@ -692,10 +692,3 @@ async def get_openclaw_client() -> OpenClawClient:
         if _client is None:
             _client = OpenClawClient()
     return _client
-
-
-async def close_openclaw_client() -> None:
-    global _client
-    if _client is not None:
-        await _client.close()
-        _client = None

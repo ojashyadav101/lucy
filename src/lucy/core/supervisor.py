@@ -16,6 +16,7 @@ Both the planner and supervisor use the cheapest/fastest model tier
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import re
@@ -249,7 +250,8 @@ async def create_plan(
             ),
         )
         return _parse_plan(response.content or "")
-    except Exception as exc:
+    except (asyncio.TimeoutError, Exception) as exc:
+        # Broad catch intentional: planner failure must never crash the agent.
         logger.warning("plan_creation_failed", error=str(exc) or type(exc).__name__)
         return None
 
@@ -496,7 +498,8 @@ async def evaluate_progress(
             ),
         )
         return _parse_decision(response.content or "C")
-    except Exception as exc:
+    except (asyncio.TimeoutError, Exception) as exc:
+        # Broad catch intentional: supervisor failure must default to CONTINUE.
         logger.warning(
             "supervisor_check_failed",
             error=str(exc) or type(exc).__name__,

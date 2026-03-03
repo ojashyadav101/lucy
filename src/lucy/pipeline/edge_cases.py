@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -131,56 +130,6 @@ async def handle_task_cancellation(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# THREAD INTERRUPT HANDLING
-# ═══════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class InterruptDecision:
-    """What to do when a new message arrives in a thread with active work."""
-
-    action: str  # "respond_independently", "queue", "ignore"
-    reason: str
-
-
-def decide_thread_interrupt(
-    message: str,
-    has_active_bg_task: bool,
-    thread_depth: int = 0,
-) -> InterruptDecision:
-    """Decide how to handle a message that arrives while a bg task runs.
-
-    Rules:
-    1. Status queries → format task status (no new agent run)
-    2. Cancellation requests → cancel task (no new agent run)
-    3. Short/simple messages → respond independently (agent run)
-    4. Complex new requests → respond independently (separate context)
-    """
-    if not has_active_bg_task:
-        return InterruptDecision(
-            action="respond_independently",
-            reason="no_active_task",
-        )
-
-    if is_status_query(message):
-        return InterruptDecision(
-            action="status_reply",
-            reason="status_query_during_bg_task",
-        )
-
-    if is_task_cancellation(message):
-        return InterruptDecision(
-            action="cancel_task",
-            reason="cancellation_request",
-        )
-
-    # New message while bg task runs → handle independently
-    return InterruptDecision(
-        action="respond_independently",
-        reason="new_message_during_bg_task",
-    )
-
-
-# ═══════════════════════════════════════════════════════════════════════════
 # CONCURRENT API CALL PROTECTION
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -250,61 +199,4 @@ def should_deduplicate_tool_call(
     return False
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# GRACEFUL DEGRADATION
-# ═══════════════════════════════════════════════════════════════════════════
 
-_ERROR_TYPE_TO_POOL: dict[str, str] = {
-    "rate_limited": "error_rate_limit",
-    "tool_timeout": "error_timeout",
-    "service_unavailable": "error_connection",
-    "context_overflow": "error_generic",
-}
-
-
-def get_degradation_message(error_type: str) -> str:
-    """Get a user-friendly degradation message for an error type.
-
-    Draws from LLM-generated message pools (pre-warmed at startup).
-    Never exposes internal details — just warm, actionable framing.
-    """
-    from lucy.pipeline.humanize import pick
-
-    category = _ERROR_TYPE_TO_POOL.get(error_type, "error_generic")
-    return pick(category)
-
-
-def classify_error_for_degradation(error: Exception) -> str:
-    """Classify an exception into a degradation category.
-
-    Delegates to the richer error_strategy module for classification,
-    then maps back to the pool-key strings used by get_degradation_message.
-    """
-    try:
-        from lucy.pipeline.error_strategy import ErrorCategory, classify_error
-
-        classification = classify_error(error)
-        _CATEGORY_TO_POOL = {
-            ErrorCategory.RATE_LIMIT: "rate_limited",
-            ErrorCategory.TIMEOUT: "tool_timeout",
-            ErrorCategory.SERVICE_DOWN: "service_unavailable",
-            ErrorCategory.CONTEXT_OVERFLOW: "context_overflow",
-            ErrorCategory.AUTH_ERROR: "auth_error",
-        }
-        return _CATEGORY_TO_POOL.get(classification.category, "unknown")
-    except Exception:
-        error_str = str(error).lower()
-        if "429" in error_str or "rate limit" in error_str:
-            return "rate_limited"
-        if "timeout" in error_str or "timed out" in error_str:
-            return "tool_timeout"
-        if any(
-            code in error_str
-            for code in ("502", "503", "504", "unavailable")
-        ):
-            return "service_unavailable"
-        if "context" in error_str and (
-            "length" in error_str or "token" in error_str
-        ):
-            return "context_overflow"
-        return "unknown"

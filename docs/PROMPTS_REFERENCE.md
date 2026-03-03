@@ -150,9 +150,11 @@ shown directly to users.
 
 ---
 
-### `prompts/HEARTBEAT.md` (~31 lines)
+### `workspace_seeds/HEARTBEAT.md` (~31 lines)
 
 Checklist for the proactive heartbeat cron. Run every 30 minutes.
+This file lives in `workspace_seeds/` and is copied into each workspace during onboarding
+(not a system prompt file).
 
 | Check | What To Do |
 |-------|-----------|
@@ -288,5 +290,5 @@ All sub-agent prompts share the same **Writing Rules** appendix:
 | Anti-pattern vocabulary | `_REGEX_DEAI_PATTERNS` in `output.py` (should match) |
 | Module file content | Router `INTENT_MODULES` mapping (must reference it) |
 | Sub-agent writing rules | `_POOL_GENERATOR_PROMPT` in `humanize.py` |
-| `HEARTBEAT.md` checklist | `workspace_seeds/crons/heartbeat/task.json` description |
+| `HEARTBEAT.md` checklist | `workspace_seeds/crons/heartbeat/task.json` description (seed file, not a prompt) |
 | `SOUL_LITE.md` | `_load_soul_lite()` in `sub_agents.py` |

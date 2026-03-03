@@ -15,7 +15,6 @@ workspace directory:
 workspace_seeds/                    workspaces/{workspace_id}/
 ├── skills/                   →     ├── skills/
 │   ├── spaces/SKILL.md             │   ├── spaces/SKILL.md
-│   ├── browser/SKILL.md            │   ├── browser/SKILL.md
 │   └── ... (17 skills)             │   └── ...
 ├── crons/                    →     ├── crons/
 │   ├── heartbeat/task.json         │   ├── heartbeat/task.json
@@ -37,38 +36,37 @@ frontmatter (name, description, triggers) and a Markdown body.
 | # | Skill | Triggers | What It Teaches Lucy |
 |---|-------|----------|---------------------|
 | 1 | **spaces** | build, create, deploy, web app, dashboard | 3-step web app workflow: `lucy_spaces_init` → write React code → `lucy_spaces_deploy`. Uses React 19 + Tailwind + shadcn/ui. |
-| 2 | **browser** | scrape, browse, fill form, automate web | CamoFox anti-detection browser: create tab → navigate → snapshot (accessibility tree) → interact (click/type/fill) → close. 14 search macros. |
-| 3 | **codebase-engineering** | code, script, PR, deploy, repository | Write Python scripts, review PRs via Git, manage repos. Test before sharing, save to `scripts/`, include error handling. |
-| 4 | **async-workflows** | monitor, wait for, track, alert when | Multi-step workflows spanning hours/days: immediate action → heartbeat cron → report back. Interval selection by urgency. |
+| 2 | **codebase-engineering** | code, script, PR, deploy, repository | Write Python scripts, review PRs via Git, manage repos. Test before sharing, save to `scripts/`, include error handling. |
+| 3 | **async-workflows** | monitor, wait for, track, alert when | Multi-step workflows spanning hours/days: immediate action → heartbeat cron → report back. Interval selection by urgency. |
 
 ### Integration & Administration
 
 | # | Skill | Triggers | What It Teaches Lucy |
 |---|-------|----------|---------------------|
-| 5 | **integrations** | connect, integrate, OAuth, setup | Composio meta-tools: check connection → OAuth if needed → discover tools → execute. Per-user OAuth handling. |
-| 6 | **slack-admin** | users, channels, post, team admin | Slack workspace operations: reading (list users/channels, history, search), messaging (send/reply/react), channel management, file operations. |
-| 7 | **scheduled-crons** | recurring, schedule, automate, daily | Cron CRUD: `lucy_create_cron`, `lucy_modify_cron`, `lucy_delete_cron`. Cron expressions, timezone, delivery routing, LEARNINGS.md. |
-| 8 | **general-tools** | search, email, calendar, image, task | Discovery pattern for Composio tools: web search, email, calendar, file ops, image gen, project management, CRM. |
+| 4 | **integrations** | connect, integrate, OAuth, setup | Composio meta-tools: check connection → OAuth if needed → discover tools → execute. Per-user OAuth handling. |
+| 5 | **slack-admin** | users, channels, post, team admin | Slack workspace operations: reading (list users/channels, history, search), messaging (send/reply/react), channel management, file operations. |
+| 6 | **scheduled-crons** | recurring, schedule, automate, daily | Cron CRUD: `lucy_create_cron`, `lucy_modify_cron`, `lucy_delete_cron`. Cron expressions, timezone, delivery routing, LEARNINGS.md. |
+| 7 | **general-tools** | search, email, calendar, image, task | Discovery pattern for Composio tools: web search, email, calendar, file ops, image gen, project management, CRM. |
 
 ### Document Generation
 
 | # | Skill | Triggers | What It Teaches Lucy |
 |---|-------|----------|---------------------|
-| 9 | **pdf-creation** | PDF, report, invoice, document | Two-track: WeasyPrint (HTML/CSS → PDF, ~335ms) for styled docs; Typst (template → PDF, ~106ms) for data reports. CSS design system included. |
-| 10 | **excel-editing** | Excel, spreadsheet, XLSX | Excel creation/editing with formatting using openpyxl. |
-| 11 | **pptx-editing** | PowerPoint, slides, presentation, deck | `python-pptx` with template-first approach. 29 chart types, tables, images, speaker notes. Design guidelines included. |
-| 12 | **docx-editing** | Word, document, DOCX, proposal | `python-docx` + `docxtpl` (Jinja2 templates). Named styles over inline formatting. Headers/footers, tables, images. |
-| 13 | **pdf-signing** | sign PDF, digital signature | pyHanko (cryptographic X.509) or Pillow + reportlab (visual overlay). Notes on legal binding. |
-| 14 | **pdf-form-filling** | fill form, PDF form, application | pdfrw, PyPDF2, or fillpdf. Workflow: discover fields → map data → fill → save. |
+| 8 | **pdf-creation** | PDF, report, invoice, document | Two-track: WeasyPrint (HTML/CSS → PDF, ~335ms) for styled docs; Typst (template → PDF, ~106ms) for data reports. CSS design system included. |
+| 9 | **excel-editing** | Excel, spreadsheet, XLSX | Excel creation/editing with formatting using openpyxl. |
+| 10 | **pptx-editing** | PowerPoint, slides, presentation, deck | `python-pptx` with template-first approach. 29 chart types, tables, images, speaker notes. Design guidelines included. |
+| 11 | **docx-editing** | Word, document, DOCX, proposal | `python-docx` + `docxtpl` (Jinja2 templates). Named styles over inline formatting. Headers/footers, tables, images. |
+| 12 | **pdf-signing** | sign PDF, digital signature | pyHanko (cryptographic X.509) or Pillow + reportlab (visual overlay). Notes on legal binding. |
+| 13 | **pdf-form-filling** | fill form, PDF form, application | pdfrw, PyPDF2, or fillpdf. Workflow: discover fields → map data → fill → save. |
 
 ### Intelligence & Meta
 
 | # | Skill | Triggers | What It Teaches Lucy |
 |---|-------|----------|---------------------|
-| 15 | **workflow-discovery** | help the team, automation, pain points | 6-phase process: audit integrations → investigate per person (read Slack extensively) → brainstorm ideas → craft personalized DM proposals → track in discovery.md → follow up. Target: 2-3 ideas/person. |
-| 16 | **thread-orchestration** | long task, multi-step, progress | Patterns: progress thread (ack → updates → summary), approval flow (describe → confirm → execute), multi-person thread (tag → track → summarize). Anti-patterns listed. |
-| 17 | **lucy-account** | what can you do, how do you work | Lucy's self-awareness: reactive capabilities, proactive capabilities (heartbeat, crons, discovery), how she learns, limitations. |
-| 18 | **skill-creation** | create skill, new workflow | Skill file format: YAML frontmatter + Markdown body. Directory structure, naming rules, body organization, keeping under 500 lines. |
+| 14 | **workflow-discovery** | help the team, automation, pain points | 6-phase process: audit integrations → investigate per person (read Slack extensively) → brainstorm ideas → craft personalized DM proposals → track in discovery.md → follow up. Target: 2-3 ideas/person. |
+| 15 | **thread-orchestration** | long task, multi-step, progress | Patterns: progress thread (ack → updates → summary), approval flow (describe → confirm → execute), multi-person thread (tag → track → summarize). Anti-patterns listed. |
+| 16 | **lucy-account** | what can you do, how do you work | Lucy's self-awareness: reactive capabilities, proactive capabilities (heartbeat, crons, discovery), how she learns, limitations. |
+| 17 | **skill-creation** | create skill, new workflow | Skill file format: YAML frontmatter + Markdown body. Directory structure, naming rules, body organization, keeping under 500 lines. |
 
 ---
 

@@ -1,15 +1,13 @@
-"""Response quality assessment — zero-cost heuristic checks.
+"""Response quality assessment for Lucy's agent loop.
 
-Standalone functions with no class dependencies. Zero LLM calls.
-Pure pattern matching and heuristics for quality gating.
+Heuristic-only checks (zero LLM cost) that detect common failure patterns:
+- Service name confusion (Clerk vs MoonClerk)
+- Stuck loops (same tool called 4× in a row, 3+ consecutive errors)
+- Low-agency / dead-end responses
+- Off-topic or suspiciously short responses
+- Multi-part request incompleteness
 
-Sections:
-1. Service name matching (prevents Composio fuzzy-search confusion)
-2. Search/connection result validation
-3. Response quality assessment (confidence scoring)
-4. Response depth assessment (data-dump detection, depth scoring)
-5. Stuck-state detection
-6. Output verification
+All functions are pure and side-effect-free except for structlog calls.
 """
 
 from __future__ import annotations
@@ -22,10 +20,8 @@ import structlog
 
 logger = structlog.get_logger()
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Service name matching (prevents Composio fuzzy-search confusion)
-# ═══════════════════════════════════════════════════════════════════════════
 
+# ── Service name mismatch table ──────────────────────────────────────────────
 _KNOWN_SERVICE_PAIRS: dict[str, list[str]] = {
     "clerk": ["moonclerk", "metabase"],
     "linear": ["linearb"],
@@ -34,8 +30,10 @@ _KNOWN_SERVICE_PAIRS: dict[str, list[str]] = {
 }
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def normalize_service_name(name: str) -> str:
-    """Normalize service name for comparison."""
+    """Normalize a service name for fuzzy comparison."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
@@ -44,6 +42,7 @@ def is_genuine_service_match(query: str, result_name: str) -> bool:
 
     Prevents Composio's fuzzy search from confusing different services:
     - "Clerk" ≠ "MoonClerk" (auth platform vs payment processor)
+    - "Clerk" ≠ "Metabase" (completely unrelated)
     - "GitHub" = "GitHub" (exact match)
     - "google_calendar" ≈ "Google Calendar" (formatting variant)
     """
@@ -60,23 +59,27 @@ def is_genuine_service_match(query: str, result_name: str) -> bool:
         return True
     if q.startswith(r) and len(q) - len(r) <= 8:
         return True
+
+    # Reject: query is a substring of a longer, different name
     if q in r and r != q:
-        prefix = r[:r.index(q)]
+        prefix = r[: r.index(q)]
         if prefix:
             return False
+
     return len(set(q) & set(r)) / max(len(set(q)), 1) > 0.7
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Search / connection result validation
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ── Search/connection result filtering ───────────────────────────────────────
 
 def filter_search_results(
     result: dict[str, Any],
     max_results: int = 5,
 ) -> dict[str, Any]:
-    """Pre-filter COMPOSIO_SEARCH_TOOLS results to top-N relevant items."""
+    """Pre-filter COMPOSIO_SEARCH_TOOLS results to top-N relevant items.
+
+    Prevents the LLM from dumping 50 tools to the user.
+    Only connected/relevant tools are kept.
+    """
     if not isinstance(result, dict):
         return result
 
@@ -84,13 +87,9 @@ def filter_search_results(
     if not isinstance(items, list) or len(items) <= max_results:
         return result
 
-    connected_items = [
-        item for item in items
-        if isinstance(item, dict) and item.get("connected")
-    ]
+    connected_items = [item for item in items if isinstance(item, dict) and item.get("connected")]
     disconnected_items = [
-        item for item in items
-        if isinstance(item, dict) and not item.get("connected")
+        item for item in items if isinstance(item, dict) and not item.get("connected")
     ]
 
     filtered = connected_items[:max_results]
@@ -107,12 +106,17 @@ def validate_search_relevance(
     search_query: str,
     user_message: str,
 ) -> dict[str, Any]:
-    """Validate search results against what the user actually asked for."""
+    """Validate search results against what the user actually asked for.
+
+    Injects relevance warnings into results so the LLM doesn't blindly
+    act on fuzzy matches from Composio's search.
+    """
     if not isinstance(result, dict) or not search_query:
         return result
 
     items_key = next(
-        (k for k in ("items", "tools", "results") if k in result), None,
+        (k for k in ("items", "tools", "results") if k in result),
+        None,
     )
     if not items_key:
         return result
@@ -139,9 +143,10 @@ def validate_search_relevance(
             f"IMPORTANT: You searched for '{search_query}' but the results "
             f"returned are for different services: {mismatch_str}. "
             f"These are NOT the same as '{search_query}'. Do NOT suggest "
-            f"connecting to these services. Instead, acknowledge that "
-            f"'{search_query}' is not available as a native integration "
-            f"and offer to build a custom connection."
+            f"connecting to these services. Do NOT say 'I can build a custom "
+            f"integration' without researching first. Instead, call "
+            f"lucy_resolve_custom_integration(['{search_query}']) immediately "
+            f"to research what integration options exist (MCP, OpenAPI, or API)."
         )
         logger.warning(
             "search_relevance_mismatch",
@@ -164,7 +169,12 @@ def validate_connection_relevance(
     toolkits_requested: list[str],
     user_message: str,
 ) -> dict[str, Any]:
-    """Validate connection results — catch when Composio returns wrong services."""
+    """Validate connection results — catch when Composio returns wrong services.
+
+    When the user asks to connect "Clerk" but Composio resolves it to
+    "MoonClerk", this injects a correction so the LLM doesn't present
+    the wrong service to the user.
+    """
     if not isinstance(result, dict) or not toolkits_requested:
         return result
 
@@ -177,10 +187,7 @@ def validate_connection_relevance(
         for conn in connections:
             if not isinstance(conn, dict):
                 continue
-            resolved_name = (
-                conn.get("app") or conn.get("name")
-                or conn.get("appName") or ""
-            )
+            resolved_name = conn.get("app") or conn.get("name") or conn.get("appName") or ""
             if not is_genuine_service_match(req, resolved_name):
                 corrections.append(
                     f"'{req}' was matched to '{resolved_name}' which is a "
@@ -193,22 +200,20 @@ def validate_connection_relevance(
         result["_correction_instruction"] = (
             "WARNING: Some service name matches are INCORRECT. "
             + " ".join(corrections)
-            + " If the correct service is not available, acknowledge "
-            "honestly and offer to build a custom integration."
+            + " If the correct service is not in Composio, do NOT say "
+            "'I can build a custom integration' before researching. "
+            "Call lucy_resolve_custom_integration with the correct service "
+            "name immediately to discover what options exist."
         )
 
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Response quality assessment (zero-cost heuristics)
-# ═══════════════════════════════════════════════════════════════════════════
-
+# ── Quality assessment ────────────────────────────────────────────────────────
 
 def assess_response_quality(
     user_message: str,
     response_text: str | None,
-    connected_services: list[str] | None = None,
 ) -> dict[str, Any]:
     """Heuristic confidence scoring for the agent's response.
 
@@ -224,32 +229,6 @@ def assess_response_quality(
     response_text = response_text or ""
     resp_lower = response_text.lower()
     user_lower = user_message.lower()
-
-    # 0. Connection link for already-connected services
-    if connected_services:
-        _connect_link_re = re.compile(
-            r"composio\.dev/connect|connect here|connect (?:your |the )?(?:"
-            + "|".join(re.escape(s.lower()) for s in connected_services)
-            + r")",
-            re.IGNORECASE,
-        )
-        _not_connected_re = re.compile(
-            r"(?:don't|do not|doesn't|does not) have (?:active |any )?"
-            r"(?:connections?|access)",
-            re.IGNORECASE,
-        )
-        if _connect_link_re.search(response_text):
-            issues.append(
-                f"Offering connection links for already-connected services "
-                f"({', '.join(connected_services)})"
-            )
-            confidence -= 5
-        elif _not_connected_re.search(response_text):
-            issues.append(
-                f"Claims no active connections but these are connected: "
-                f"{', '.join(connected_services)}"
-            )
-            confidence -= 4
 
     # 1. Service name confusion detection
     for correct, wrong_matches in _KNOWN_SERVICE_PAIRS.items():
@@ -278,27 +257,29 @@ def assess_response_quality(
                 if len(w) > 3
             )
         ):
-            issues.append(
-                f"Suggesting unrequested service: '{suggested_clean}'"
-            )
+            issues.append(f"Suggesting unrequested service: '{suggested_clean}'")
             confidence -= 2
 
     # 3. "I can't find" when user expects action
     cant_patterns = [
-        "i don't have", "i can't", "i couldn't", "i wasn't able",
-        "no direct", "no native", "not available",
+        "i don't have",
+        "i can't",
+        "i couldn't",
+        "i wasn't able",
+        "no direct",
+        "no native",
+        "not available",
     ]
-    if any(p in resp_lower for p in cant_patterns):
+    # Mitigating phrases indicate the response offers an alternative — not a dead end.
+    _CANT_MITIGATORS = ["but i can", "but here", "here's what i can", "alternatively", "instead"]
+    _has_cant_mitigator = any(m in resp_lower for m in _CANT_MITIGATORS)
+    if any(p in resp_lower for p in cant_patterns) and not _has_cant_mitigator:
         action_words = ["check", "get", "show", "list", "pull", "create", "report"]
         if any(w in user_lower for w in action_words):
-            issues.append(
-                "Response says 'can't' but user expected action"
-            )
+            issues.append("Response says 'can't' but user expected action")
             confidence -= 1
 
     # 3b. Tool/infrastructure failure reported without exhausting alternatives
-    # If Lucy reported an execution failure on a user-requested action, confidence
-    # must drop hard enough to trigger escalation so the retry uses a different path.
     _FAILURE_PHRASES = [
         "connection attempts failed",
         "all connection attempts",
@@ -315,26 +296,37 @@ def assess_response_quality(
             issues.append(
                 "Reported infrastructure/tool failure without exhausting alternative approaches"
             )
-            confidence -= 4  # pushes to ≤6 → forces escalation retry
+            confidence -= 4
 
     # 4. Response is very short for a complex question
-    _COMMAND_WORDS = {"save", "delete", "remove", "create", "set", "update",
-                      "write", "store", "add", "send", "deploy", "start",
-                      "stop", "trigger", "schedule", "cancel"}
-    is_command = any(w in user_lower.split()[:5] for w in _COMMAND_WORDS)
-    if len(user_message) > 80 and len(response_text) < 80 and not is_command:
+    if len(user_message) > 60 and len(response_text) < 100:
         issues.append("Suspiciously short response for complex question")
         confidence -= 4
 
-    # 5. Depth check — data dump without analysis
-    depth_result = compute_depth_score(user_message, response_text)
-    if depth_result["is_shallow"]:
-        issues.append(
-            f"Shallow response detected (depth {depth_result['depth_score']}/10). "
-            f"Missing: {', '.join(depth_result['missing_layers'])}. "
-            f"Add interpretation, comparison, or recommendations."
-        )
-        confidence -= 2
+    # 5. Semantic relevance: check that response addresses the user's topic
+    user_keywords = {
+        w
+        for w in re.findall(r"[a-z]{4,}", user_lower)
+        if w
+        not in {
+            "what", "does", "have", "this", "that", "with", "from", "about",
+            "they", "them", "your", "their", "been", "were", "will", "would",
+            "could", "should", "which", "where", "when", "some", "many",
+            "much", "also", "just", "than", "more", "most", "very", "each",
+            "every", "list", "show", "give", "tell", "want", "need", "make",
+            "please", "right", "connected", "currently", "today",
+        }
+    }
+    if len(user_keywords) >= 2 and len(response_text) > 80:
+        resp_words = set(re.findall(r"[a-z]{4,}", resp_lower))
+        overlap = user_keywords & resp_words
+        overlap_ratio = len(overlap) / len(user_keywords) if user_keywords else 1.0
+        if overlap_ratio < 0.15 and len(user_keywords) >= 3:
+            issues.append(
+                f"Response may be off-topic: only {len(overlap)}/{len(user_keywords)} "
+                f"user keywords appear in the response"
+            )
+            confidence -= 3
 
     confidence = max(1, min(10, confidence))
     should_escalate = confidence <= 6 and len(issues) > 0
@@ -355,146 +347,26 @@ def assess_response_quality(
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Response depth assessment (NEW — data-dump detection + depth scoring)
-# ═══════════════════════════════════════════════════════════════════════════
+# ── Stuck detection ────────────────────────────────────────────────────────────
 
-# Signals that the response contains data/numbers
-_DEPTH_DATA_PATTERNS = [
-    re.compile(r"\b\d{1,3}(?:,\d{3})+\b"),              # formatted numbers
-    re.compile(r"\$[\d,.]+[KkMmBb]?"),                   # currency
-    re.compile(r"\b\d+(?:\.\d+)?%"),                     # percentages
-    re.compile(r"\b\d+\s*(?:users?|customers?|subscribers?|records?)\b", re.I),
-    re.compile(r"\b(?:MRR|ARR|LTV|CAC|NPS|DAU|MAU)\b"),
-]
-
-# Signals of interpretation/analysis
-_DEPTH_INTERPRETATION_PATTERNS = [
-    re.compile(r"\b(?:this (?:means|suggests|indicates|shows)|trend|pattern|shift)\b", re.I),
-    re.compile(r"\b(?:because|driven by|likely due to|caused by|correlat)\b", re.I),
-    re.compile(r"\b(?:compared to|vs\.?|versus|up from|down from|MoM|YoY)\b", re.I),
-    re.compile(r"\b(?:up|down|increased|decreased|grew|fell|rose|dropped)\s+(?:by\s+)?\d", re.I),
-]
-
-# Signals of actionable recommendations
-_DEPTH_RECOMMENDATION_PATTERNS = [
-    re.compile(r"\b(?:recommend|suggest|consider|should|want me to)\b", re.I),
-    re.compile(r"\b(?:next step|action item|follow[- ]?up|set (?:this |it )?up)\b", re.I),
-    re.compile(r"\b(?:dig(?:ging)? deeper|look(?:ing)? into|investigate|automate)\b", re.I),
-]
-
-# Signals that user expects analysis
-_DEPTH_ANALYSIS_INTENT = [
-    re.compile(r"\b(?:how (?:is|are|was|were)|how's)\b", re.I),
-    re.compile(r"\b(?:analyze|analysis|insight|trend|breakdown|report)\b", re.I),
-    re.compile(r"\b(?:pull|show|get|fetch)\s+(?:my|our|the)\b", re.I),
-]
-
-# Data-dump signals (data without analysis wrapper)
-_DEPTH_DUMP_PATTERNS = [
-    re.compile(r"(?:here (?:is|are)|here's) (?:the|your)\s+(?:data|list|report|breakdown)", re.I),
-    re.compile(r"(?:^|\n)\s*•\s*\*?\w[^:]*\*?:\s*[\$\d]", re.MULTILINE),
-]
-
-
-def compute_depth_score(
-    user_message: str,
-    response_text: str,
-    tool_calls_count: int = 0,
-) -> dict[str, Any]:
-    """Compute a depth score (1-10) for a response.
-
-    Integrated into assess_response_quality as an additional quality signal.
-    Also usable standalone for depth-specific checks.
-
-    Returns:
-        {
-            "depth_score": int (1-10),
-            "is_shallow": bool,
-            "has_data": bool,
-            "has_interpretation": bool,
-            "has_recommendations": bool,
-            "missing_layers": list[str],
-        }
-    """
-    if not response_text or len(response_text) < 50:
-        return {
-            "depth_score": 5,
-            "is_shallow": False,
-            "has_data": False,
-            "has_interpretation": False,
-            "has_recommendations": False,
-            "missing_layers": [],
-        }
-
-    has_data = sum(1 for p in _DEPTH_DATA_PATTERNS if p.search(response_text)) >= 1
-    has_interpretation = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2  # noqa: E501
-    has_recommendations = sum(1 for p in _DEPTH_RECOMMENDATION_PATTERNS if p.search(response_text)) >= 1  # noqa: E501
-    is_dump = (
-        has_data
-        and sum(1 for p in _DEPTH_DUMP_PATTERNS if p.search(response_text)) >= 1
-        and not has_interpretation
-    )
-    user_wants_analysis = sum(1 for p in _DEPTH_ANALYSIS_INTENT if p.search(user_message)) >= 1
-
-    # Score calculation
-    score = 3
-    if has_data:
-        score += 1
-    if has_interpretation:
-        score += 2
-    if has_recommendations:
-        score += 1
-    if len(response_text) > 500 and has_data:
-        score += 1
-    if is_dump:
-        score -= 2
-    if tool_calls_count >= 3 and score < 6:
-        score -= 1
-    score = max(1, min(10, score))
-
-    # Missing layers
-    missing: list[str] = []
-    if has_data and not has_interpretation:
-        missing.append("interpretation")
-    if (has_data or user_wants_analysis) and not has_recommendations:
-        missing.append("recommendations")
-
-    # Shallow determination: data response missing 2+ layers, or data dump
-    is_shallow = (
-        (has_data and len(missing) >= 2)
-        or (user_wants_analysis and score <= 5)
-        or is_dump
-    )
-
-    return {
-        "depth_score": score,
-        "is_shallow": is_shallow,
-        "has_data": has_data,
-        "has_interpretation": has_interpretation,
-        "has_recommendations": has_recommendations,
-        "missing_layers": missing,
-    }
-
-
-def detect_data_dump(response_text: str) -> bool:
-    """Quick check: is this a data dump without interpretation?
-
-    Fast gate for use in output pipeline before full depth assessment.
-    """
-    if not response_text or len(response_text) < 80:
-        return False
-
-    has_data = sum(1 for p in _DEPTH_DATA_PATTERNS if p.search(response_text)) >= 2
-    has_dump = sum(1 for p in _DEPTH_DUMP_PATTERNS if p.search(response_text)) >= 1
-    has_interp = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2
-
-    return has_data and has_dump and not has_interp
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Stuck-state detection
-# ═══════════════════════════════════════════════════════════════════════════
+def _has_real_error(content: str) -> bool:
+    """Check if a tool result contains a genuine error, not just an empty error field."""
+    try:
+        data = json.loads(content) if content.strip().startswith("{") else {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        err = data.get("error", "")
+        if err and str(err).strip():
+            return True
+        nested = data.get("data", {})
+        if isinstance(nested, dict):
+            nerr = nested.get("error", "")
+            if nerr and str(nerr).strip():
+                return True
+    if "traceback" in content.lower() or "exception" in content.lower():
+        return True
+    return False
 
 
 def detect_stuck_state(
@@ -523,78 +395,56 @@ def detect_stuck_state(
 
     for msg in messages[-12:]:
         if msg.get("role") == "tool":
-            content = msg.get("content", "")
-            recent_tool_results.append(content)
+            recent_tool_results.append(msg.get("content", ""))
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls", []):
                 fn = tc.get("function", {})
                 recent_tool_names.append(fn.get("name", ""))
 
-    def _has_real_error(content: str) -> bool:
-        """Check if tool result contains a genuine error."""
-        try:
-            data = json.loads(content) if content.strip().startswith("{") else {}
-        except (json.JSONDecodeError, ValueError):
-            data = {}
-        if isinstance(data, dict):
-            err = data.get("error", "")
-            if err and str(err).strip():
-                return True
-            nested = data.get("data", {})
-            if isinstance(nested, dict):
-                nerr = nested.get("error", "")
-                if nerr and str(nerr).strip():
-                    return True
-        if "traceback" in content.lower() or "exception" in content.lower():
-            return True
-        return False
-
-    error_count = sum(1 for r in recent_tool_results if _has_real_error(r))
+    error_count = sum(1 for r in recent_tool_results[-4:] if _has_real_error(r))
     if error_count >= 3:
         result["is_stuck"] = True
-        result["reason"] = (
-            f"Last {len(recent_tool_results)} tool calls had "
-            f"{error_count} errors"
-        )
+        result["reason"] = f"{error_count} consecutive tool errors detected"
         result["intervention"] = (
-            "Multiple consecutive tool errors detected. "
-            "Stop retrying the same approach. "
-            "Try a completely different tool or method. "
-            "If you're stuck on an API, try using the workbench "
-            "to write a direct script instead."
+            "ATTENTION: Multiple consecutive tool calls have returned errors. "
+            "STOP repeating the same approach. Take a step back and try a "
+            "completely different strategy. If an API call keeps failing, "
+            "use lucy_web_search to look up the correct API usage. If a "
+            "script keeps erroring, read the error message carefully and "
+            "fix the root cause before retrying."
         )
+        result["escalate_model"] = True
+        return result
 
     if len(recent_tool_names) >= 4:
-        last_4 = recent_tool_names[-4:]
-        if len(set(last_4)) == 1:
+        last_four = recent_tool_names[-4:]
+        _STUCK_EXEMPT = {
+            "COMPOSIO_REMOTE_WORKBENCH",
+            "COMPOSIO_REMOTE_BASH_TOOL",
+            "lucy_exec_command",
+            "lucy_poll_process",
+        }
+        if (
+            last_four[0] not in _STUCK_EXEMPT
+            and not (last_four[0].startswith("lucy_custom_") and "_list_" in last_four[0])
+            and len(set(last_four)) == 1
+        ):
             result["is_stuck"] = True
-            result["reason"] = (
-                f"Same tool '{last_4[0]}' called 4+ times in a row"
-            )
+            result["reason"] = f"Same tool ({last_four[0]}) called 4x in a row"
             result["intervention"] = (
-                f"You've called '{last_4[0]}' multiple times with "
-                f"similar results. This approach isn't working. "
-                f"Try a fundamentally different tool or strategy."
-            )
-
-    if current_turn >= 8 and not result["is_stuck"]:
-        progress_signals = ["success", "created", "found", "result", "data"]
-        has_progress = any(
-            any(s in r.lower() for s in progress_signals)
-            for r in recent_tool_results[-3:]
-        )
-        if not has_progress:
-            result["is_stuck"] = True
-            result["reason"] = "No progress signals after 8+ turns"
-            result["intervention"] = (
-                "You've been working for many turns without clear progress. "
-                "Summarize what you've found so far and present it to the "
-                "user. Ask if they want you to continue or try differently."
+                f"ATTENTION: You have called {last_four[0]} four times in a "
+                f"row. This looks like a loop. If it keeps failing, try a "
+                f"different approach entirely. Consider using "
+                f"lucy_exec_command or COMPOSIO_REMOTE_WORKBENCH to write a script instead of "
+                f"repeated tool calls."
             )
             result["escalate_model"] = True
+            return result
 
     return result
 
+
+# ── Output verification ────────────────────────────────────────────────────────
 
 def verify_output(
     user_message: str,
@@ -604,15 +454,19 @@ def verify_output(
     """Heuristic verification that the response addresses the request.
 
     Zero-cost check (no LLM call) that catches common completeness failures.
+    Returns a dict with:
+        - passed: whether all checks passed
+        - issues: list of specific failures detected
+        - should_retry: whether a retry with failure context is warranted
     """
     issues: list[str] = []
     user_lower = user_message.lower()
     resp_lower = response_text.lower()
 
     all_data_signals = [
-        "all users", "all customers", "all data", "all records",
-        "every user", "every customer", "complete list", "complete report",
-        "full report", "full list", "raw data", "entire", "user base",
+        "all users", "all customers", "all data", "all records", "every user",
+        "every customer", "complete list", "complete report", "full report",
+        "full list", "raw data", "entire", "user base",
     ]
     wants_all = any(s in user_lower for s in all_data_signals)
 
@@ -644,8 +498,8 @@ def verify_output(
             "excel": ["excel", "spreadsheet", ".xlsx", "openpyxl", "file.*upload"],
             "google_drive": ["drive", "uploaded", "shared", "link"],
             "email_send": [
-                "email sent", "emailed", "sent.*email",
-                "email.*to.*@", "✅.*email", ":white_check_mark:.*email",
+                "email sent", "emailed", "sent.*email", "email.*to.*@",
+                "✅.*email", ":white_check_mark:.*email",
             ],
             "summary": [
                 "summary", "total", "breakdown", "here's", "overview",
@@ -654,13 +508,8 @@ def verify_output(
         }
         for part in requested_parts:
             signals = delivered_signals.get(part, [])
-            if signals and not any(
-                re.search(s, resp_lower) for s in signals
-            ):
-                issues.append(
-                    f"User requested '{part}' but it appears missing "
-                    f"from the response."
-                )
+            if signals and not any(re.search(s, resp_lower) for s in signals):
+                issues.append(f"User requested '{part}' but it appears missing from the response.")
 
     if intent == "data" and len(response_text) < 100:
         issues.append(
@@ -669,12 +518,9 @@ def verify_output(
         )
 
     degradation_phrases = [
-        "ran into a hiccup",
-        "ran into an issue",
-        "let me try a different approach",
-        "couldn't complete",
-        "unable to process",
-        "something went wrong",
+        "ran into a hiccup", "ran into an issue",
+        "let me try a different approach", "couldn't complete",
+        "unable to process", "something went wrong",
     ]
     if any(p in resp_lower for p in degradation_phrases):
         issues.append(
@@ -688,36 +534,17 @@ def verify_output(
             "Break the task into steps and execute each one."
         )
 
-    # Depth check: flag data dumps that lack analysis
-    depth = compute_depth_score(user_message, response_text)
-    if depth["is_shallow"]:
-        missing_str = ", ".join(depth["missing_layers"])
-        issues.append(
-            f"Response lacks analytical depth (score: {depth['depth_score']}/10). "
-            f"Missing: {missing_str}. Every data response needs: "
-            f"the data + what it means + what to do about it."
-        )
-
     # High-agency check: detect surrender/dead-end patterns
     low_agency_patterns = [
-        "i can't access",
-        "i'm unable to",
-        "unfortunately i cannot",
-        "i don't have access to",
-        "i'm not able to",
-        "i cannot access",
-        "i am unable to",
-        "that's outside my",
-        "falls outside my",
-        "i don't have the ability",
-        "i'm afraid i can't",
+        "i can't access", "i'm unable to", "unfortunately i cannot",
+        "i don't have access to", "i'm not able to", "i cannot access",
+        "i am unable to", "that's outside my", "falls outside my",
+        "i don't have the ability", "i'm afraid i can't",
         "this took longer than expected and i had to stop",
         "the request may have been too complex",
         "want me to try a simpler approach",
-        "i wasn't able to complete",
-        "i'm having trouble with",
-        "something went wrong",
-        "i hit a snag",
+        "i wasn't able to complete", "i'm having trouble with",
+        "something went wrong", "i hit a snag",
     ]
     action_words = [
         "get", "show", "pull", "fetch", "create", "build", "generate",
@@ -733,13 +560,18 @@ def verify_output(
             "(1) Offer the closest thing you CAN do right now, "
             "(2) Explain specifically what you'd need to do the full thing, "
             "(3) Provide at least one alternative path forward. "
-            "Never leave the user with a dead end."
+            "Never leave the user with a dead end. Never suggest they 'try a simpler "
+            "approach' — YOU find the simpler approach and execute it. "
+            "Example: instead of 'I can't access Figma directly' say "
+            "'I can't pull from Figma directly, but two options: drop the file here "
+            "and I'll extract the content, or I can build a custom connection. "
+            "Which works better?'"
         )
     elif has_low_agency:
         issues.append(
             "Response contains a 'can't do' pattern without offering an alternative. "
-            "Always follow 'I can't X' with 'but I can Y' or 'here's what would "
-            "make it possible'. No dead ends."
+            "Even if the user didn't explicitly ask for action, always follow 'I can't X' "
+            "with 'but I can Y' or 'here's what would make it possible'. No dead ends."
         )
 
     return {

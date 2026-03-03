@@ -149,14 +149,9 @@ class CircuitOpenError(Exception):
 
 
 _BREAKER_CONFIGS: dict[str, tuple[int, float]] = {
-    # name: (failure_threshold, cooldown_seconds)
     "openrouter": (5, 60.0),
     "composio": (5, 60.0),
-    "vercel": (3, 30.0),
-    "convex": (3, 30.0),
 }
 
 openrouter_breaker = CircuitBreaker("openrouter", *_BREAKER_CONFIGS["openrouter"])
 composio_breaker = CircuitBreaker("composio", *_BREAKER_CONFIGS["composio"])
-vercel_breaker = CircuitBreaker("vercel", *_BREAKER_CONFIGS["vercel"])
-convex_breaker = CircuitBreaker("convex", *_BREAKER_CONFIGS["convex"])

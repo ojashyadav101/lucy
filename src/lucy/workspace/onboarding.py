@@ -336,11 +336,6 @@ async def _create_company_profile(
     )
 
 
-async def _create_company_stub(ws: WorkspaceFS) -> None:
-    """Create a placeholder company/SKILL.md (legacy fallback)."""
-    await _create_company_profile(ws, slack_client=None)
-
-
 async def ensure_workspace(
     workspace_id: str,
     slack_client: object | None = None,

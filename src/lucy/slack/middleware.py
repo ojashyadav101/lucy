@@ -31,6 +31,10 @@ async def resolve_workspace_middleware(
     """
     team_id = request.body.get("team_id") if request.body else None
 
+    # block_actions payloads nest the team ID under "team": {"id": "..."}
+    if not team_id and request.body:
+        team_id = (request.body.get("team") or {}).get("id")
+
     if not team_id:
         await next()
         return

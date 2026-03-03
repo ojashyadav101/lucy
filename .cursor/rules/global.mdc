@@ -25,7 +25,7 @@ alwaysApply: true
 ## Package Layout
 - `core/` — Agent orchestrator, OpenClaw client, system prompt builder.
 - `slack/` — Slack Bolt handlers, middleware, Block Kit composers.
-- `workspace/` — Filesystem memory: skills, activity logs, snapshots, onboarding.
+- `workspace/` — Filesystem memory: skills, activity logs, onboarding.
 - `crons/` — APScheduler-based proactivity engine.
 - `integrations/` — Composio SDK client and connection registry.
 - `db/` — SQLAlchemy models and async session management.

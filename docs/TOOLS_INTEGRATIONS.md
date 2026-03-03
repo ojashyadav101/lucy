@@ -239,37 +239,6 @@ class ResolutionResult:
 
 ## Integration Modules — Detailed Reference
 
-### CamoFox Browser (`integrations/camofox.py`)
-
-Anti-detection headless browser for web scraping, form filling, and content
-checking. Used by heartbeat `page_content` evaluator and research tasks.
-
-**Client:** `CamoFoxClient` — async REST client to CamoFox server (port 9377).
-
-| Category | Methods |
-|----------|---------|
-| **Tab Management** | `create_tab(user_id?)` → tab_id, `list_tabs()`, `close_tab(tab_id)` |
-| **Navigation** | `navigate(tab_id, url)` (supports @search macros, 45s timeout), `go_back()`, `go_forward()`, `reload()` |
-| **Reading** | `snapshot(tab_id)` → accessibility tree with `eN` element references |
-| **Interaction** | `click(ref)`, `type_text(ref, text)`, `fill(ref, text)`, `press_key(ref, key)`, `select_option(ref, value)`, `scroll(ref, direction)`, `hover(ref)` |
-| **Screenshot** | `screenshot(tab_id)` → PNG bytes |
-| **Health** | `is_healthy()` → bool |
-
-**Search macros:** `@google_search`, `@youtube_search`, `@bing_search`,
-`@duckduckgo_search`, `@reddit_search`, `@github_search`,
-`@stackoverflow_search`, `@wikipedia_search`, `@amazon_search`,
-`@twitter_search`, `@linkedin_search`, `@hackernews_search`,
-`@arxiv_search`, `@scholar_search`.
-
-**Workflow pattern:**
-```
-create_tab() → navigate(url) → snapshot() → click(ref) → snapshot() → close_tab()
-```
-
-**Error:** `CamoFoxError(status_code, detail)` raised on API failures.
-
----
-
 ### MCP Manager (`integrations/mcp_manager.py`)
 
 Installs and manages Model Context Protocol servers on the OpenClaw VPS.

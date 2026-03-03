@@ -94,54 +94,6 @@ def text_to_blocks(text: str) -> list[dict[str, Any]] | None:
     return blocks
 
 
-def approval_blocks(
-    action_summary: str,
-    action_id: str,
-    details: str | None = None,
-) -> list[dict[str, Any]]:
-    """Build Block Kit blocks for a human-in-the-loop approval prompt.
-
-    Includes Approve/Cancel buttons with action metadata.
-    """
-    blocks: list[dict[str, Any]] = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f":warning: *Confirmation Required*\n\n{action_summary}",
-            },
-        },
-    ]
-
-    if details:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": _truncate(details, MAX_SECTION_TEXT_CHARS)},
-        })
-
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Approve"},
-                "style": "primary",
-                "action_id": f"lucy_action_approve_{action_id}",
-                "value": action_id,
-            },
-            {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Cancel"},
-                "style": "danger",
-                "action_id": f"lucy_action_cancel_{action_id}",
-                "value": action_id,
-            },
-        ],
-    })
-
-    return blocks
-
-
 def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text

@@ -2,6 +2,8 @@
 
 AI coworker that lives in Slack. Proactive, skill-driven, and built on [OpenClaw](https://github.com/open-claw).
 
+> **Note: 2026-03-03 — Clean Sweep Audit Completed.** The codebase has undergone a comprehensive health, optimization, and dead-code audit. Critical bugs in model escalation, tool registration, and workspace pathing have been resolved. Stale infrastructure (request_queue, camofox) and 50+ dead functions have been removed.
+
 Lucy doesn't just answer questions — she monitors channels, discovers workflows, executes real tasks with 10,000+ integrations, and gets smarter by writing everything she learns to her skill files.
 
 ## Architecture
@@ -26,7 +28,7 @@ Slack ←→ Slack Bolt (Socket Mode)
          │   ├── skills/     — SKILL.md knowledge files
          │   ├── crons/      — proactive task definitions + LEARNINGS.md
          │   ├── logs/       — daily activity logs
-         │   ├── data/       — JSON snapshots for trend detection
+         │   ├── data/       — session memory and exports
          │   └── team/ company/ — organizational context
               ↓
          Tools & Integrations
@@ -59,9 +61,8 @@ lucy/
 │   │   ├── output.py         — output sanitization & formatting
 │   │   └── humanize.py       — warm user-facing message generation
 │   │
-│   ├── infra/                — Infrastructure utilities (3 files)
+│   ├── infra/                — Infrastructure utilities (2 files)
 │   │   ├── rate_limiter.py   — token bucket rate limiting
-│   │   ├── request_queue.py  — priority request queuing
 │   │   └── trace.py          — request-scoped tracing
 │   │
 │   ├── slack/                — Slack API & Block Kit (7 files)
@@ -78,7 +79,6 @@ lucy/
 │   │   ├── memory.py         — session memory management
 │   │   ├── onboarding.py     — workspace setup
 │   │   ├── executor.py       — code execution (sandbox + local)
-│   │   ├── snapshots.py      — JSON data persistence for trends
 │   │   └── ...               — activity_log, slack_reader, timezone, etc.
 │   │
 │   ├── crons/                — Scheduled tasks & heartbeat (3 files)
