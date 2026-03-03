@@ -6,9 +6,8 @@ Each space project stores its config as project.json in the workspace.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
 
 import structlog
 

@@ -1,21 +1,24 @@
 """MCP protocol client — HTTP/SSE transport.
 
-Provides stateless connect-and-discover and per-call tool execution for any
-service exposing an MCP HTTP or SSE endpoint (Craft, Notion, Linear, etc.).
+Provides connect-and-discover and per-call tool execution for any service
+exposing an MCP HTTP or SSE endpoint (Craft, Notion, Linear, etc.).
 
 Design choices:
-- Per-call reconnect: each call opens a fresh session, initialises, calls, closes.
-  ~200 ms overhead but eliminates stale-session and connection-pool bugs since
-  Lucy's tool calls can be seconds to minutes apart.
-- Streamable HTTP first, SSE fallback: the modern MCP spec uses Streamable HTTP;
-  older servers use SSE. We try Streamable HTTP, fall back to SSE transparently.
-- Never raises: all public functions return error dicts, matching the Composio
-  error pattern so the agent loop handles them uniformly.
+- Session pool: a process-level cache (``_SESSION_POOL``) keeps one live
+  ClientSession per URL. First call ~5 s (TLS + MCP initialize); subsequent
+  calls re-use the session for ~200 ms latency. Stale sessions are detected
+  on the first RPC failure and evicted, triggering a transparent reconnect.
+- Streamable HTTP first, SSE fallback: the modern MCP spec uses Streamable
+  HTTP; older servers use SSE. We try Streamable HTTP, fall back to SSE.
+- Never raises: all public functions return error dicts, matching the
+  Composio error pattern so the agent loop handles them uniformly.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +31,55 @@ from lucy.config import settings
 logger = structlog.get_logger()
 
 _MAX_TOOLS_PER_SERVICE = 30
+
+# ── Session pool ───────────────────────────────────────────────────────────────
+# Keyed by URL. Value: (session, transport_name, last_used_monotonic).
+# We keep at most _POOL_MAX_SIZE entries; evict LRU when full.
+_POOL_MAX_SIZE = 20
+_POOL_TTL_S = 300  # evict idle sessions after 5 minutes
+
+@dataclass
+class _PoolEntry:
+    session: Any          # mcp.ClientSession
+    transport: str
+    last_used: float = field(default_factory=time.monotonic)
+    # We need to hold a reference to the context managers so they can be
+    # closed when evicted. Stored as a cleanup coroutine to call on eviction.
+    cleanup: Any = None   # Callable[[], Coroutine]
+
+_SESSION_POOL: dict[str, _PoolEntry] = {}
+_POOL_LOCK: asyncio.Lock | None = None
+
+
+def _get_pool_lock() -> asyncio.Lock:
+    global _POOL_LOCK
+    if _POOL_LOCK is None:
+        _POOL_LOCK = asyncio.Lock()
+    return _POOL_LOCK
+
+
+async def _evict_stale_sessions() -> None:
+    """Remove sessions idle longer than _POOL_TTL_S and enforce size cap."""
+    now = time.monotonic()
+    stale = [url for url, e in _SESSION_POOL.items() if now - e.last_used > _POOL_TTL_S]
+    for url in stale:
+        await _close_pool_entry(url)
+
+    # Enforce max size by evicting the oldest (LRU)
+    while len(_SESSION_POOL) > _POOL_MAX_SIZE:
+        oldest_url = min(_SESSION_POOL, key=lambda u: _SESSION_POOL[u].last_used)
+        await _close_pool_entry(oldest_url)
+
+
+async def _close_pool_entry(url: str) -> None:
+    entry = _SESSION_POOL.pop(url, None)
+    if entry and entry.cleanup:
+        try:
+            await entry.cleanup()
+        except Exception:
+            pass
+    if entry:
+        logger.debug("mcp_session_evicted", url=url, transport=entry.transport)
 
 
 @dataclass
@@ -79,10 +131,9 @@ async def _open_session(url: str, timeout: float):
         async with sse_client(url, timeout=timeout, sse_read_timeout=timeout * 10) as (
             read,
             write,
-        ):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                yield session, "sse"
+        ), ClientSession(read, write) as session:
+            await session.initialize()
+            yield session, "sse"
     finally:
         await http_client.aclose()
 
@@ -234,66 +285,154 @@ async def call_tool(
 ) -> dict[str, Any]:
     """Execute an MCP tool call on the given server URL.
 
-    Reconnects per-call (stateless). Returns ``{"result": ...}`` on success
-    or ``{"error": ...}`` on failure — never raises.
+    Re-uses a pooled session when available (~200 ms). Falls back to a fresh
+    connection on session errors (stale connection, server restart, etc.).
+    Returns ``{"result": ...}`` on success or ``{"error": ...}`` on failure —
+    never raises.
 
     ``tool_name`` is the **native** MCP tool name (no ``mcp_{service}_`` prefix).
     Stripping the prefix is the caller's responsibility.
     """
     timeout = timeout or settings.mcp_timeout_s
+    primary = transport_hint if transport_hint in ("streamable_http", "sse") else "streamable_http"
 
-    async def _attempt(use_transport: str) -> dict[str, Any]:
-        from mcp import ClientSession
-
-        if use_transport == "sse":
-            from mcp.client.sse import sse_client as _sse
-            ctx = _sse(url, timeout=timeout, sse_read_timeout=timeout * 10)
-        else:
-            from mcp.client.streamable_http import streamable_http_client as _sthttp
-            http_client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
-            ctx = _sthttp(url, http_client=http_client)
-
-        async with ctx as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
-
-                if result.isError:
-                    content_text = _extract_content_text(result.content)
-                    return {"error": content_text or "MCP tool returned an error"}
-
-                content_text = _extract_content_text(result.content)
-                # Try to parse as JSON for structured results
-                try:
-                    return {"result": json.loads(content_text)}
-                except (json.JSONDecodeError, TypeError):
-                    return {"result": content_text}
-
-    try:
-        # Determine which transport to try first
-        primary = transport_hint if transport_hint in ("streamable_http", "sse") else "streamable_http"
-        fallback = "sse" if primary == "streamable_http" else "streamable_http"
-
+    async def _call_session(session: Any) -> dict[str, Any]:
+        result = await session.call_tool(tool_name, arguments)
+        if result.isError:
+            content_text = _extract_content_text(result.content)
+            return {"error": content_text or "MCP tool returned an error"}
+        content_text = _extract_content_text(result.content)
         try:
-            return await _attempt(primary)
-        except Exception as primary_err:
+            return {"result": json.loads(content_text)}
+        except (json.JSONDecodeError, TypeError):
+            return {"result": content_text}
+
+    # ── Try pooled session first ───────────────────────────────────────────
+    pool_lock = _get_pool_lock()
+    async with pool_lock:
+        await _evict_stale_sessions()
+        entry = _SESSION_POOL.get(url)
+
+    if entry is not None:
+        try:
+            entry.last_used = time.monotonic()
+            result = await asyncio.wait_for(_call_session(entry.session), timeout=timeout)
+            logger.debug("mcp_call_pooled", tool=tool_name, transport=entry.transport)
+            return result
+        except Exception as pool_err:
+            # Session is stale — evict and fall through to fresh connection
             logger.debug(
-                "mcp_call_primary_transport_failed",
+                "mcp_pooled_session_stale",
                 tool=tool_name,
-                transport=primary,
-                error=str(primary_err),
+                error=str(pool_err),
             )
-            return await _attempt(fallback)
+            async with pool_lock:
+                await _close_pool_entry(url)
+
+    # ── Fresh connection: open, call, then keep session in pool ───────────
+    try:
+        t0 = time.monotonic()
+        result, session, transport, cleanup = await _open_and_call(
+            url, tool_name, arguments, primary, timeout
+        )
+        elapsed = time.monotonic() - t0
+        logger.debug(
+            "mcp_call_fresh",
+            tool=tool_name,
+            transport=transport,
+            connect_ms=int(elapsed * 1000),
+        )
+
+        # Store the live session in the pool for future calls
+        async with pool_lock:
+            _SESSION_POOL[url] = _PoolEntry(
+                session=session,
+                transport=transport,
+                cleanup=cleanup,
+            )
+
+        return result
 
     except Exception as exc:
         err = str(exc) or type(exc).__name__
-        logger.warning(
-            "mcp_tool_call_failed",
-            tool=tool_name,
-            url=url,
-            error=err,
-        )
+        logger.warning("mcp_tool_call_failed", tool=tool_name, url=url, error=err)
         return {"error": f"MCP tool '{tool_name}' failed: {err}"}
+
+
+async def _open_and_call(
+    url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    transport: str,
+    timeout: float,
+) -> tuple[dict[str, Any], Any, str, Any]:
+    """Open a fresh MCP session, run a tool call, and return the session for pooling.
+
+    Returns (result_dict, session, transport_name, cleanup_coroutine).
+    The session is left open for pooling. The cleanup coroutine must be called
+    when the session should be closed (eviction, shutdown, etc.).
+    """
+    from mcp import ClientSession
+
+    fallback = "sse" if transport == "streamable_http" else "streamable_http"
+
+    for use_transport in (transport, fallback):
+        try:
+            if use_transport == "sse":
+                from mcp.client.sse import sse_client as _sse
+                cm = _sse(url, timeout=timeout, sse_read_timeout=timeout * 10)
+            else:
+                from mcp.client.streamable_http import streamable_http_client as _sthttp
+                http_client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+                cm = _sthttp(url, http_client=http_client)
+
+            streams_ctx = cm.__aenter__()
+            _streams = await streams_ctx
+
+            read, write = _streams[0], _streams[1]
+
+            session_cm = ClientSession(read, write)
+            session = await session_cm.__aenter__()
+            await session.initialize()
+
+            tool_result = await session.call_tool(tool_name, arguments)
+
+            if tool_result.isError:
+                content_text = _extract_content_text(tool_result.content)
+                # Don't pool on error
+                await session_cm.__aexit__(None, None, None)
+                await cm.__aexit__(None, None, None)
+                return {"error": content_text or "MCP tool returned an error"}, None, use_transport, None
+
+            content_text = _extract_content_text(tool_result.content)
+            try:
+                parsed = {"result": json.loads(content_text)}
+            except (json.JSONDecodeError, TypeError):
+                parsed = {"result": content_text}
+
+            # Build a cleanup closure that properly tears down the session
+            async def _cleanup(s=session, s_cm=session_cm, c_cm=cm):
+                try:
+                    await s_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                try:
+                    await c_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+
+            return parsed, session, use_transport, _cleanup
+
+        except Exception as err:
+            logger.debug(
+                "mcp_open_call_transport_failed",
+                tool=tool_name,
+                transport=use_transport,
+                error=str(err),
+            )
+            continue
+
+    raise RuntimeError(f"All transports failed for {url}")
 
 
 def _extract_content_text(content: list[Any] | Any) -> str:

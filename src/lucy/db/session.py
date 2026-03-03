@@ -9,16 +9,14 @@ Production-grade setup with:
 
 from __future__ import annotations
 
-import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import sessionmaker
 
 from lucy.config import settings
 
@@ -59,7 +57,7 @@ AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency: yields a database session.
-    
+
     Usage:
         @app.get("/items")
         async def get_items(db: AsyncSession = Depends(get_db)):
@@ -78,7 +76,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 @asynccontextmanager
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Context manager for manual session handling.
-    
+
     Usage:
         async with db_session() as db:
             result = await db.execute(...)
@@ -96,11 +94,11 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     """Initialize database tables.
-    
+
     In production, use Alembic migrations. This is for dev/test only.
     """
     from lucy.db.models import Base
-    
+
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

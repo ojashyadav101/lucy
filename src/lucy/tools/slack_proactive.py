@@ -54,11 +54,11 @@ def get_slack_proactive_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "message_ts": {
                             "type": "string",
-                            "description": "Timestamp of the message to react to (e.g. '1772284913.185259').",
+                            "description": "Timestamp of the message to react to (e.g. '1772284913.185259').",  # noqa: E501
                         },
                         "emoji": {
                             "type": "string",
-                            "description": "Emoji name without colons (e.g. 'tada', 'eyes', 'rocket').",
+                            "description": "Emoji name without colons (e.g. 'tada', 'eyes', 'rocket').",  # noqa: E501
                         },
                     },
                     "required": ["channel_id", "message_ts", "emoji"],
@@ -86,11 +86,11 @@ def get_slack_proactive_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "text": {
                             "type": "string",
-                            "description": "Message text. Be concise and natural, as if reaching out to a teammate.",
+                            "description": "Message text. Be concise and natural, as if reaching out to a teammate.",  # noqa: E501
                         },
                         "thread_ts": {
                             "type": "string",
-                            "description": "Optional: reply in a thread by providing the parent message timestamp.",
+                            "description": "Optional: reply in a thread by providing the parent message timestamp.",  # noqa: E501
                         },
                     },
                     "required": ["channel_id", "text"],
@@ -118,7 +118,7 @@ def get_slack_proactive_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "text": {
                             "type": "string",
-                            "description": "Message text. Be personalized and specific -- mention the observed pattern or pain point.",
+                            "description": "Message text. Be personalized and specific -- mention the observed pattern or pain point.",  # noqa: E501
                         },
                     },
                     "required": ["user_id", "text"],

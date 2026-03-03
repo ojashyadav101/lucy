@@ -20,7 +20,7 @@ from lucy.config import LLMPresets, settings
 
 logger = structlog.get_logger()
 
-_SEARCH_MODEL = settings.model_tier_fast
+_SEARCH_MODEL = settings.model_tier_fast + ":online"
 
 _CLASSIFICATION_PROMPT = """\
 You are an integration research assistant. Given a service name, determine how
@@ -33,7 +33,7 @@ Research the service "{service_name}" and answer ONLY with a JSON object:
   "has_mcp": true/false,
   "mcp_repo_url": "GitHub URL or npm package name if stdio MCP server exists, else null",
   "mcp_docs_url": "URL to MCP server documentation/README, else null",
-  "mcp_http_url": "Base HTTP/SSE URL for the MCP server if it is accessed over HTTP (not stdio), else null",
+  "mcp_http_url": "Base HTTP/SSE URL for the MCP server if it is accessed over HTTP (not stdio), else null",  # noqa: E501
   "has_openapi": true/false,
   "openapi_spec_url": "Direct URL to .json or .yaml OpenAPI spec file, else null",
   "openapi_docs_url": "URL to API reference documentation, else null",
@@ -90,7 +90,7 @@ Analyze the above and return ONLY a JSON object:
           "path": "/api/v1/products",
           "description": "List all products with optional filters",
           "parameters": [
-            {{"name": "organization_id", "type": "string", "required": false, "description": "Filter by organization"}}
+            {{"name": "organization_id", "type": "string", "required": false, "description": "Filter by organization"}}  # noqa: E501
           ]
         }}
       ]
@@ -178,7 +178,6 @@ async def classify_service(service_name: str) -> IntegrationClassification:
 
     prompt = _CLASSIFICATION_PROMPT.format(service_name=service_name)
     parsed = await _call_gemini(prompt, api_key)
-    duration = round((time.monotonic() - t0) * 1000, 1)
 
     if isinstance(parsed, str):
         return IntegrationClassification(service_name=service_name, error=parsed)

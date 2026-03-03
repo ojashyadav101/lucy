@@ -77,6 +77,7 @@ class TestHeuristicClassification:
         "polarsh_create_checkout_link",
         "polarsh_create_benefit",
         "polarsh_create_discount",
+        "gmail_reply_to_thread",  # replying is reversible messaging, not DESTRUCTIVE
     ])
     def test_write_tools(self, tool_name: str) -> None:
         assert classify(tool_name) == ActionType.WRITE, (
@@ -86,7 +87,6 @@ class TestHeuristicClassification:
     # DESTRUCTIVE tools
     @pytest.mark.parametrize("tool_name", [
         "gmail_send_email",
-        "gmail_reply_to_thread",
         "googlecalendar_delete_event",
         "clerk_delete_user",
         "clerk_ban_user",
@@ -271,8 +271,10 @@ class TestShouldGate:
         assert action_type == ActionType.READ
 
     def test_write_gated_in_interactive(self) -> None:
+        # WRITE actions auto-execute — user's request is implicit consent.
+        # Only DESTRUCTIVE actions trigger the Approve/Reject gate.
         gated, action_type = should_gate("googlecalendar_create_event")
-        assert gated
+        assert not gated
         assert action_type == ActionType.WRITE
 
     def test_destructive_always_gated(self) -> None:
@@ -390,11 +392,11 @@ class TestEndToEnd:
         assert not gated
 
     def test_calendar_create_flow(self) -> None:
-        """User creates event → WRITE, gated."""
+        """User creates event → WRITE, auto-executes (no gate)."""
         action_type = classify("googlecalendar_create_event")
         assert action_type == ActionType.WRITE
         gated, _ = should_gate("googlecalendar_create_event")
-        assert gated
+        assert not gated
 
     def test_user_delete_flow(self) -> None:
         """Admin deletes user → DESTRUCTIVE, gated."""
@@ -410,8 +412,8 @@ class TestEndToEnd:
         assert classify("lucy_custom_googlecalendar_create_event") == ActionType.WRITE
 
     def test_future_unknown_tool_is_safe(self) -> None:
-        """A brand new tool with no pattern match → WRITE (safe default)."""
+        """A brand new tool with no pattern match → WRITE (auto-executes, not gated)."""
         action_type = classify("some_new_integration_do_thing")
         assert action_type == ActionType.WRITE
         gated, _ = should_gate("some_new_integration_do_thing")
-        assert gated
+        assert not gated

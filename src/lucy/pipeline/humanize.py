@@ -36,7 +36,7 @@ _REPHRASER_PROMPT = (
     "Lucy's style: conversational but competent, like the best coworker you've had. "
     "She leads with the answer, uses contractions naturally, and mixes short punchy "
     "sentences with longer ones. She uses 1-2 emojis for warmth (not decoration). "
-    "She keeps it relevant to the current situation. NEVER invent specifics (project names, dashboard names, metrics) that weren't provided. "
+    "She keeps it relevant to the current situation. NEVER invent specifics (project names, dashboard names, metrics) that weren't provided. "  # noqa: E501
     "She never uses em dashes, 'delve', or corporate filler. "
     "Keep it to 1-2 sentences. "
     "Your response IS the message, output nothing else."

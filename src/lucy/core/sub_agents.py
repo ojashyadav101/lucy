@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import structlog
 
@@ -303,7 +304,7 @@ async def run_subagent(
             if call_signatures[sig] >= 3:
                 messages.append({
                     "role": "user",
-                    "content": "You are repeating the same call. Try a different approach or return what you have.",
+                    "content": "You are repeating the same call. Try a different approach or return what you have.",  # noqa: E501
                 })
                 call_signatures.clear()
                 loop_detected = True

@@ -42,17 +42,31 @@ class ClassifiedBlock(NamedTuple):
 # IMPORTANT: Must include every tag variant the agent actually emits.
 # The agent uses <lucy_reflection> in its output format; "reflection" alone
 # would only catch the bare variant and leave <lucy_reflection> blocks visible.
-_INTERNAL_XML_TAGS = frozenset({
-    "planning", "thinking", "self_critique", "self_correction",
-    "supervisor_guidance", "supervisor_note", "internal_note",
-    "quality_check", "quality_gate", "execution_plan",
-    "meta_commentary", "reasoning", "reflection", "scratchpad",
-    "chain_of_thought", "cot", "inner_monologue",
-    "custom_integration_directive",
-    # Agent-specific variants — MUST be kept in sync with the prompt format
-    "lucy_reflection",
-    "response_format_requirement",
-})
+_INTERNAL_XML_TAGS = frozenset(
+    {
+        "planning",
+        "thinking",
+        "self_critique",
+        "self_correction",
+        "supervisor_guidance",
+        "supervisor_note",
+        "internal_note",
+        "quality_check",
+        "quality_gate",
+        "execution_plan",
+        "meta_commentary",
+        "reasoning",
+        "reflection",
+        "scratchpad",
+        "chain_of_thought",
+        "cot",
+        "inner_monologue",
+        "custom_integration_directive",
+        # Agent-specific variants — MUST be kept in sync with the prompt format
+        "lucy_reflection",
+        "response_format_requirement",
+    }
+)
 
 # Match opening + content + closing for known internal tags
 _INTERNAL_XML_BLOCK_RE = re.compile(
@@ -73,46 +87,73 @@ _STRAY_INTERNAL_TAG_RE = re.compile(
 
 _META_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Self-correction markers
-    (re.compile(r"^Self[- ]correction:\s*", re.IGNORECASE | re.MULTILINE),
-     "self_correction_prefix"),
-    (re.compile(r"^Correction:\s*(?:I should|Let me|The previous)", re.IGNORECASE | re.MULTILINE),
-     "correction_prefix"),
-
+    (
+        re.compile(r"^Self[- ]correction:\s*", re.IGNORECASE | re.MULTILINE),
+        "self_correction_prefix",
+    ),
+    (
+        re.compile(
+            r"^Correction:\s*(?:I should|Let me|The previous)", re.IGNORECASE | re.MULTILINE
+        ),
+        "correction_prefix",
+    ),
     # References to "the original response" / "my previous response"
-    (re.compile(
-        r"(?:The |My )?(?:original|previous|initial|first) "
-        r"(?:response|answer|output|reply) "
-        r"(?:is|was|had|didn't|did not|failed|missed|lacked|needs?)",
-        re.IGNORECASE,
-    ), "meta_response_reference"),
-
+    (
+        re.compile(
+            r"(?:The |My )?(?:original|previous|initial|first) "
+            r"(?:response|answer|output|reply) "
+            r"(?:is|was|had|didn't|did not|failed|missed|lacked|needs?)",
+            re.IGNORECASE,
+        ),
+        "meta_response_reference",
+    ),
     # Quality-gate critique leaks
-    (re.compile(r"(?:The response|This response) (?:is|was) (?:unhelpful|incomplete|incorrect|wrong|missing)", re.IGNORECASE),
-     "quality_critique_leak"),
-    (re.compile(r"RESPONSE_OK\b", re.IGNORECASE),
-     "quality_gate_token"),
-    (re.compile(r"^ISSUE:\s*", re.IGNORECASE | re.MULTILINE),
-     "quality_gate_issue_token"),
-
+    (
+        re.compile(
+            r"(?:The response|This response) (?:is|was) (?:unhelpful|incomplete|incorrect|wrong|missing)",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        "quality_critique_leak",
+    ),
+    (re.compile(r"RESPONSE_OK\b", re.IGNORECASE), "quality_gate_token"),
+    (re.compile(r"^ISSUE:\s*", re.IGNORECASE | re.MULTILINE), "quality_gate_issue_token"),
     # Process narration ("Remember, the user expects...")
-    (re.compile(r"^Remember,?\s+(?:the user|I should|I need to|we need)", re.IGNORECASE | re.MULTILINE),
-     "process_reminder"),
-    (re.compile(r"^Note to self:\s*", re.IGNORECASE | re.MULTILINE),
-     "self_note"),
-    (re.compile(r"^(?:Internal|Mental) note:\s*", re.IGNORECASE | re.MULTILINE),
-     "internal_note"),
-
+    (
+        re.compile(
+            r"^Remember,?\s+(?:the user|I should|I need to|we need)", re.IGNORECASE | re.MULTILINE
+        ),
+        "process_reminder",
+    ),
+    (re.compile(r"^Note to self:\s*", re.IGNORECASE | re.MULTILINE), "self_note"),
+    (re.compile(r"^(?:Internal|Mental) note:\s*", re.IGNORECASE | re.MULTILINE), "internal_note"),
     # Planning leaks
-    (re.compile(r"^(?:Step \d+|Plan|Strategy|Approach):\s*(?:First|Next|Then|Finally|I (?:will|should|need))", re.IGNORECASE | re.MULTILINE),
-     "planning_leak"),
-    (re.compile(r"^Let me (?:think|plan|reason|work) (?:through|about|on) this", re.IGNORECASE | re.MULTILINE),
-     "thinking_leak"),
-
+    (
+        re.compile(
+            r"^(?:Step \d+|Plan|Strategy|Approach):\s*(?:First|Next|Then|Finally|I (?:will|should|need))",  # noqa: E501
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "planning_leak",
+    ),
+    (
+        re.compile(
+            r"^Let me (?:think|plan|reason|work) (?:through|about|on) this",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "thinking_leak",
+    ),
     # Supervisor / system directive leaks
-    (re.compile(r"(?:supervisor|system) (?:says|directs|instructs|guidance|directive)", re.IGNORECASE),
-     "supervisor_leak"),
-    (re.compile(r"(?:as |per )(?:my |the )?(?:instructions?|directives?|guidance)", re.IGNORECASE),
-     "directive_reference"),
+    (
+        re.compile(
+            r"(?:supervisor|system) (?:says|directs|instructs|guidance|directive)", re.IGNORECASE
+        ),
+        "supervisor_leak",
+    ),
+    (
+        re.compile(
+            r"(?:as |per )(?:my |the )?(?:instructions?|directives?|guidance)", re.IGNORECASE
+        ),
+        "directive_reference",
+    ),
 ]
 
 # Full-line patterns — if a line matches, the ENTIRE line is internal
@@ -129,6 +170,7 @@ _FULL_LINE_INTERNAL_RE: list[re.Pattern[str]] = [
 # ═══════════════════════════════════════════════════════════════════════
 # PARAGRAPH-LEVEL CLASSIFIER
 # ═══════════════════════════════════════════════════════════════════════
+
 
 def _is_internal_paragraph(paragraph: str) -> tuple[bool, str]:
     """Check if a paragraph is internal content.
@@ -177,6 +219,7 @@ def _is_internal_line(line: str) -> bool:
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def classify_content(text: str) -> list[ClassifiedBlock]:
     """Classify each paragraph/section of a response.
 
@@ -190,14 +233,15 @@ def classify_content(text: str) -> list[ClassifiedBlock]:
     if not text or not text.strip():
         return []
 
-    # Phase 1: Strip XML-tagged internal blocks and mark their positions
-    cleaned = text
+    # Phase 1: Strip XML-tagged internal blocks so they don't bleed into paragraph splits
+    cleaned = _INTERNAL_XML_BLOCK_RE.sub("", text)
     xml_regions: list[tuple[int, int]] = []
     for match in _INTERNAL_XML_BLOCK_RE.finditer(text):
         xml_regions.append((match.start(), match.end()))
 
-    # Phase 2: Split into paragraphs and classify
-    paragraphs = re.split(r"\n\n+", text)
+    # Phase 2: Split into paragraphs and classify (use cleaned text to avoid
+    # XML tags appearing as user-visible paragraphs)
+    paragraphs = re.split(r"\n\n+", cleaned)
     results: list[ClassifiedBlock] = []
 
     for para in paragraphs:
@@ -206,17 +250,21 @@ def classify_content(text: str) -> list[ClassifiedBlock]:
 
         is_internal, reason = _is_internal_paragraph(para)
         if is_internal:
-            results.append(ClassifiedBlock(
-                text=para,
-                content_type=ContentType.INTERNAL,
-                reason=reason,
-            ))
+            results.append(
+                ClassifiedBlock(
+                    text=para,
+                    content_type=ContentType.INTERNAL,
+                    reason=reason,
+                )
+            )
         else:
-            results.append(ClassifiedBlock(
-                text=para,
-                content_type=ContentType.USER_CONTENT,
-                reason="",
-            ))
+            results.append(
+                ClassifiedBlock(
+                    text=para,
+                    content_type=ContentType.USER_CONTENT,
+                    reason="",
+                )
+            )
 
     return results
 

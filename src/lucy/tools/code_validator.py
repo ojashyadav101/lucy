@@ -19,9 +19,7 @@ from __future__ import annotations
 import ast
 import builtins
 import importlib.util
-import sys
 from dataclasses import dataclass, field
-from typing import Any
 
 import structlog
 
@@ -607,7 +605,7 @@ def analyze_execution_error(error_text: str, code: str) -> str:
 def _suggest_module_alternative(module_name: str) -> str:
     """Suggest alternatives for unavailable modules."""
     alternatives: dict[str, str] = {
-        "pandas": "Use json + built-in modules for data processing, or csv module for tabular data.",
+        "pandas": "Use json + built-in modules for data processing, or csv module for tabular data.",  # noqa: E501
         "numpy": "Use the math module and list comprehensions for numerical operations.",
         "sklearn": "Not available. Use basic statistics from the statistics module.",
         "tensorflow": "Not available. This sandbox is for data processing, not ML training.",

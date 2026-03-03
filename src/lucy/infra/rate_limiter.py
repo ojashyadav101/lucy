@@ -261,7 +261,7 @@ class RateLimiter:
                 all_names.append(action_name)
 
         for candidate in all_names:
-            if "googlecalendar" in candidate or "google_calendar" in candidate or "gcal" in candidate:
+            if "googlecalendar" in candidate or "google_calendar" in candidate or "gcal" in candidate:  # noqa: E501
                 return "google_calendar"
             if "googlesheets" in candidate or "google_sheets" in candidate or "gsheet" in candidate:
                 return "google_sheets"

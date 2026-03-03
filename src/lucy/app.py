@@ -56,7 +56,7 @@ structlog.configure(
 # SLACK BOLT APP
 # ═══════════════════════════════════════════════════════════════════════════
 
-from slack_sdk.web.async_client import AsyncWebClient as _AsyncWebClient
+from slack_sdk.web.async_client import AsyncWebClient as _AsyncWebClient  # noqa: E402
 
 _bolt_client = (
     _AsyncWebClient(token=settings.slack_bot_token, ssl=_ssl_ctx)

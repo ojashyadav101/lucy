@@ -213,7 +213,7 @@ async def execute_spaces_tool(
             else:
                 lines = [f"You have {result['count']} app(s):"]
                 for app in result["apps"]:
-                    lines.append(f"- {app.get('name', 'unknown')}: {app.get('url', app.get('error', 'no URL'))}")
+                    lines.append(f"- {app.get('name', 'unknown')}: {app.get('url', app.get('error', 'no URL'))}")  # noqa: E501
                 result["summary"] = "\n".join(lines)
             return result
 

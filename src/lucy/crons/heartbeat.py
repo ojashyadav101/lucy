@@ -20,8 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -66,7 +65,9 @@ async def create_heartbeat(
 
     valid_types = {"api_health", "page_content", "metric_threshold", "custom"}
     if condition_type not in valid_types:
-        return {"error": f"Invalid condition_type '{condition_type}'. Must be one of: {', '.join(sorted(valid_types))}"}
+        return {
+            "error": f"Invalid condition_type '{condition_type}'. Must be one of: {', '.join(sorted(valid_types))}"  # noqa: E501
+        }
 
     if check_interval_seconds < _MIN_CHECK_INTERVAL_S:
         check_interval_seconds = _MIN_CHECK_INTERVAL_S
@@ -174,9 +175,13 @@ async def list_heartbeats(
 
     async with AsyncSessionLocal() as session:
         ws_uuid = UUID(workspace_id) if isinstance(workspace_id, str) else workspace_id
-        stmt = select(Heartbeat).where(
-            Heartbeat.workspace_id == ws_uuid,
-        ).order_by(Heartbeat.created_at.desc())
+        stmt = (
+            select(Heartbeat)
+            .where(
+                Heartbeat.workspace_id == ws_uuid,
+            )
+            .order_by(Heartbeat.created_at.desc())
+        )
         result = await session.execute(stmt)
         heartbeats = result.scalars().all()
 
@@ -201,6 +206,7 @@ async def list_heartbeats(
 # ═══════════════════════════════════════════════════════════════════════════
 # CONDITION EVALUATORS
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 async def _eval_api_health(config: dict[str, Any]) -> dict[str, Any]:
     """Check if a URL returns a healthy HTTP status.
@@ -334,7 +340,10 @@ async def _eval_metric_threshold(config: dict[str, Any]) -> dict[str, Any]:
             elif isinstance(value, list) and key.isdigit():
                 value = value[int(key)]
             else:
-                return {"triggered": False, "error": f"Cannot traverse path '{json_path}' in response"}
+                return {
+                    "triggered": False,
+                    "error": f"Cannot traverse path '{json_path}' in response",
+                }
 
         if value is None:
             return {"triggered": False, "error": f"Value at '{json_path}' is null"}
@@ -388,7 +397,8 @@ async def _eval_custom(config: dict[str, Any]) -> dict[str, Any]:
 
     try:
         process = await asyncio.create_subprocess_exec(
-            "python3", str(full_path),
+            "python3",
+            str(full_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={
@@ -398,7 +408,8 @@ async def _eval_custom(config: dict[str, Any]) -> dict[str, Any]:
             },
         )
         stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=_SCRIPT_TIMEOUT_S,
+            process.communicate(),
+            timeout=_SCRIPT_TIMEOUT_S,
         )
 
         if process.returncode != 0:
@@ -421,7 +432,7 @@ async def _eval_custom(config: dict[str, Any]) -> dict[str, Any]:
                 "triggered": process.returncode != 0,
                 "raw_output": output[:200],
             }
-    except asyncio.TimeoutError:
+    except TimeoutError:
         process.kill()
         await process.wait()
         return {"triggered": True, "error": "Script timed out after 30s"}
@@ -441,26 +452,29 @@ _EVALUATORS: dict[str, Any] = {
 # EVALUATION LOOP
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 async def evaluate_due_heartbeats(slack_client: Any) -> int:
     """Check all heartbeats that are due for evaluation.
 
     Returns the number of heartbeats evaluated.
     """
-    from sqlalchemy import select, update
+    from sqlalchemy import select
 
     from lucy.db import AsyncSessionLocal
     from lucy.db.models import Heartbeat, HeartbeatStatus
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     evaluated = 0
 
     async with AsyncSessionLocal() as session:
         stmt = select(Heartbeat).where(
             Heartbeat.is_active.is_(True),
-            Heartbeat.current_status.in_([
-                HeartbeatStatus.HEALTHY,
-                HeartbeatStatus.TRIGGERED,
-            ]),
+            Heartbeat.current_status.in_(
+                [
+                    HeartbeatStatus.HEALTHY,
+                    HeartbeatStatus.TRIGGERED,
+                ]
+            ),
         )
         result = await session.execute(stmt)
         heartbeats = result.scalars().all()
@@ -506,7 +520,9 @@ async def evaluate_due_heartbeats(slack_client: Any) -> int:
                         hb.last_alert_at = now
 
                         await _send_alert(
-                            hb, check_result, slack_client,
+                            hb,
+                            check_result,
+                            slack_client,
                         )
                 else:
                     _consecutive_failures.pop(str(hb.id), None)
@@ -526,7 +542,9 @@ async def evaluate_due_heartbeats(slack_client: Any) -> int:
                 hb_key = str(hb.id)
                 _consecutive_failures[hb_key] = _consecutive_failures.get(hb_key, 0) + 1
                 fail_count = _consecutive_failures[hb_key]
-                log_level = "error" if fail_count >= _CONSECUTIVE_FAILURES_ERROR_THRESHOLD else "warning"
+                log_level = (
+                    "error" if fail_count >= _CONSECUTIVE_FAILURES_ERROR_THRESHOLD else "warning"
+                )
                 getattr(logger, log_level)(
                     "heartbeat_eval_error",
                     name=hb.name,

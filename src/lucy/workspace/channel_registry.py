@@ -12,7 +12,7 @@ Channel data is stored per-workspace in data/channels.json.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +75,7 @@ def register_channel(
         "topic": topic or existing.get("topic", ""),
         "is_private": is_private,
         "is_dm": is_dm,
-        "last_seen": datetime.now(timezone.utc).isoformat(),
+        "last_seen": datetime.now(UTC).isoformat(),
     }
     save_channel_registry(ws, registry)
     logger.debug("channel_registered", channel_id=channel_id, name=name)

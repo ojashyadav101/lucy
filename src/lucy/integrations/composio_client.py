@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -34,11 +34,20 @@ from lucy.infra.circuit_breaker import composio_breaker
 
 logger = structlog.get_logger()
 
-_RETRYABLE_KEYWORDS = frozenset({
-    "500", "502", "503", "504",
-    "601", "901",
-    "timeout", "temporarily", "rate limit", "connection reset",
-})
+_RETRYABLE_KEYWORDS = frozenset(
+    {
+        "500",
+        "502",
+        "503",
+        "504",
+        "601",
+        "901",
+        "timeout",
+        "temporarily",
+        "rate limit",
+        "connection reset",
+    }
+)
 
 _RETRYABLE_EXCEPTION_TYPES: tuple[str, ...] = (
     "ConnectionError",
@@ -94,6 +103,7 @@ class ComposioClient:
         self._last_init_attempt = time.monotonic()
         try:
             from composio import Composio
+
             self._composio = Composio(api_key=self.api_key)
             self._init_error = None
             logger.info("composio_client_initialized")
@@ -155,7 +165,7 @@ class ComposioClient:
                 f"Composio SDK not initialized: {self._init_error or 'unknown error'}"
             )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         cached = self._session_cache.get(workspace_id)
         if cached and cached[0] > now:
@@ -240,7 +250,7 @@ class ComposioClient:
                 return stale
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         async with self._cache_lock:
             cached = self._tools_cache.get(workspace_id)
@@ -248,6 +258,7 @@ class ComposioClient:
                 return cached[1]
 
         try:
+
             def _fetch() -> list:
                 session = self._get_session_with_recovery(workspace_id)
                 return session.tools()
@@ -335,7 +346,7 @@ class ComposioClient:
                 "linear": "linear",
                 "vercel": "vercel",
                 "google_search_console": "google_search_console",
-                "google search console": "google_search_console"
+                "google search console": "google_search_console",
             }
             original_toolkits = arguments.get("toolkits", [])
             if isinstance(original_toolkits, list):
@@ -355,12 +366,11 @@ class ComposioClient:
         )
         async def _execute_with_retry() -> dict[str, Any]:
             try:
+
                 def _exec() -> Any:
                     session = self._get_session_with_recovery(workspace_id)
                     if hasattr(session, "handle_tool_call"):
-                        return session.handle_tool_call(
-                            tool_name=tool_name, arguments=arguments
-                        )
+                        return session.handle_tool_call(tool_name=tool_name, arguments=arguments)
                     if hasattr(session, "execute"):
                         return session.execute(tool_name, arguments)
                     try:
@@ -380,9 +390,7 @@ class ComposioClient:
                 result = await asyncio.to_thread(_exec)
 
                 if isinstance(result, dict):
-                    if result.get("error") and _is_retryable(
-                        Exception(str(result["error"]))
-                    ):
+                    if result.get("error") and _is_retryable(Exception(str(result["error"]))):
                         raise _RetryableComposioError(str(result["error"]))
                     return result
                 if hasattr(result, "model_dump"):
@@ -404,17 +412,19 @@ class ComposioClient:
                 tool=tool_name,
                 workspace_id=workspace_id,
             )
-            
+
             # --- Architectural Auto-Repair for MANAGE_CONNECTIONS ---
             if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
                 data = result.get("data", {})
                 if isinstance(data, dict) and "results" in data:
                     results_map = data.get("results", {})
                     failed_toolkits = [
-                        k for k, v in results_map.items() 
-                        if v.get("status") == "failed" and "not found" in str(v.get("error_message", "")).lower()
+                        k
+                        for k, v in results_map.items()
+                        if v.get("status") == "failed"
+                        and "not found" in str(v.get("error_message", "")).lower()
                     ]
-                    
+
                     if failed_toolkits:
                         recovered_slugs = []
                         entity_id = self._entity_id_map.get(str(workspace_id)) or str(workspace_id)
@@ -425,33 +435,53 @@ class ComposioClient:
                                     slug="COMPOSIO_SEARCH_TOOLS",
                                     arguments={"query": ft.replace("_", " ")},
                                     user_id=entity_id,
-                                    dangerously_skip_version_check=True
+                                    dangerously_skip_version_check=True,
                                 )
-                                search_data = getattr(search_res, "model_dump", lambda: search_res)() if hasattr(search_res, "model_dump") else search_res
+                                search_data = (
+                                    getattr(search_res, "model_dump", lambda: search_res)()
+                                    if hasattr(search_res, "model_dump")
+                                    else search_res
+                                )
                                 if isinstance(search_data, dict):
                                     search_data = search_data.get("data", search_data)
-                                results_list = search_data.get("results", []) if isinstance(search_data, dict) else search_data
-                                
+                                results_list = (
+                                    search_data.get("results", [])
+                                    if isinstance(search_data, dict)
+                                    else search_data
+                                )
+
                                 if isinstance(results_list, list) and len(results_list) > 0:
                                     first_result = results_list[0]
                                     possible_toolkits = first_result.get("toolkits", [])
                                     if possible_toolkits:
-                                        # Only accept it if it's not a generic fallback like composio_search
+                                        # Only accept it if it's not a generic fallback like composio_search  # noqa: E501
                                         suggested_slug = possible_toolkits[0]
                                         if suggested_slug != "composio_search":
                                             original_request = reverse_toolkit_map.get(ft, ft)
-                                            clean_original = original_request.lower().replace("_", "").replace(" ", "")
-                                            clean_suggested = suggested_slug.lower().replace("_", "").replace(" ", "")
-                                            
-                                            # STRICT MATCHING: Only auto-repair if they are practically identical.
-                                            # Prevents fuzzy search from mapping "Clerk" to "Moonclerk"
+                                            clean_original = (
+                                                original_request.lower()
+                                                .replace("_", "")
+                                                .replace(" ", "")
+                                            )
+                                            clean_suggested = (
+                                                suggested_slug.lower()
+                                                .replace("_", "")
+                                                .replace(" ", "")
+                                            )
+
+                                            # STRICT MATCHING: Only auto-repair if they are practically identical.  # noqa: E501
+                                            # Prevents fuzzy search from mapping "Clerk" to "Moonclerk"  # noqa: E501
                                             if clean_original == clean_suggested:
                                                 recovered_slugs.append(suggested_slug)
-                                                # We need to map the recovered slug back to whatever the LLM originally asked for
-                                                reverse_toolkit_map[suggested_slug] = original_request
+                                                # We need to map the recovered slug back to whatever the LLM originally asked for  # noqa: E501
+                                                reverse_toolkit_map[suggested_slug] = (
+                                                    original_request
+                                                )
                             except Exception as e:
-                                logger.warning("composio_auto_repair_search_failed", toolkit=ft, error=str(e))
-                        
+                                logger.warning(
+                                    "composio_auto_repair_search_failed", toolkit=ft, error=str(e)
+                                )
+
                         if recovered_slugs:
                             try:
                                 retry_res = await asyncio.to_thread(
@@ -459,24 +489,34 @@ class ComposioClient:
                                     slug="COMPOSIO_MANAGE_CONNECTIONS",
                                     arguments={"toolkits": recovered_slugs},
                                     user_id=entity_id,
-                                    dangerously_skip_version_check=True
+                                    dangerously_skip_version_check=True,
                                 )
-                                retry_data = getattr(retry_res, "model_dump", lambda: retry_res)() if hasattr(retry_res, "model_dump") else retry_res
+                                retry_data = (
+                                    getattr(retry_res, "model_dump", lambda: retry_res)()
+                                    if hasattr(retry_res, "model_dump")
+                                    else retry_res
+                                )
                                 if isinstance(retry_data, dict):
                                     # Merge successful recoveries back into the original result
-                                    retry_results_map = retry_data.get("data", {}).get("results", {}) if isinstance(retry_data.get("data"), dict) else retry_data.get("results", {})
+                                    retry_results_map = (
+                                        retry_data.get("data", {}).get("results", {})
+                                        if isinstance(retry_data.get("data"), dict)
+                                        else retry_data.get("results", {})
+                                    )
                                     if retry_results_map:
                                         for k, v in retry_results_map.items():
                                             if v.get("status") != "failed":
                                                 result["data"]["results"][k] = v
-                                        # Remove the originally failed ones that we successfully replaced
+                                        # Remove the originally failed ones that we successfully replaced  # noqa: E501
                                         for ft in failed_toolkits:
-                                            if isinstance(result.get("data"), dict) and isinstance(result["data"].get("results"), dict):
+                                            if isinstance(result.get("data"), dict) and isinstance(
+                                                result["data"].get("results"), dict
+                                            ):
                                                 if ft in result["data"]["results"]:
                                                     del result["data"]["results"][ft]
                             except Exception as e:
                                 logger.warning("composio_auto_repair_retry_failed", error=str(e))
-            
+
             # Map keys back to what the LLM originally requested
             if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
                 data = result.get("data", {})
@@ -494,18 +534,24 @@ class ComposioClient:
                                 del v["current_user_info"]
                         mapped_results[original_k] = v
                     result["data"]["results"] = mapped_results
-            
+
             # Collect permanently failed toolkits (after all auto-repair)
             if tool_name == "COMPOSIO_MANAGE_CONNECTIONS" and isinstance(result, dict):
                 data = result.get("data", {})
                 if isinstance(data, dict) and "results" in data:
                     _NOT_IN_COMPOSIO_SIGNALS = (
-                        "not found", "no toolkit", "invalid toolkit",
-                        "does not exist", "not supported", "not available",
-                        "unknown toolkit", "toolkit not",
+                        "not found",
+                        "no toolkit",
+                        "invalid toolkit",
+                        "does not exist",
+                        "not supported",
+                        "not available",
+                        "unknown toolkit",
+                        "toolkit not",
                     )
                     permanently_failed = [
-                        k for k, v in data["results"].items()
+                        k
+                        for k, v in data["results"].items()
                         if isinstance(v, dict)
                         and v.get("status") == "failed"
                         and any(
@@ -527,6 +573,7 @@ class ComposioClient:
                     from lucy.integrations.wrapper_generator import (
                         discover_saved_wrappers,
                     )
+
                     wrappers = discover_saved_wrappers()
                     if wrappers:
                         data = result.setdefault("data", {})
@@ -558,7 +605,8 @@ class ComposioClient:
                                 )
                 except Exception as e:
                     logger.warning(
-                        "composio_custom_wrapper_inject_failed", error=str(e),
+                        "composio_custom_wrapper_inject_failed",
+                        error=str(e),
                     )
             # --------------------------------------------------------
 
@@ -614,6 +662,7 @@ class ComposioClient:
             }
 
         try:
+
             def _auth() -> str | None:
                 session = self._get_session_with_recovery(workspace_id)
                 request = session.authorize(toolkit)
@@ -659,6 +708,7 @@ class ComposioClient:
             return []
 
         try:
+
             def _fetch() -> list[dict[str, Any]]:
                 session = self._get_session_with_recovery(workspace_id)
                 toolkits = session.toolkits()
@@ -667,11 +717,13 @@ class ComposioClient:
                 for tk in items:
                     conn = getattr(tk, "connection", None)
                     is_active = getattr(conn, "is_active", False) if conn else False
-                    result.append({
-                        "name": getattr(tk, "name", "unknown"),
-                        "slug": getattr(tk, "slug", "unknown"),
-                        "connected": is_active,
-                    })
+                    result.append(
+                        {
+                            "name": getattr(tk, "name", "unknown"),
+                            "slug": getattr(tk, "slug", "unknown"),
+                            "connected": is_active,
+                        }
+                    )
                 return result
 
             return await asyncio.to_thread(_fetch)
@@ -719,6 +771,7 @@ class ComposioClient:
         entity_ids.append("default")
 
         try:
+
             def _fetch_via_rest() -> list[str]:
                 if not self._composio:
                     return []

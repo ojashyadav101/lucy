@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -82,7 +81,7 @@ async def search_slack_history(
         ]
 
     # Determine date range
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     earliest = now - timedelta(days=days_back)
     earliest_str = earliest.strftime("%Y-%m-%d")
 
@@ -150,7 +149,7 @@ async def search_slack_history(
                 # Convert to a date so we can honour the days_back filter.
                 try:
                     ts_float = float(thread_file.stem)
-                    file_date = datetime.fromtimestamp(ts_float, tz=timezone.utc).strftime(
+                    file_date = datetime.fromtimestamp(ts_float, tz=UTC).strftime(
                         "%Y-%m-%d"
                     )
                     if file_date < earliest_str:
@@ -317,7 +316,7 @@ def get_history_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "channel": {
                             "type": "string",
-                            "description": "Optional: limit search to a specific channel name (e.g. 'general').",
+                            "description": "Optional: limit search to a specific channel name (e.g. 'general').",  # noqa: E501
                         },
                         "days_back": {
                             "type": "integer",

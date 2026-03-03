@@ -33,14 +33,26 @@ logger = structlog.get_logger()
 SUPERVISOR_CHECK_INTERVAL_TURNS = settings.supervisor_check_interval_turns
 SUPERVISOR_CHECK_INTERVAL_SECONDS = settings.supervisor_check_interval_s
 
-_COMPLEX_INTENTS = frozenset({
-    "data", "document", "code", "code_reasoning", "tool_use", "research",
-    "monitoring",
-})
+_COMPLEX_INTENTS = frozenset(
+    {
+        "data",
+        "document",
+        "code",
+        "code_reasoning",
+        "tool_use",
+        "research",
+        "monitoring",
+    }
+)
 
-_SIMPLE_INTENTS = frozenset({
-    "greeting", "fast", "follow_up", "status",
-})
+_SIMPLE_INTENTS = frozenset(
+    {
+        "greeting",
+        "fast",
+        "follow_up",
+        "status",
+    }
+)
 
 
 class SupervisorDecision(str, Enum):
@@ -75,7 +87,9 @@ class TaskPlan:
     def to_prompt_text(self) -> str:
         lines = [f"Goal: {self.goal}"]
         if self.end_goal:
-            lines.append(f"End goal (what the user is ultimately trying to achieve): {self.end_goal}")
+            lines.append(
+                f"End goal (what the user is ultimately trying to achieve): {self.end_goal}"
+            )
         if self.who:
             lines.append(f"Who is asking: {self.who}")
         if self.ideal_outcome:
@@ -297,24 +311,26 @@ def _parse_plan(text: str) -> TaskPlan | None:
 
         if stripped and stripped[0].isdigit() and "." in stripped[:4]:
             dot_idx = stripped.index(".")
-            desc = stripped[dot_idx + 1:].strip()
+            desc = stripped[dot_idx + 1 :].strip()
             tools: list[str] = []
             if "[tool:" in desc.lower():
                 bracket_start = desc.lower().index("[tool:")
-                tool_part = desc[bracket_start + 6:].rstrip("]").strip()
+                tool_part = desc[bracket_start + 6 :].rstrip("]").strip()
                 tools = [t.strip() for t in tool_part.split(",") if t.strip()]
                 desc = desc[:bracket_start].strip()
             elif "[" in desc and "]" in desc:
                 bracket_start = desc.index("[")
                 bracket_end = desc.index("]")
-                tool_part = desc[bracket_start + 1:bracket_end].strip()
+                tool_part = desc[bracket_start + 1 : bracket_end].strip()
                 tools = [t.strip() for t in tool_part.split(",") if t.strip()]
-                desc = (desc[:bracket_start] + desc[bracket_end + 1:]).strip()
-            steps.append(PlanStep(
-                number=len(steps) + 1,
-                description=desc,
-                expected_tools=tools,
-            ))
+                desc = (desc[:bracket_start] + desc[bracket_end + 1 :]).strip()
+            steps.append(
+                PlanStep(
+                    number=len(steps) + 1,
+                    description=desc,
+                    expected_tools=tools,
+                )
+            )
 
     if not steps:
         return None
@@ -452,7 +468,7 @@ async def evaluate_progress(
 
     prompt = (
         f"Evaluate agent progress. Bias: CONTINUE unless clearly stuck.\n\n"
-        f"REQUEST: {user_message[:250] + '...(middle omitted)...' + user_message[-250:] if len(user_message) > 500 else user_message}\n"
+        f"REQUEST: {user_message[:250] + '...(middle omitted)...' + user_message[-250:] if len(user_message) > 500 else user_message}\n"  # noqa: E501
         f"{intent_hint}"
         f"PLAN: {plan_text}\n"
         f"TURN: {len(turn_reports)} | ELAPSED: {int(elapsed_seconds)}s | "
@@ -550,7 +566,10 @@ def build_turn_report(
             # a human to click an Approve/Cancel button. Do NOT treat this as
             # a success to continue from, and do NOT treat it as an error to
             # retry. Flag it explicitly so the supervisor can handle it correctly.
-            if '"status": "pending_approval"' in result_str or '"status":"pending_approval"' in result_str:
+            if (
+                '"status": "pending_approval"' in result_str
+                or '"status":"pending_approval"' in result_str
+            ):
                 is_pending_approval = True
             elif '"error"' in lower or '"error":' in lower:
                 had_error = True
@@ -564,13 +583,15 @@ def build_turn_report(
                 had_error = True
                 error_summary = error_summary or result_str[:120]
 
-        reports.append(TurnReport(
-            turn=turn,
-            tool_name=name,
-            tool_args_summary=args,
-            result_preview=preview,
-            had_error=had_error,
-            error_summary=error_summary,
-            is_pending_approval=is_pending_approval,
-        ))
+        reports.append(
+            TurnReport(
+                turn=turn,
+                tool_name=name,
+                tool_args_summary=args,
+                result_preview=preview,
+                had_error=had_error,
+                error_summary=error_summary,
+                is_pending_approval=is_pending_approval,
+            )
+        )
     return reports

@@ -19,14 +19,13 @@ Streaming architecture:
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import json as _json
-import pathlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-import asyncio
 import certifi
 import httpx
 import structlog
@@ -341,7 +340,7 @@ class OpenClawClient:
                         len(result.tool_calls) if result.tool_calls else 0
                     ),
                     prompt_tokens=result.usage.get("prompt_tokens") if result.usage else None,
-                    completion_tokens=result.usage.get("completion_tokens") if result.usage else None,
+                    completion_tokens=result.usage.get("completion_tokens") if result.usage else None,  # noqa: E501
                     cached_tokens=cached_tokens,
                 )
                 openrouter_breaker.record_success()
@@ -375,7 +374,7 @@ class OpenClawClient:
             result = await asyncio.wait_for(
                 _do_request(), timeout=wallclock_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "llm_wallclock_timeout",
                 model=model,

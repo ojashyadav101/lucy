@@ -7,7 +7,7 @@ and company, and sets up default crons.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -83,7 +83,7 @@ async def onboard_workspace(
 
     # Step 7: Update state
     await ws.update_state({
-        "onboarded_at": datetime.now(timezone.utc).isoformat(),
+        "onboarded_at": datetime.now(UTC).isoformat(),
         "skills_seeded": skill_count,
         "status": "onboarded",
     })
@@ -176,7 +176,7 @@ async def _profile_team(ws: WorkspaceFS, slack_client: object) -> None:
         lines = [
             "---",
             "name: team",
-            "description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.",
+            "description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.",  # noqa: E501
             "---",
             "",
             "# Team Members",
@@ -235,7 +235,7 @@ async def _create_team_stub(ws: WorkspaceFS) -> None:
     content = """\
 ---
 name: team
-description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.
+description: Team member profiles, roles, and timezones. Use when personalizing responses, scheduling meetings, or reaching out to individuals.  # noqa: E501
 ---
 
 # Team Members
@@ -289,7 +289,7 @@ async def _create_company_profile(
     lines = [
         "---",
         "name: company",
-        "description: Company profile, products, and organizational context. Use when you need company-specific context.",
+        "description: Company profile, products, and organizational context. Use when you need company-specific context.",  # noqa: E501
         "---",
         "",
         "# Company Profile",

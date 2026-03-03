@@ -11,7 +11,7 @@ Format: one JSON object per line, newest at bottom.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -39,7 +39,7 @@ async def append_proactive_event(
     """
     entry = {
         "type": event_type,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": datetime.now(UTC).isoformat(),
         **data,
     }
     line = json.dumps(entry, ensure_ascii=False)
@@ -48,7 +48,7 @@ async def append_proactive_event(
     # Trim if overgrown (rare -- heartbeat should clear regularly)
     existing = await ws.read_file(_EVENTS_FILE)
     if existing:
-        lines = [l for l in existing.splitlines() if l.strip()]
+        lines = [ln for ln in existing.splitlines() if ln.strip()]
         if len(lines) > _MAX_EVENTS:
             trimmed = "\n".join(lines[-_MAX_EVENTS:]) + "\n"
             await ws.write_file(_EVENTS_FILE, trimmed)

@@ -8,14 +8,12 @@ imports, broken dependencies) before a wrapper goes live.
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import inspect
 import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import structlog
 
@@ -41,7 +39,9 @@ class RuntimeValidationResult:
     checks: list[RuntimeCheckResult] = field(default_factory=list)
     load_time_ms: float = 0.0
 
-    def add_check(self, check: str, passed: bool, detail: str = "", duration_ms: float = 0.0) -> None:
+    def add_check(
+        self, check: str, passed: bool, detail: str = "", duration_ms: float = 0.0
+    ) -> None:
         self.checks.append(RuntimeCheckResult(check, passed, detail, duration_ms))
         if not passed:
             self.healthy = False
@@ -123,7 +123,9 @@ def validate_wrapper_runtime(
     if raw_tools is None:
         result.add_check("tools_export", False, "Module has no TOOLS attribute")
     elif not isinstance(raw_tools, list):
-        result.add_check("tools_export", False, f"TOOLS is {type(raw_tools).__name__}, expected list")
+        result.add_check(
+            "tools_export", False, f"TOOLS is {type(raw_tools).__name__}, expected list"
+        )
     elif len(raw_tools) == 0:
         result.add_check("tools_export", False, "TOOLS list is empty")
     else:
@@ -134,7 +136,9 @@ def validate_wrapper_runtime(
     if execute_fn is None:
         result.add_check("execute_export", False, "Module has no execute() function")
     elif not callable(execute_fn):
-        result.add_check("execute_export", False, f"execute is {type(execute_fn).__name__}, not callable")
+        result.add_check(
+            "execute_export", False, f"execute is {type(execute_fn).__name__}, not callable"
+        )
     else:
         result.add_check("execute_export", True, "execute() found")
 
@@ -152,12 +156,13 @@ def validate_wrapper_runtime(
             else:
                 # First param should be tool_name-ish, last should be api_key-ish
                 first = params[0]
+                _ = first  # reserved for future first-param validation
                 last_relevant = params[2] if len(params) >= 3 else params[-1]
                 if "key" not in last_relevant.lower() and "api" not in last_relevant.lower():
                     result.add_check(
                         "execute_signature",
                         True,
-                        f"Signature: ({', '.join(params)}) — api_key param name is '{last_relevant}' (non-standard but ok)",
+                        f"Signature: ({', '.join(params)}) — api_key param name is '{last_relevant}' (non-standard but ok)",  # noqa: E501
                     )
                 else:
                     result.add_check(

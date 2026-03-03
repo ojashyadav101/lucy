@@ -407,8 +407,8 @@ def compute_depth_score(
         }
 
     has_data = sum(1 for p in _DEPTH_DATA_PATTERNS if p.search(response_text)) >= 1
-    has_interpretation = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2
-    has_recommendations = sum(1 for p in _DEPTH_RECOMMENDATION_PATTERNS if p.search(response_text)) >= 1
+    has_interpretation = sum(1 for p in _DEPTH_INTERPRETATION_PATTERNS if p.search(response_text)) >= 2  # noqa: E501
+    has_recommendations = sum(1 for p in _DEPTH_RECOMMENDATION_PATTERNS if p.search(response_text)) >= 1  # noqa: E501
     is_dump = (
         has_data
         and sum(1 for p in _DEPTH_DUMP_PATTERNS if p.search(response_text)) >= 1

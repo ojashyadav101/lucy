@@ -13,6 +13,7 @@ Order:
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -166,7 +167,7 @@ async def build_lightweight_prompt(
 
     Typical size: ~2-4KB vs ~85KB for the full prompt.
     """
-    from datetime import datetime, timedelta, timezone as tz
+    from datetime import datetime, timedelta
 
     if _SOUL_LITE_PATH.exists():
         soul = _SOUL_LITE_PATH.read_text(encoding="utf-8")
@@ -191,7 +192,7 @@ async def build_lightweight_prompt(
     else:
         core = ""
 
-    _utc_now = datetime.now(tz.utc)
+    _utc_now = datetime.now(UTC)
     _ist_now = _utc_now.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
     time_block = (
         f"\n\n## Current Date & Time (AUTHORITATIVE)\n"
@@ -282,9 +283,9 @@ async def build_system_prompt(
 
     if connected_services:
         services_str = ", ".join(connected_services)
-        from datetime import datetime, timedelta, timezone as tz
+        from datetime import datetime, timedelta
 
-        _utc_now = datetime.now(tz.utc)
+        _utc_now = datetime.now(UTC)
         _ist_now = _utc_now.replace(tzinfo=None) + timedelta(hours=5, minutes=30)
         date_str = _utc_now.strftime("%A, %B %d, %Y")
         utc_str = _utc_now.strftime("%I:%M %p UTC")
@@ -519,8 +520,9 @@ async def build_system_prompt(
     # she isn't about to call a tool that has been failing repeatedly.
     _tool_risk_line = ""
     try:
-        from lucy.workspace.memory import LEARNINGS_PATH
         import re as _re
+
+        from lucy.workspace.memory import LEARNINGS_PATH
         _learnings_text = await ws.read_file(LEARNINGS_PATH) or ""
         if _learnings_text:
             _tf_match = _re.search(

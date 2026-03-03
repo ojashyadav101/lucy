@@ -27,13 +27,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 
 from lucy.workspace.filesystem import WorkspaceFS
-from lucy.workspace.skills import parse_frontmatter
 
 logger = structlog.get_logger()
 
@@ -45,6 +44,7 @@ def _get_workspace_lock(workspace_id: str) -> asyncio.Lock:
     if workspace_id not in _workspace_locks:
         _workspace_locks[workspace_id] = asyncio.Lock()
     return _workspace_locks[workspace_id]
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MEMORY EXTRACTION — What should be remembered?
@@ -59,7 +59,10 @@ _REMEMBER_SIGNALS = re.compile(
     r"our (?:company|team|product) (?:use[sd]?|is|has|runs?)|"
     r"(?:new|updated?) (?:target|goal|deadline|process)|"
     r"i(?:'m| am) (?:the|a|responsible for)|"
-    r"(?:my|our) (?:mrr|revenue|arr|budget|runway) is"
+    r"(?:my|our) (?:mrr|revenue|arr|budget|runway) is|"
+    r"my (?:boss|manager|lead|cto|ceo|coo|vp|director|head|supervisor|report|pm|po|owner) is|"
+    r"(?:he|she|they)(?:'s| is| are) (?:my|our|the) (?:boss|manager|lead|head|director)|"
+    r"(?:reports?|reports to|manages?|leads?|runs?) (?:the |our )?(?:team|department|eng|product|design|sales|marketing)"  # noqa: E501
     r")\b",
     re.IGNORECASE,
 )
@@ -81,7 +84,13 @@ _TEAM_SIGNALS = re.compile(
     r"(?:he|she|they)(?:'s| is| are) (?:the|our|a)|"
     r"(?:works?|working) on|reports? to|"
     r"new (?:hire|team member|employee)|"
-    r"(?:joined|leaving|left) (?:the )?(?:team|company)"
+    r"(?:joined|leaving|left) (?:the )?(?:team|company)|"
+    r"my (?:team lead|tech lead|engineering lead|product lead|design lead|"
+    r"manager|direct manager|skip|skip.level|project manager|product manager|"
+    r"program manager|account manager|pm|po|eng lead|head of (?:eng|product|design|sales|marketing))|"  # noqa: E501
+    r"(?:head|lead|manager|director|vp|chief) of (?:eng(?:ineering)?|product|design|sales|marketing|growth|ops)|"  # noqa: E501
+    r"[A-Z][a-z]+ (?:manages?|leads?|runs?) (?:the )?(?:team|eng(?:ineering)?|product|design|sales|marketing)|"  # noqa: E501
+    r"is (?:our|the) (?:cto|ceo|coo|vp|head of \w+|founder|co.?founder|director)"
     r")\b",
     re.IGNORECASE,
 )
@@ -118,6 +127,7 @@ _PROJECT_SIGNALS = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
 
 def _has_hypothetical_signals(message: str) -> bool:
     """Return True if the message appears to be hypothetical or testing.
@@ -158,52 +168,163 @@ _FACT_EXTRACTORS: list[tuple[re.Pattern[str], str, str]] = [
     # Captures the first 1-2 word(s) after the keyword phrase. Post-processed below
     # (see _apply_fact_extractors) to require the first token starts with an uppercase
     # letter, preventing false positives like "my name is unknown" or "call me anything".
-    (re.compile(
-        r"(?:my (?:preferred |full |first |display )?name is"
-        r"|i(?:'m| am) called"
-        r"|i go by"
-        r"|call me"
-        r"|prefer(?:red)? (?:to be called|the name|name))"
-        r"\s+(\w+(?: \w+)?)",
-        re.IGNORECASE,
-    ), "user_preferences", "User name: {0}"),
-    (re.compile(r"(?:my role is|i'm the|i am the|i work as(?: a| an)?)\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
-     "facts", "User's role: {0}"),
-    (re.compile(r"(?:we use|our (?:stack|tech|tools?) (?:is|are|includes?))\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
-     "facts", "Tech stack includes: {0}"),
-    (re.compile(r"(?:our|my)\s+(?:mrr|arr|revenue|budget|runway)\s+is\s+(.{3,40}?)(?:\.|,|$)", re.IGNORECASE),
-     "facts", "Business metric: {0}"),
-    (re.compile(r"(?:deadline is|launch (?:by|on|date)|due (?:by|on|date))\s+(.{3,30}?)(?:\.|,|$)", re.IGNORECASE),
-     "project_context", "Deadline/launch: {0}"),
-    (re.compile(r"(?:we decided|let's go with|decision(?: made)?:?|settled on|chose)\s+(.{3,80}?)(?:\.|$)", re.IGNORECASE),
-     "decisions", "Decision: {0}"),
-    (re.compile(r"(?:i prefer|please always|always use|never use|my preference is)\s+(.{3,60}?)(?:\.|,|$)", re.IGNORECASE),
-     "user_preferences", "Preference: {0}"),
-    (re.compile(r"(?:my (?:timezone|tz|time ?zone) is|i'm in)\s+([A-Z][A-Za-z/_+-]{2,30})", re.IGNORECASE),
-     "user_preferences", "User timezone: {0}"),
-    (re.compile(
-        r"(?:my (?:new |updated |current )?email(?: address)? is"
-        r"|email me at|reach me at|contact me at"
-        r"|(?:my )?email(?: address)? (?:changed|updated|switched) to"
-        r"|i(?:'m| am) (?:switching|changing|updating) (?:my )?email to"
-        r"|switched (?:email providers?;? *[—–-]+ *)?(?:my new email is)?"
-        r")\s*([^\s,<>]+@[^\s,<>]+)",
-        re.IGNORECASE,
-    ), "user_preferences", "User email: {0}"),
+    (
+        re.compile(
+            r"(?:my (?:preferred |full |first |display )?name is"
+            r"|i(?:'m| am) called"
+            r"|i go by"
+            r"|call me"
+            r"|prefer(?:red)? (?:to be called|the name|name))"
+            r"\s+(\w+(?: \w+)?)",
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "User name: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:my role is|i'm the|i am the|i work as(?: a| an)?)\s+(.{3,40}?)(?:\.|,|$)",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "User's role: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:we use|our (?:stack|tech|tools?) (?:is|are|includes?))\s+(.{3,60}?)(?:\.|,|$)",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "Tech stack includes: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:our|my)\s+(?:mrr|arr|revenue|budget|runway)\s+is\s+(.{3,40}?)(?:\.|,|$)",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "Business metric: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:deadline is|launch (?:by|on|date)|due (?:by|on|date))\s+(.{3,30}?)(?:\.|,|$)",
+            re.IGNORECASE,
+        ),
+        "project_context",
+        "Deadline/launch: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:we decided|let's go with|decision(?: made)?:?|settled on|chose)\s+(.{3,80}?)(?:\.|$)",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        "decisions",
+        "Decision: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:i prefer|please always|always use|never use|my preference is)\s+(.{3,60}?)(?:\.|,|$)",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "Preference: {0}",
+    ),
+    # Person → role relationships: "my [role] is [Name]" or "[Name] is my [role]"
+    # These patterns capture TWO groups: (role_title, person_name).
+    # The extraction logic below has special handling for 2-group matches to build
+    # "User's [role]: [Name]" facts that include the role keyword for memory retrieval.
+    # (?-i:[A-Z][a-z]+) uses a local case-sensitive subpattern for proper names.
+    (
+        re.compile(
+            r"\bmy\s+(boss|manager|direct manager|project manager|product manager|"
+            r"program manager|account manager|team lead|tech lead|engineering lead|"
+            r"pm|po|cto|ceo|coo|vp|director|head of \w+|supervisor|lead|skip.?level)\s+is\s+"
+            r"((?-i:[A-Z][a-z]+)(?:\s+(?-i:[A-Z][a-z]+))*)\b",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "User's {0}: {1}",
+    ),
+    (
+        re.compile(
+            r"\b((?-i:[A-Z][a-z]+)(?:\s+(?-i:[A-Z][a-z]+))*)\s+is\s+(?:my|our)\s+"
+            r"(boss|manager|direct manager|project manager|product manager|program manager|"
+            r"account manager|team lead|tech lead|engineering lead|pm|po|cto|ceo|coo|vp|"
+            r"director|head of \w+|supervisor|lead)\b",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "User's {1}: {0}",
+    ),
+    # "[Name] manages/leads [team/project]"
+    (
+        re.compile(
+            r"\b((?-i:[A-Z][a-z]+)(?:\s+(?-i:[A-Z][a-z]+))*)\s+"
+            r"(manages?|leads?|runs?|oversees?|handles?)\s+"
+            r"(?:the\s+)?(?:team|department|engineering|product|design|sales|marketing|roadmap|project)\b",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "{0} manages/leads team",
+    ),
+    # "[Name] is [the/our] [role title]" - general role assignment
+    (
+        re.compile(
+            r"\b((?-i:[A-Z][a-z]+)(?:\s+(?-i:[A-Z][a-z]+))*)\s+is\s+(?:the|our|a|an)\s+"
+            r"(cto|ceo|coo|vp(?:\s+of\s+\w+)?|head of \w+|director(?:\s+of\s+\w+)?|"
+            r"(?:senior\s+)?(?:project|product|program|account|engineering|technical)\s+manager|"
+            r"(?:tech|engineering|team)\s+lead|founder|co.?founder)\b",
+            re.IGNORECASE,
+        ),
+        "facts",
+        "{0} is {1}",
+    ),
+    (
+        re.compile(
+            r"(?:my (?:timezone|tz|time ?zone) is|i'm in)\s+([A-Z][A-Za-z/_+-]{2,30})",
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "User timezone: {0}",
+    ),
+    (
+        re.compile(
+            r"(?:my (?:new |updated |current )?email(?: address)? is"
+            r"|email me at|reach me at|contact me at"
+            r"|(?:my )?email(?: address)? (?:changed|updated|switched) to"
+            r"|i(?:'m| am) (?:switching|changing|updating) (?:my )?email to"
+            r"|switched (?:email providers?;? *[—–-]+ *)?(?:my new email is)?"
+            r")\s*([^\s,<>]+@[^\s,<>]+)",
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "User email: {0}",
+    ),
     # Bare email address (entire message is just an email — e.g. reply to "what's your email?")
-    (re.compile(r"^\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\s*$", re.IGNORECASE),
-     "user_preferences", "User email address: {0}"),
+    (
+        re.compile(r"^\s*([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\s*$", re.IGNORECASE),
+        "user_preferences",
+        "User email address: {0}",
+    ),
     # LLM confirmation patterns: "noted that X as your email", "X is your email address"
-    (re.compile(
-        r"\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
-        r"(?:\s+is\s+(?:your|my|the)\s+email(?:\s+address)?|\s+as\s+(?:your|my)\s+email)",
-        re.IGNORECASE,
-    ), "user_preferences", "User email address: {0}"),
+    (
+        re.compile(
+            r"\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"
+            r"(?:\s+is\s+(?:your|my|the)\s+email(?:\s+address)?|\s+as\s+(?:your|my)\s+email)",
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "User email address: {0}",
+    ),
     # "noted/stored/saved X" where X contains an email
-    (re.compile(
-        r"(?:noted|stored|saved|recorded)\s+(?:that\s+)?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b",
-        re.IGNORECASE,
-    ), "user_preferences", "User email address: {0}"),
+    (
+        re.compile(
+            r"(?:noted|stored|saved|recorded)\s+(?:that\s+)?([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b",
+            re.IGNORECASE,
+        ),
+        "user_preferences",
+        "User email address: {0}",
+    ),
 ]
 
 # ── Memory categories ─────────────────────────────────────────────────────
@@ -229,14 +350,25 @@ def should_persist_memory(message: str) -> bool:
     if text.endswith("?"):
         return False
     # Common interrogative openings
-    if re.match(r"^(?:what|where|when|who|how|why|which|can you|could you|do you|did you|is there|are there)\b", text, re.IGNORECASE):
+    if re.match(
+        r"^(?:what|where|when|who|how|why|which|can you|could you|do you|did you|is there|are there)\b",  # noqa: E501
+        text,
+        re.IGNORECASE,
+    ):
         return False
 
     if not _REMEMBER_SIGNALS.search(message):
         # Also check category-specific signals not covered by _REMEMBER_SIGNALS
-        if not any(sig.search(message) for sig in (
-            _PREFERENCE_SIGNALS, _DECISION_SIGNALS, _PROJECT_SIGNALS,
-        )):
+        if not any(
+            sig.search(message)
+            for sig in (
+                _PREFERENCE_SIGNALS,
+                _DECISION_SIGNALS,
+                _PROJECT_SIGNALS,
+                _TEAM_SIGNALS,
+                _COMPANY_SIGNALS,
+            )
+        ):
             return False
 
     if _HYPOTHETICAL_SIGNALS.search(message):
@@ -278,12 +410,23 @@ def extract_facts_from_message(message: str) -> list[tuple[str, str]]:
     """Extract structured facts from a single message using regex patterns.
 
     Returns list of (fact_text, category) tuples.
-    Skips hypothetical/test messages entirely.
+    Skips hypothetical/test messages and questions entirely.
 
     This is the fast, zero-cost first pass. For semantic extraction on memory-
     signalled messages where regex finds nothing, see extract_facts_llm().
     """
     if _has_hypothetical_signals(message):
+        return []
+
+    # Questions are requests for information, not statements of fact.
+    text = message.strip()
+    if text.endswith("?"):
+        return []
+    if re.match(
+        r"^(?:what|where|when|who|how|why|which|can you|could you|do you|did you|is there|are there)\b",  # noqa: E501
+        text,
+        re.IGNORECASE,
+    ):
         return []
 
     facts: list[tuple[str, str]] = []
@@ -293,9 +436,9 @@ def extract_facts_from_message(message: str) -> list[tuple[str, str]]:
         if match:
             groups = match.groups()
             if groups:
-                # For name extractors: require the first captured word to start
-                # with an uppercase letter so "my name is unknown" or "call me
-                # anything" are rejected (generic/non-name phrases).
+                # For "User name:" and "User's [role]:" patterns, require that the
+                # captured person name starts with uppercase. For "User's" templates,
+                # the name is always in group 0 (first captured group).
                 if template.startswith("User name:"):
                     first_word = groups[0].split()[0] if groups[0] else ""
                     if not first_word or not first_word[0].isupper():
@@ -327,9 +470,15 @@ async def extract_facts_llm(message: str) -> list[tuple[str, str]]:
     if not api_key:
         return []
 
-    _VALID_CATEGORIES = frozenset({
-        "user_preferences", "project_context", "decisions", "facts", "general",
-    })
+    _VALID_CATEGORIES = frozenset(
+        {
+            "user_preferences",
+            "project_context",
+            "decisions",
+            "facts",
+            "general",
+        }
+    )
 
     prompt = (
         "Extract memorable facts from the following message. "
@@ -351,7 +500,8 @@ async def extract_facts_llm(message: str) -> list[tuple[str, str]]:
 
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=10.0) as client:
+
+        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
             resp = await client.post(
                 f"{settings.openrouter_base_url}/chat/completions",
                 headers={
@@ -369,6 +519,13 @@ async def extract_facts_llm(message: str) -> list[tuple[str, str]]:
             content = resp.json()["choices"][0]["message"]["content"].strip()
 
         import json as _json
+
+        # Strip markdown code fences if present (some models wrap JSON in ```json ... ```)
+        if content.startswith("```"):
+            content = content.split("```", 2)[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.rstrip("`").strip()
         raw = _json.loads(content)
         if not isinstance(raw, list):
             return []
@@ -486,17 +643,19 @@ async def write_session_memory(
 
 # Facts where only one value should ever be active at a time.
 # When a new fact shares this key prefix, the old one is replaced.
-_SINGLETON_FACT_KEYS: frozenset[str] = frozenset({
-    "user email",
-    "user email address",
-    "user timezone",
-    "user's name is",
-    "user name",
-    "user phone",
-    "user role",
-    "user title",
-    "user location",
-})
+_SINGLETON_FACT_KEYS: frozenset[str] = frozenset(
+    {
+        "user email",
+        "user email address",
+        "user timezone",
+        "user's name is",
+        "user name",
+        "user phone",
+        "user role",
+        "user title",
+        "user location",
+    }
+)
 
 
 def _fact_key(fact: str) -> str:
@@ -527,7 +686,7 @@ async def add_session_fact(
 
     Uses a per-workspace lock to prevent concurrent read-modify-write races.
     """
-    is_personal = (category == "user_preferences" and bool(user_id))
+    is_personal = category == "user_preferences" and bool(user_id)
     lock = _get_workspace_lock(ws.workspace_id)
 
     async with lock:
@@ -546,10 +705,7 @@ async def add_session_fact(
         key = _fact_key(fact)
         if key in _SINGLETON_FACT_KEYS:
             before = len(items)
-            items = [
-                item for item in items
-                if _fact_key(item.get("fact", "")) != key
-            ]
+            items = [item for item in items if _fact_key(item.get("fact", "")) != key]
             if len(items) < before:
                 logger.info(
                     "session_fact_replaced",
@@ -562,7 +718,7 @@ async def add_session_fact(
             "fact": fact,
             "source": source,
             "category": category,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
         }
         if thread_ts:
             entry["thread_ts"] = thread_ts
@@ -611,9 +767,7 @@ async def get_session_context_for_prompt(
     filtered: list[dict] = []
     for item in items:
         item_thread = item.get("thread_ts")
-        if item_thread is None:
-            filtered.append(item)
-        elif thread_ts and item_thread == thread_ts:
+        if item_thread is None or thread_ts and item_thread == thread_ts:
             filtered.append(item)
 
     if not filtered:
@@ -622,10 +776,7 @@ async def get_session_context_for_prompt(
     recent = filtered[-20:]
     lines = [f"• {item['fact']}" for item in recent]
 
-    return (
-        "### Recent Context (from earlier conversations)\n"
-        + "\n".join(lines)
-    )
+    return "### Recent Context (from earlier conversations)\n" + "\n".join(lines)
 
 
 async def load_relevant_memories(
@@ -655,11 +806,40 @@ async def load_relevant_memories(
     if topic_hint:
         topic_keywords = set(re.findall(r"\b[a-z]{3,}\b", topic_hint.lower()))
         topic_keywords -= {
-            "the", "and", "for", "that", "this", "with", "from",
-            "have", "has", "are", "was", "were", "will", "can",
-            "not", "but", "all", "about", "what", "how", "does",
-            "your", "you", "please", "could", "would", "should",
-            "tell", "help", "know", "think", "like", "just", "some",
+            "the",
+            "and",
+            "for",
+            "that",
+            "this",
+            "with",
+            "from",
+            "have",
+            "has",
+            "are",
+            "was",
+            "were",
+            "will",
+            "can",
+            "not",
+            "but",
+            "all",
+            "about",
+            "what",
+            "how",
+            "does",
+            "your",
+            "you",
+            "please",
+            "could",
+            "would",
+            "should",
+            "tell",
+            "help",
+            "know",
+            "think",
+            "like",
+            "just",
+            "some",
         }
 
     for item in items:
@@ -691,7 +871,7 @@ async def load_relevant_memories(
 
         try:
             ts = datetime.fromisoformat(item.get("ts", ""))
-            age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+            age_hours = (datetime.now(UTC) - ts).total_seconds() / 3600
             if age_hours < 1:
                 score += 5.0
             elif age_hours < 24:
@@ -746,6 +926,7 @@ async def load_relevant_memories(
 # KNOWLEDGE PERSISTENCE — Writing facts to permanent skill files
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 async def check_fact_contradictions(
     ws: WorkspaceFS,
     fact: str,
@@ -764,18 +945,36 @@ async def check_fact_contradictions(
     fact_lower = fact.lower()
     keywords = set(re.findall(r"\b[a-z]{3,}\b", fact_lower))
     keywords -= {
-        "the", "and", "our", "for", "that", "this", "with", "from",
-        "have", "has", "are", "was", "were", "will", "been", "being",
-        "not", "but", "can", "all", "about", "into", "over",
+        "the",
+        "and",
+        "our",
+        "for",
+        "that",
+        "this",
+        "with",
+        "from",
+        "have",
+        "has",
+        "are",
+        "was",
+        "were",
+        "will",
+        "been",
+        "being",
+        "not",
+        "but",
+        "can",
+        "all",
+        "about",
+        "into",
+        "over",
     }
 
     if not keywords:
         return None
 
     existing_lines = [
-        line.strip().lstrip("- ")
-        for line in content.split("\n")
-        if line.strip().startswith("-")
+        line.strip().lstrip("- ") for line in content.split("\n") if line.strip().startswith("-")
     ]
 
     conflicts: list[str] = []
@@ -787,9 +986,8 @@ async def check_fact_contradictions(
             conflicts.append(line)
 
     if conflicts:
-        return (
-            f"Potential contradictions with existing {target} knowledge: "
-            + "; ".join(conflicts[:3])
+        return f"Potential contradictions with existing {target} knowledge: " + "; ".join(
+            conflicts[:3]
         )
     return None
 
@@ -821,7 +1019,7 @@ async def append_to_company_knowledge(
             return
 
         section_header = "## Learned Context"
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d")
 
         if section_header in content:
             content += f"\n- {fact} ({timestamp})"
@@ -859,7 +1057,7 @@ async def append_to_team_knowledge(
             return
 
         section_header = "## Learned Context"
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d")
 
         if section_header in content:
             content += f"\n- {fact} ({timestamp})"
@@ -905,10 +1103,7 @@ async def append_learning(
     lock = _get_workspace_lock(ws.workspace_id)
     async with lock:
         content = await ws.read_file(LEARNINGS_PATH) or (
-            "# Lucy Learnings\n\n"
-            "## Corrections\n\n"
-            "## Mistakes\n\n"
-            "## Preferences\n\n"
+            "# Lucy Learnings\n\n## Corrections\n\n## Mistakes\n\n## Preferences\n\n"
         )
 
         entry = entry.strip()
@@ -916,7 +1111,7 @@ async def append_learning(
             return
 
         section_header = f"## {section}"
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d")
         line = f"- [{timestamp}] {entry}"
 
         if section_header in content:
@@ -960,7 +1155,7 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
     from datetime import timedelta
 
     lock = _get_workspace_lock(ws.workspace_id)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(UTC) - timedelta(hours=24)
 
     _PROMOTE_TO_TEAM: frozenset[str] = frozenset({"decisions", "project_context"})
     _PROMOTE_TO_COMPANY: frozenset[str] = frozenset({"facts"})
@@ -1026,10 +1221,9 @@ async def consolidate_session_to_knowledge(ws: WorkspaceFS) -> int:
         # ── Step 2: Write journal BEFORE removing from session ───────────────
         # If we crash after this point, the journal replay above will finish
         # writing the facts to skill files on the next run.
-        journal_entries = (
-            [{"fact": f, "dest": "team"} for f in to_team]
-            + [{"fact": f, "dest": "company"} for f in to_company]
-        )
+        journal_entries = [{"fact": f, "dest": "team"} for f in to_team] + [
+            {"fact": f, "dest": "company"} for f in to_company
+        ]
         await ws.write_file(
             _CONSOLIDATION_JOURNAL_PATH,
             json.dumps(journal_entries, indent=2, ensure_ascii=False),

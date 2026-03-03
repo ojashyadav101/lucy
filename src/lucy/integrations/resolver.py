@@ -185,7 +185,7 @@ async def resolve_integration(service_name: str) -> ResolutionResult:
             duration_ms=round(mcp_ms, 1),
         )
     else:
-        result.decision_log.append("STAGE1_MCP_SKIPPED: no MCP server found in research (neither HTTP nor stdio)")
+        result.decision_log.append("STAGE1_MCP_SKIPPED: no MCP server found in research (neither HTTP nor stdio)")  # noqa: E501
 
     # ── Stage 2: OpenAPI ─────────────────────────────────────
     if classification.has_openapi and classification.openapi_spec_url:
@@ -272,7 +272,7 @@ async def resolve_integration(service_name: str) -> ResolutionResult:
         result.decision_log.append(
             f"STAGE3_WRAPPER_GENERATING: sdk={classification.sdk_package}, "
             f"docs={classification.api_docs_url}, "
-            f"endpoints_discovered={sum(len(c.endpoints) for c in classification.endpoint_categories)}"
+            f"endpoints_discovered={sum(len(c.endpoints) for c in classification.endpoint_categories)}"  # noqa: E501
         )
         logger.info(
             "resolver_generating_wrapper",

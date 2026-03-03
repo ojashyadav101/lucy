@@ -16,7 +16,7 @@ Preferences tracked:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,7 @@ def update_preference(
 
     prefs[key] = value
     prefs[f"_src_{key}"] = source
-    prefs[f"_ts_{key}"] = datetime.now(timezone.utc).isoformat()
+    prefs[f"_ts_{key}"] = datetime.now(UTC).isoformat()
     save_user_preferences(ws, user_id, prefs)
     logger.debug("preference_updated", user_id=user_id, key=key, value=value, source=source)
 

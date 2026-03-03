@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -36,7 +36,7 @@ class MCPConnectionRecord:
     updated_at: str = ""
 
     def __post_init__(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if not self.installed_at:
             self.installed_at = now
         if not self.updated_at:
@@ -86,7 +86,7 @@ async def save_mcp_connection(ws: WorkspaceFS, record: MCPConnectionRecord) -> N
     updated: list[MCPConnectionRecord] = [
         r for r in existing if r.service != record.service
     ]
-    record.updated_at = datetime.now(timezone.utc).isoformat()
+    record.updated_at = datetime.now(UTC).isoformat()
     updated.append(record)
 
     await ws.write_file(

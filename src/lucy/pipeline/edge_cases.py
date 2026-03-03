@@ -64,7 +64,7 @@ async def format_task_status(
     Returns a human-friendly status string, or None if no tasks.
     """
     try:
-        from lucy.core.task_manager import get_task_manager, TaskState
+        from lucy.core.task_manager import TaskState, get_task_manager
         tm = get_task_manager()
         tasks = tm.get_workspace_tasks(workspace_id)
 
@@ -100,7 +100,7 @@ async def handle_task_cancellation(
     Returns a confirmation message, or None if no task found.
     """
     try:
-        from lucy.core.task_manager import get_task_manager, TaskState
+        from lucy.core.task_manager import TaskState, get_task_manager
         tm = get_task_manager()
         tasks = tm.get_workspace_tasks(workspace_id)
 

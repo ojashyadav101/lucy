@@ -1,15 +1,18 @@
 """Confirmation Gate — intercepts tool calls that require user approval.
 
 This module sits between the agent's tool dispatch and actual execution.
-When a tool is classified as WRITE or DESTRUCTIVE, the gate:
+The gate fires ONLY for DESTRUCTIVE actions — operations that are
+irreversible and have significant real-world consequences (sending email,
+deleting data, cancelling subscriptions, forwarding messages).
 
-1. Formats a human-readable description of the action
-2. Creates a pending action via the HITL system
-3. Returns a "pending_approval" result to the agent
-4. The agent presents approval UI to the user via Block Kit buttons
-5. On approval, execution resumes through the HITL callback
+WRITE actions (creating a cron, connecting an MCP, storing an API key,
+generating a file, etc.) are auto-executed immediately without a gate.
+The user explicitly requested these — interrupting them is bad UX.
 
-For READ actions, the gate is a no-op — execution proceeds immediately.
+Gate levels:
+  READ        → always auto-execute
+  WRITE       → always auto-execute (trust the user's request)
+  DESTRUCTIVE → gate with Approve / Reject prompt
 
 The gate also handles COMPOSIO_MULTI_EXECUTE_TOOL specially, inspecting
 inner actions to determine the aggregate risk level.
@@ -17,7 +20,6 @@ inner actions to determine the aggregate risk level.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import structlog
@@ -26,12 +28,11 @@ from lucy.core.action_classifier import (
     ActionType,
     classify,
     classify_composio_multi_execute,
-    get_classification_summary,
 )
 
 logger = structlog.get_logger()
 
-# Actions that should NEVER be gated (internal orchestration)
+# Actions that should NEVER be gated (internal orchestration + direct user requests)
 _GATE_EXEMPT: frozenset[str] = frozenset({
     # Composio discovery tools — needed for the agent to find tools
     "COMPOSIO_SEARCH_TOOLS",
@@ -45,11 +46,26 @@ _GATE_EXEMPT: frozenset[str] = frozenset({
     "lucy_search_slack_history",
     "lucy_get_channel_history",
     "lucy_web_search",
-    # Integration research — the user asking to connect a service IS the consent;
-    # asking "are you sure you want me to research this?" is redundant and breaks UX
+    # Integration research — the user asking to connect a service IS the consent
     "lucy_resolve_custom_integration",
     "lucy_list_mcp_connections",
     "lucy_refresh_mcp",
+    # MCP management — user explicitly asked to connect/disconnect
+    "lucy_connect_mcp",
+    "lucy_disconnect_mcp",
+    # API key storage — user handed Lucy the key, asking "are you sure?" is absurd
+    "lucy_store_api_key",
+    # Cron / heartbeat management — direct response to user request
+    "lucy_create_cron",
+    "lucy_modify_cron",
+    "lucy_create_heartbeat",
+    "lucy_modify_heartbeat",
+    # Code execution — user asked Lucy to run code
+    "lucy_execute_code",
+    "lucy_run_code",
+    # Self-monitoring — must NEVER reach the gate
+    "lucy_reflection",
+    "lucy_react_to_message",
 })
 
 # Tools where gating would break the UX (the action IS the user's request)
@@ -64,6 +80,14 @@ _IMPLICIT_CONSENT_TOOLS: frozenset[str] = frozenset({
     "lucy_write_file",
     "lucy_edit_file",
     "lucy_spaces_deploy",
+    # Gateway execution tools — user explicitly asked Lucy to run a command.
+    # The action classifier already gates truly destructive commands (rm -rf, etc.).
+    # Non-destructive commands (git clone, npm install, python scripts) must not
+    # interrupt the user with an approval prompt.
+    # NOTE: lucy_exec_command is NOT here — it uses content-based classification
+    # so destructive commands (rm -rf) still gate even if the user asked for them.
+    "lucy_start_background",
+    "lucy_poll_process",
 })
 
 
@@ -76,13 +100,15 @@ def should_gate(
 
     Returns (should_gate: bool, action_type: ActionType).
 
-    Gating rules:
-    - READ actions: never gated
-    - Gate-exempt tools: never gated (internal orchestration)
+    Gating rules (most permissive possible while still protecting users):
+    - Gate-exempt tools: never gated
     - Implicit-consent tools: never gated (user explicitly asked for the output)
-    - Cron executions: only DESTRUCTIVE actions are gated (WRITE auto-approved)
-    - WRITE actions: gated in interactive mode
-    - DESTRUCTIVE actions: always gated
+    - READ actions: never gated
+    - WRITE actions: never gated — user's request IS the consent
+    - DESTRUCTIVE actions: always gated (irreversible, real-world consequences)
+
+    Cron executions follow the same rules — only truly DESTRUCTIVE
+    actions (sending email, deleting data) are interrupted.
     """
     # Exempt tools always pass through
     if tool_name in _GATE_EXEMPT:
@@ -96,26 +122,31 @@ def should_gate(
     if tool_name == "COMPOSIO_MULTI_EXECUTE_TOOL" and parameters:
         actions = parameters.get("tools") or parameters.get("actions") or []
         action_type = classify_composio_multi_execute(actions)
+    elif tool_name in ("COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"):
+        # These tools are now classified by command content in action_classifier.
+        # The classifier already returns READ/WRITE/DESTRUCTIVE based on the actual
+        # command — only true destructive commands (rm -rf, drop table, etc.) gate.
+        action_type = classify(tool_name, parameters)
+    elif tool_name in ("lucy_exec_command",):
+        # Same content-based classification as COMPOSIO_REMOTE_BASH_TOOL.
+        # lucy_start_background and lucy_poll_process are always WRITE (no gate).
+        action_type = classify(tool_name, parameters)
     else:
         action_type = classify(tool_name, parameters)
 
-    # READ actions always pass through
-    if action_type == ActionType.READ:
+    # READ and WRITE always pass through — trust the user's request
+    if action_type != ActionType.DESTRUCTIVE:
         return False, action_type
 
-    # During cron execution, auto-approve WRITE, gate DESTRUCTIVE
+    # DESTRUCTIVE: gate in cron mode too (sending emails / deleting data
+    # from a scheduled job without the user watching = must confirm)
     if is_cron_execution:
-        if action_type == ActionType.WRITE:
-            return False, action_type
-        # DESTRUCTIVE in cron = log warning, still gate
         logger.warning(
             "confirmation_gate_destructive_in_cron",
             tool=tool_name,
             action_type=action_type.value,
         )
-        return True, action_type
 
-    # Interactive mode: gate both WRITE and DESTRUCTIVE
     return True, action_type
 
 
@@ -155,6 +186,13 @@ def _build_hitl_narrative_inner(
     parameters: dict[str, Any],
     is_destructive: bool,
 ) -> str:
+
+    # ── Internal / self-monitoring tools — should never reach the gate ───
+    # If somehow a reflection or internal tool triggers the gate, suppress it
+    # with a safe no-op message rather than leaking internal data.
+    _internal_prefixes = ("lucy_reflection", "lucy_react_to_message", "lucy_internal")
+    if any(tool_name.lower().startswith(p) for p in _internal_prefixes):
+        return "I'm performing an internal check — this should resolve automatically."
 
     # ── MCP connection ────────────────────────────────────────────────
     if tool_name in ("lucy_connect_mcp", "lucy_custom_connect_mcp"):

@@ -40,7 +40,6 @@ class ToolCallRequest(BaseModel):
 def _verify_project_secret(project_name: str, project_secret: str) -> bool:
     """Verify a project's secret against stored config."""
     import json
-    from pathlib import Path
 
     for ws_dir in settings.workspace_root.iterdir():
         config_path = ws_dir / "spaces" / project_name / "project.json"

@@ -5,12 +5,11 @@ Resolves user-local times from Slack timezone data stored in team/SKILL.md.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 
 import structlog
 
-from lucy.workspace.filesystem import WorkspaceFS, get_workspace
+from lucy.workspace.filesystem import get_workspace
 
 logger = structlog.get_logger()
 

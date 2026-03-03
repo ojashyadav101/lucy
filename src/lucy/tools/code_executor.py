@@ -33,7 +33,6 @@ from typing import Any
 import structlog
 
 from lucy.tools.code_validator import (
-    ValidationResult,
     analyze_execution_error,
     validate_python,
 )
@@ -42,7 +41,6 @@ from lucy.workspace.executor import (
     execute_bash,
     execute_python,
     execute_workspace_script,
-    MAX_OUTPUT_CHARS,
 )
 
 logger = structlog.get_logger()
@@ -96,7 +94,7 @@ def get_code_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "description": {
                             "type": "string",
-                            "description": "Brief description of what this code does (for logging).",
+                            "description": "Brief description of what this code does (for logging).",  # noqa: E501
                         },
                         "timeout": {
                             "type": "integer",

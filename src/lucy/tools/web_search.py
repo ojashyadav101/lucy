@@ -80,7 +80,7 @@ async def execute_web_search(
                     "X-Title": "Lucy Web Search",
                 },
                 json={
-                    "model": settings.model_tier_fast,
+                    "model": settings.model_tier_fast + ":online",
                     "messages": [
                         {
                             "role": "system",

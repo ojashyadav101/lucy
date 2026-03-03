@@ -11,7 +11,7 @@ import re
 import secrets
 import shutil
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -176,7 +176,7 @@ async def init_app_project(
             project_secret=project_secret,
             vercel_project_name=vercel_project_name,
             vercel_bypass_secret=bypass_secret,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
         config.save(_project_config_path(workspace_id, slug))
 
@@ -206,7 +206,7 @@ async def deploy_app(
     config_path = _project_config_path(workspace_id, slug)
 
     if not config_path.exists():
-        return {"success": False, "error": f"Project '{slug}' not found. Use the exact slug returned by lucy_spaces_init."}
+        return {"success": False, "error": f"Project '{slug}' not found. Use the exact slug returned by lucy_spaces_init."}  # noqa: E501
 
     config = SpaceProject.load(config_path)
     project_dir = _project_dir(workspace_id, slug)
@@ -251,7 +251,7 @@ async def deploy_app(
             logger.error("deployment_not_ready", state=ready_state, id=deployment_id)
             return {"success": False, "error": error_msg}
 
-        config.last_deployed_at = datetime.now(timezone.utc).isoformat()
+        config.last_deployed_at = datetime.now(UTC).isoformat()
         config.vercel_deployment_url = deploy_url
         config.save(config_path)
 
@@ -403,7 +403,7 @@ async def _build_project(project_dir: Path) -> dict[str, Any]:
         logger.info("vite_build_complete", project=str(project_dir.name))
         return {"success": True}
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return {"success": False, "error": f"Build timed out during '{build_step}'"}
 
 

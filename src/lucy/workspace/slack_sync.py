@@ -11,7 +11,7 @@ File structure:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -73,7 +73,7 @@ async def sync_channel_messages(
                 if not text:
                     continue
 
-                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                dt = datetime.fromtimestamp(float(ts), tz=UTC)
                 date_key = dt.strftime("%Y-%m-%d")
                 time_str = dt.strftime("%H:%M:%S")
 
@@ -98,7 +98,7 @@ async def sync_channel_messages(
                 existing = await ws.read_file(file_path)
                 if existing:
                     existing_lines = set(existing.strip().split("\n"))
-                    new_lines = [l for l in lines if l not in existing_lines]
+                    new_lines = [ln for ln in lines if ln not in existing_lines]
                     if new_lines:
                         await ws.append_file(file_path, "\n".join(new_lines) + "\n")
                         total_synced += len(new_lines)
@@ -114,7 +114,7 @@ async def sync_channel_messages(
                 existing = await ws.read_file(thread_path)
                 if existing:
                     existing_lines = set(existing.strip().split("\n"))
-                    new_lines = [l for l in lines if l not in existing_lines]
+                    new_lines = [ln for ln in lines if ln not in existing_lines]
                     if new_lines:
                         await ws.append_file(
                             thread_path, "\n".join(new_lines) + "\n",

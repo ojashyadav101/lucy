@@ -43,12 +43,27 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"/home/user/[^\s)\"']+"), ""),
     (re.compile(r"/workspace[s]?/[^\s)\"']+"), ""),
     (re.compile(r"@?workspace_seeds[^\s]*"), ""),
-    (re.compile(r"(?:using |called |via |through )?COMPOSIO_SEARCH_TOOLS"), "searching available tools"),
-    (re.compile(r"(?:using |called |via |through )?COMPOSIO_MANAGE_CONNECTIONS"), "checking integrations"),
-    (re.compile(r"(?:using |called |via |through )?COMPOSIO_MULTI_EXECUTE_TOOL"), "running actions"),
-    (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_WORKBENCH"), "running some code"),
+    (
+        re.compile(r"(?:using |called |via |through )?COMPOSIO_SEARCH_TOOLS"),
+        "searching available tools",
+    ),
+    (
+        re.compile(r"(?:using |called |via |through )?COMPOSIO_MANAGE_CONNECTIONS"),
+        "checking integrations",
+    ),
+    (
+        re.compile(r"(?:using |called |via |through )?COMPOSIO_MULTI_EXECUTE_TOOL"),
+        "running actions",
+    ),
+    (
+        re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_WORKBENCH"),
+        "running some code",
+    ),
     (re.compile(r"(?:using |called |via |through )?COMPOSIO_REMOTE_BASH_TOOL"), "running a script"),
-    (re.compile(r"(?:using |called |via |through )?COMPOSIO_GET_TOOL_SCHEMAS"), "looking up tool details"),
+    (
+        re.compile(r"(?:using |called |via |through )?COMPOSIO_GET_TOOL_SCHEMAS"),
+        "looking up tool details",
+    ),
     (re.compile(r"COMPOSIO_\w+"), ""),
     (re.compile(r"`?lucy_custom_\w+`?"), ""),
     (re.compile(r"\blucy_\w+\b"), ""),
@@ -64,23 +79,46 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk_test_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
     (re.compile(r"Bearer\s+[A-Za-z0-9_-]{20,}"), "Bearer [REDACTED]"),
     (re.compile(r"pol_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
-    (re.compile(r"['\"]Authorization['\"]:\s*['\"]Bearer\s+[^'\"]+['\"]"), '"Authorization": "Bearer [REDACTED]"'),
+    (
+        re.compile(r"['\"]Authorization['\"]:\s*['\"]Bearer\s+[^'\"]+['\"]"),
+        '"Authorization": "Bearer [REDACTED]"',
+    ),
     (re.compile(r"<(?:request|invoke)[^>]*>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"<invoke\s+name=.*?>.*?</invoke>", re.DOTALL), ""),
     (re.compile(r"(?i)the api key[^.]*(?:workbench|sandbox|available)[^.]*\.", re.DOTALL), ""),
-    (re.compile(r"(?i)(?:let me|i(?:'ll| will)) try a different (?:approach|strategy)[^.]*\.", re.DOTALL), ""),
-    (re.compile(r"(?i)(?:api key|credentials?) (?:isn't|aren't|is not|are not) available[^.]*\.", re.DOTALL), ""),
+    (
+        re.compile(
+            r"(?i)(?:let me|i(?:'ll| will)) try a different (?:approach|strategy)[^.]*\.", re.DOTALL
+        ),
+        "",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:api key|credentials?) (?:isn't|aren't|is not|are not) available[^.]*\.",
+            re.DOTALL,
+        ),
+        "",
+    ),
     (re.compile(r"\bfunction calling\b", re.IGNORECASE), ""),
-    (re.compile(r"(?:workspace_id|trace_id|call_id|entity_id|session_id|deployment_id)[=:\s]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE), ""),
+    (
+        re.compile(
+            r"(?:workspace_id|trace_id|call_id|entity_id|session_id|deployment_id)[=:\s]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        "",
+    ),
     (re.compile(r"crons/[^\s)\"']+"), "the scheduled task"),
     (re.compile(r"task\.json\b"), ""),
-    (re.compile(
-        r'\{\s*"(?:success|error|result|project_name|slug|sandbox_path|convex_url|'
-        r'deployment_id|file_path|url|subdomain|preview_url|workspace_id|'
-        r'created_at|last_deployed|description|name|count|apps)"\s*:'
-        r'[^}]*\}',
-        re.DOTALL,
-    ), ""),
+    (
+        re.compile(
+            r'\{\s*"(?:success|error|result|project_name|slug|sandbox_path|convex_url|'
+            r"deployment_id|file_path|url|subdomain|preview_url|workspace_id|"
+            r'created_at|last_deployed|description|name|count|apps)"\s*:'
+            r"[^}]*\}",
+            re.DOTALL,
+        ),
+        "",
+    ),
     (re.compile(r"/Users/[^\s)\"']+"), ""),
 ]
 
@@ -89,11 +127,35 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # HTTP_STATUS_CODE, DATABASE_URL, AWS_ACCESS_KEY, or any env var the model might
 # legitimately reference. Scoped to known service prefixes + internal lucy_ tools.
 _KNOWN_TOOL_PREFIXES = (
-    "COMPOSIO_", "GOOGLECALENDAR_", "GMAIL_", "GOOGLEDRIVE_", "GOOGLESHEETS_",
-    "GOOGLEDOCS_", "GITHUB_", "LINEAR_", "NOTION_", "SLACK_", "TRELLO_",
-    "HUBSPOT_", "SALESFORCE_", "STRIPE_", "TWILIO_", "FIGMA_", "JIRA_",
-    "ASANA_", "MONDAY_", "CLICKUP_", "ZENDESK_", "INTERCOM_", "AIRTABLE_",
-    "DROPBOX_", "ONEDRIVE_", "ZOHO_", "PIPEDRIVE_", "MAILCHIMP_", "SENDGRID_",
+    "COMPOSIO_",
+    "GOOGLECALENDAR_",
+    "GMAIL_",
+    "GOOGLEDRIVE_",
+    "GOOGLESHEETS_",
+    "GOOGLEDOCS_",
+    "GITHUB_",
+    "LINEAR_",
+    "NOTION_",
+    "SLACK_",
+    "TRELLO_",
+    "HUBSPOT_",
+    "SALESFORCE_",
+    "STRIPE_",
+    "TWILIO_",
+    "FIGMA_",
+    "JIRA_",
+    "ASANA_",
+    "MONDAY_",
+    "CLICKUP_",
+    "ZENDESK_",
+    "INTERCOM_",
+    "AIRTABLE_",
+    "DROPBOX_",
+    "ONEDRIVE_",
+    "ZOHO_",
+    "PIPEDRIVE_",
+    "MAILCHIMP_",
+    "SENDGRID_",
 )
 _ALLCAPS_TOOL_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(p) for p in _KNOWN_TOOL_PREFIXES) + r")[A-Z_]+\b"
@@ -143,6 +205,7 @@ def _sanitize(text: str) -> str:
 # LAYER 2: MARKDOWN -> SLACK MRKDWN CONVERTER
 # ═══════════════════════════════════════════════════════════════════════
 
+
 def _stash_code_blocks(text: str) -> tuple[str, list[str]]:
     """Extract all code blocks from text and replace with NUL-delimited tokens.
 
@@ -177,14 +240,18 @@ def _convert_markdown_to_slack(text: str) -> str:
     text = _convert_tables_to_lists(text)
     # Convert markdown links FIRST (before bold conversion touches them)
     text = re.sub(
-        r"\[([^\]]+)\]\((https?://[^)\s]+)\)", r"<\2|\1>", text,
+        r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+        r"<\2|\1>",
+        text,
     )
+
     # Bold: **text** → *text*, but NOT when the content is a URL
     def _bold_replace(m: re.Match[str]) -> str:
         inner = m.group(1)
         if inner.startswith("http://") or inner.startswith("https://"):
             return inner
         return f"*{inner}*"
+
     text = re.sub(r"\*\*(.+?)\*\*", _bold_replace, text)
     text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
     text = re.sub(r"\*\*\*\*", "", text)
@@ -205,11 +272,7 @@ def _convert_tables_to_lists(text: str) -> str:
         line = lines[i].strip()
         if "|" in line and line.startswith("|"):
             table_lines: list[str] = []
-            while (
-                i < len(lines)
-                and "|" in lines[i].strip()
-                and lines[i].strip().startswith("|")
-            ):
+            while i < len(lines) and "|" in lines[i].strip() and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i].strip())
                 i += 1
             result.extend(_table_to_bullets(table_lines))
@@ -223,9 +286,7 @@ def _table_to_bullets(table_lines: list[str]) -> list[str]:
     rows: list[list[str]] = []
     for line in table_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
-        if cells and not all(
-            c.replace("-", "").replace(":", "").strip() == "" for c in cells
-        ):
+        if cells and not all(c.replace("-", "").replace(":", "").strip() == "" for c in cells):
             rows.append(cells)
 
     if len(rows) < 2:
@@ -270,7 +331,10 @@ _TONE_REJECT_PATTERNS: list[re.Pattern[str]] = [
 
 _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
     (
-        re.compile(r"I (?:wasn't|was not) able to (?:complete |finish )?(?:the |this |your )?request[^.]*\.?", re.IGNORECASE),
+        re.compile(
+            r"I (?:wasn't|was not) able to (?:complete |finish )?(?:the |this |your )?request[^.]*\.?",  # noqa: E501
+            re.IGNORECASE,
+        ),
         "Let me try a different approach on this.",
     ),
     (
@@ -286,7 +350,10 @@ _TONE_REPLACEMENTS: list[tuple[re.Pattern[str], str]] = [
         "Working on getting that sorted.",
     ),
     (
-        re.compile(r"(?:That's a |This is a |What a )?(?:great|excellent|wonderful|fantastic) question[!.,]?\s*", re.IGNORECASE),
+        re.compile(
+            r"(?:That's a |This is a |What a )?(?:great|excellent|wonderful|fantastic) question[!.,]?\s*",  # noqa: E501
+            re.IGNORECASE,
+        ),
         "",
     ),
     (
@@ -361,104 +428,139 @@ _AI_TELL_PATTERNS: list[tuple[re.Pattern[str], int, str]] = [
     (re.compile(r" — "), 3, "em_dash"),
     (re.compile(r"—"), 2, "em_dash"),
     (re.compile(r" – "), 1, "en_dash"),
-
     # POWER WORDS (the classic LLM vocabulary)
-    (re.compile(
-        r"\b(?:delve|tapestry|landscape|beacon|pivotal|testament|"
-        r"multifaceted|underpinning|underscores|palpable|enigmatic|"
-        r"plethora|myriad|paramount|groundbreaking|game-?changing|"
-        r"cutting-?edge|holistic|synergy|synergize|leverage|leveraging|"
-        r"spearhead|spearheading|bolster|bolstering|unleash|unlock|"
-        r"foster|empower|embark|illuminate|elucidate|resonate|"
-        r"revolutionize|revolutionizing|elevate|grapple|showcase|"
-        r"streamline|harness|harnessing|catapult|supercharge|"
-        r"cornerstone|linchpin|bedrock|hallmark|touchstone|"
-        r"realm|sphere|arena|facet|nuance|intricacies|"
-        r"robust|seamless|seamlessly|comprehensive|meticulous|"
-        r"intricate|versatile|dynamic|innovative|transformative|"
-        r"endeavor|strive|forge|cultivate|spearhead)\b",
-        re.IGNORECASE,
-    ), 2, "power_word"),
-
+    (
+        re.compile(
+            r"\b(?:delve|tapestry|landscape|beacon|pivotal|testament|"
+            r"multifaceted|underpinning|underscores|palpable|enigmatic|"
+            r"plethora|myriad|paramount|groundbreaking|game-?changing|"
+            r"cutting-?edge|holistic|synergy|synergize|leverage|leveraging|"
+            r"spearhead|spearheading|bolster|bolstering|unleash|unlock|"
+            r"foster|empower|embark|illuminate|elucidate|resonate|"
+            r"revolutionize|revolutionizing|elevate|grapple|showcase|"
+            r"streamline|harness|harnessing|catapult|supercharge|"
+            r"cornerstone|linchpin|bedrock|hallmark|touchstone|"
+            r"realm|sphere|arena|facet|nuance|intricacies|"
+            r"robust|seamless|seamlessly|comprehensive|meticulous|"
+            r"intricate|versatile|dynamic|innovative|transformative|"
+            r"endeavor|strive|forge|cultivate|spearhead)\b",
+            re.IGNORECASE,
+        ),
+        2,
+        "power_word",
+    ),
     # FORMAL TRANSITIONS
-    (re.compile(
-        r"\b(?:Moreover|Furthermore|Additionally|Consequently|"
-        r"Nevertheless|Nonetheless|Henceforth|Accordingly|"
-        r"In conclusion|To summarize|In summary|"
-        r"It is (?:worth|important to) not(?:e|ing)|"
-        r"It bears mentioning|It should be noted|"
-        r"As previously mentioned|As noted above|"
-        r"In light of|With regard to|In terms of|"
-        r"From a broader perspective|On the other hand|"
-        r"By the same token|In this context)\b",
-        re.IGNORECASE,
-    ), 2, "formal_transition"),
-
+    (
+        re.compile(
+            r"\b(?:Moreover|Furthermore|Additionally|Consequently|"
+            r"Nevertheless|Nonetheless|Henceforth|Accordingly|"
+            r"In conclusion|To summarize|In summary|"
+            r"It is (?:worth|important to) not(?:e|ing)|"
+            r"It bears mentioning|It should be noted|"
+            r"As previously mentioned|As noted above|"
+            r"In light of|With regard to|In terms of|"
+            r"From a broader perspective|On the other hand|"
+            r"By the same token|In this context)\b",
+            re.IGNORECASE,
+        ),
+        2,
+        "formal_transition",
+    ),
     # HEDGING / WEASEL PHRASES
-    (re.compile(
-        r"\b(?:generally speaking|more often than not|"
-        r"it's (?:also )?important to (?:note|remember|consider|mention|highlight)|"
-        r"it's crucial to|it's essential to|"
-        r"it's worth (?:noting|mentioning|highlighting|pointing out)|"
-        r"to some extent|in many ways|for the most part|"
-        r"at the end of the day|when all is said and done|"
-        r"all things considered|that being said|"
-        r"having said that|with that in mind|"
-        r"needless to say|goes without saying|"
-        r"it goes without saying)\b",
-        re.IGNORECASE,
-    ), 2, "hedging"),
-
+    (
+        re.compile(
+            r"\b(?:generally speaking|more often than not|"
+            r"it's (?:also )?important to (?:note|remember|consider|mention|highlight)|"
+            r"it's crucial to|it's essential to|"
+            r"it's worth (?:noting|mentioning|highlighting|pointing out)|"
+            r"to some extent|in many ways|for the most part|"
+            r"at the end of the day|when all is said and done|"
+            r"all things considered|that being said|"
+            r"having said that|with that in mind|"
+            r"needless to say|goes without saying|"
+            r"it goes without saying)\b",
+            re.IGNORECASE,
+        ),
+        2,
+        "hedging",
+    ),
     # CHATBOT FILLERS / SYCOPHANCY
-    (re.compile(
-        r"(?:^|\. )(?:Absolutely|Certainly|Of course|Sure thing)[!.,]",
-        re.IGNORECASE | re.MULTILINE,
-    ), 2, "sycophancy"),
-    (re.compile(
-        r"(?:Hope (?:this|that) helps|"
-        r"(?:I )?hope (?:this|that) (?:was|is) helpful|"
-        r"Let me know if you (?:need|have|want) (?:anything|any|more)|"
-        r"(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)|"
-        r"Happy to (?:help|assist|answer|elaborate))[!.]?",
-        re.IGNORECASE,
-    ), 3, "chatbot_closer"),
-    (re.compile(
-        r"(?:(?:That's|What) an? (?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "
-        r"(?:question|point|observation|thought|idea))[!.,]?\s*",
-        re.IGNORECASE,
-    ), 3, "sycophancy"),
-
+    (
+        re.compile(
+            r"(?:^|\. )(?:Absolutely|Certainly|Of course|Sure thing)[!.,]",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        2,
+        "sycophancy",
+    ),
+    (
+        re.compile(
+            r"(?:Hope (?:this|that) helps|"
+            r"(?:I )?hope (?:this|that) (?:was|is) helpful|"
+            r"Let me know if you (?:need|have|want) (?:anything|any|more)|"
+            r"(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)|"
+            r"Happy to (?:help|assist|answer|elaborate))[!.]?",
+            re.IGNORECASE,
+        ),
+        3,
+        "chatbot_closer",
+    ),
+    (
+        re.compile(
+            r"(?:(?:That's|What) an? (?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "  # noqa: E501
+            r"(?:question|point|observation|thought|idea))[!.,]?\s*",
+            re.IGNORECASE,
+        ),
+        3,
+        "sycophancy",
+    ),
     # STRUCTURAL PATTERNS
-    (re.compile(r"It's not (?:just )?(?:about )?X[,;] it's (?:about )?Y", re.IGNORECASE), 2, "structure"),
-    (re.compile(
-        r"(?:Let's (?:dive|jump) (?:in|into|right in)|"
-        r"Without further ado|"
-        r"Let me break (?:this|it) down|"
-        r"Here's (?:a |the )?(?:breakdown|overview|rundown|lowdown)|"
-        r"(?:So,? )?(?:let's|allow me to) (?:explore|unpack|dissect))",
-        re.IGNORECASE,
-    ), 2, "structure"),
-
+    (
+        re.compile(r"It's not (?:just )?(?:about )?X[,;] it's (?:about )?Y", re.IGNORECASE),
+        2,
+        "structure",
+    ),
+    (
+        re.compile(
+            r"(?:Let's (?:dive|jump) (?:in|into|right in)|"
+            r"Without further ado|"
+            r"Let me break (?:this|it) down|"
+            r"Here's (?:a |the )?(?:breakdown|overview|rundown|lowdown)|"
+            r"(?:So,? )?(?:let's|allow me to) (?:explore|unpack|dissect))",
+            re.IGNORECASE,
+        ),
+        2,
+        "structure",
+    ),
     # EXCESSIVE EXCLAMATION (3+ in a message)
     (re.compile(r"(?:.*!.*){3,}"), 1, "exclamation"),
-
     # "IN ESSENCE" / "IN A NUTSHELL" summaries
-    (re.compile(
-        r"\b(?:In essence|In a nutshell|To put it simply|"
-        r"Simply put|Long story short|Bottom line|"
-        r"The (?:key|main|bottom) (?:takeaway|point|thing) (?:is|here))\b",
-        re.IGNORECASE,
-    ), 1, "summary_phrase"),
-
+    (
+        re.compile(
+            r"\b(?:In essence|In a nutshell|To put it simply|"
+            r"Simply put|Long story short|Bottom line|"
+            r"The (?:key|main|bottom) (?:takeaway|point|thing) (?:is|here))\b",
+            re.IGNORECASE,
+        ),
+        1,
+        "summary_phrase",
+    ),
     # OVER-STRUCTURED OPENINGS
-    (re.compile(
-        r"(?:Here are|Here's) (?:\d+|a few|some|several) "
-        r"(?:key |main |important |critical )?(?:things|points|considerations|factors|aspects|ways|steps|tips)",
-        re.IGNORECASE,
-    ), 1, "listicle_opener"),
-
+    (
+        re.compile(
+            r"(?:Here are|Here's) (?:\d+|a few|some|several) "
+            r"(?:key |main |important |critical )?(?:things|points|considerations|factors|aspects|ways|steps|tips)",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        1,
+        "listicle_opener",
+    ),
     # "PROACTIVE INSIGHT" labels (Lucy-specific)
-    (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), 2, "label"),
+    (
+        re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE),
+        2,
+        "label",
+    ),
 ]
 
 # ── LLM rewrite threshold ──────────────────────────────────────────
@@ -508,43 +610,75 @@ _REGEX_DEAI_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"—"), ", "),
     (re.compile(r" – "), "-"),
     (re.compile(r"–"), "-"),
-
     # Power words (strip them, surrounding context usually reads fine)
-    (re.compile(
-        r"\b(?:delve|tapestry|landscape(?:s)?|beacon|pivotal|"
-        r"testament|multifaceted|underpinning|underscores|"
-        r"palpable|enigmatic|plethora|myriad|paramount|"
-        r"groundbreaking|holistic|synergy|synergize|"
-        r"revolutionize|revolutionizing|elucidate|"
-        r"harnessing|spearheading|bolstering)\b",
-        re.IGNORECASE,
-    ), ""),
-
+    (
+        re.compile(
+            r"\b(?:delve|tapestry|landscape(?:s)?|beacon|pivotal|"
+            r"testament|multifaceted|underpinning|underscores|"
+            r"palpable|enigmatic|plethora|myriad|paramount|"
+            r"groundbreaking|holistic|synergy|synergize|"
+            r"revolutionize|revolutionizing|elucidate|"
+            r"harnessing|spearheading|bolstering)\b",
+            re.IGNORECASE,
+        ),
+        "",
+    ),
     # Formal transitions (strip, usually beginning-of-sentence filler)
     (re.compile(r"\b(?:Moreover|Furthermore|Additionally|Notably),?\s*", re.IGNORECASE), ""),
-    (re.compile(r"(?:It's worth noting that|It is worth noting that|It bears mentioning that)\s*", re.IGNORECASE), ""),
-    (re.compile(r"(?:It's important to note that|It is important to note that)\s*", re.IGNORECASE), ""),
-
+    (
+        re.compile(
+            r"(?:It's worth noting that|It is worth noting that|It bears mentioning that)\s*",
+            re.IGNORECASE,
+        ),
+        "",
+    ),
+    (
+        re.compile(
+            r"(?:It's important to note that|It is important to note that)\s*", re.IGNORECASE
+        ),
+        "",
+    ),
     # Chatbot closers (match anywhere, not just end-of-string)
     (re.compile(r"\s*Hope (?:this|that) helps[!.]?\s*", re.IGNORECASE), " "),
-    (re.compile(r"\s*Let me know if you (?:need|have|want) (?:anything|any|more)(?:\s+else)?[!.]?\s*", re.IGNORECASE), " "),
-    (re.compile(r"\s*(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)[!.]?\s*", re.IGNORECASE), " "),
-    (re.compile(r"\s*Happy to (?:help|assist|answer|elaborate)(?:\s+(?:with that|with this|further))?[!.]?\s*", re.IGNORECASE), " "),
-
+    (
+        re.compile(
+            r"\s*Let me know if you (?:need|have|want) (?:anything|any|more)(?:\s+else)?[!.]?\s*",
+            re.IGNORECASE,
+        ),
+        " ",
+    ),
+    (
+        re.compile(
+            r"\s*(?:Feel free to|Don't hesitate to) (?:ask|reach out|let me know)[!.]?\s*",
+            re.IGNORECASE,
+        ),
+        " ",
+    ),
+    (
+        re.compile(
+            r"\s*Happy to (?:help|assist|answer|elaborate)(?:\s+(?:with that|with this|further))?[!.]?\s*",  # noqa: E501
+            re.IGNORECASE,
+        ),
+        " ",
+    ),
     # Sycophantic openers
-    (re.compile(
-        r"^(?:Absolutely|Certainly|Of course|Sure thing)[!.,]?\s*",
-        re.IGNORECASE | re.MULTILINE,
-    ), ""),
-    (re.compile(
-        r"(?:(?:That's|This is|What) an? )?(?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "
-        r"(?:question|point|observation|thought|idea)[!.,]?\s*",
-        re.IGNORECASE,
-    ), ""),
-
+    (
+        re.compile(
+            r"^(?:Absolutely|Certainly|Of course|Sure thing)[!.,]?\s*",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "",
+    ),
+    (
+        re.compile(
+            r"(?:(?:That's|This is|What) an? )?(?:great|excellent|wonderful|fantastic|interesting|insightful|thoughtful) "  # noqa: E501
+            r"(?:question|point|observation|thought|idea)[!.,]?\s*",
+            re.IGNORECASE,
+        ),
+        "",
+    ),
     # Lucy-specific labels
     (re.compile(r"\*?Proactive (?:Insight|Follow-?up|Suggestion)\*?:?\s*", re.IGNORECASE), ""),
-
     # Cleanup double spaces created by stripping
     (re.compile(r"  +"), " "),
     # Cleanup orphaned commas from stripped words
@@ -619,8 +753,7 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
 
         categories_found = sorted({cat for _, _, cat in tells})
         user_msg = (
-            f"Rewrite this text. Issues detected: {', '.join(categories_found)}\n\n"
-            f"---\n{text}\n---"
+            f"Rewrite this text. Issues detected: {', '.join(categories_found)}\n\n---\n{text}\n---"
         )
 
         response = await asyncio.wait_for(
@@ -629,7 +762,9 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
                 config=ChatConfig(
                     model=settings.model_tier_default,
                     system_prompt=_DEAI_SYSTEM_PROMPT,
-                    max_tokens=min(len(text) * _DEAI_MAX_TOKENS_MULTIPLIER, LLMPresets.DEAI_REWRITE.max_tokens),
+                    max_tokens=min(
+                        len(text) * _DEAI_MAX_TOKENS_MULTIPLIER, LLMPresets.DEAI_REWRITE.max_tokens
+                    ),
                     temperature=LLMPresets.DEAI_REWRITE.temperature,
                 ),
             ),
@@ -669,7 +804,7 @@ async def _llm_deai_rewrite(text: str, tells: list[tuple[str, int, str]]) -> str
         )
         return result
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.debug("deai_rewrite_timeout")
         return None
     except Exception as exc:
@@ -698,6 +833,7 @@ async def _deai(text: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════
+
 
 async def process_output(
     text: str | None,

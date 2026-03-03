@@ -37,9 +37,10 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 import structlog
 
@@ -76,12 +77,11 @@ class BackgroundTask:
 # TASK CLASSIFICATION — Should this be a background task?
 # ═══════════════════════════════════════════════════════════════════════════
 
-import re
+import re  # noqa: E402
 
 _HEAVY_COMPOUND_RE = re.compile(
     r"(?:"
-    r"comprehensive\s+(?:research|report|analysis|audit)"
-    r"|deep\s+dive"
+    r"deep\s+dive"
     r"|thorough\s+(?:analysis|investigation|review)"
     r"|(?:research|analyze|investigate).*(?:and|then|also|plus).*(?:create|write|build|generate)"
     r"|competitive\s+analysis"
@@ -230,7 +230,7 @@ class TaskManager:
                     elapsed_s=elapsed,
                 )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 task.state = TaskState.FAILED
                 elapsed_h = round(MAX_TASK_DURATION / 3600, 1)
                 task.error = f"Task hit {elapsed_h}h safety limit"

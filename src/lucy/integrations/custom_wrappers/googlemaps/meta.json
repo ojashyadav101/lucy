@@ -1,0 +1,19 @@
+{
+  "service_name": "Google Maps",
+  "slug": "googlemaps",
+  "auth_method": "api_key",
+  "env_var": "GOOGLEMAPS_API_KEY",
+  "tools": [
+    "googlemaps_geocode_address",
+    "googlemaps_reverse_geocode_coordinates",
+    "googlemaps_reverse_geocode_place_id"
+  ],
+  "total_tools": 3,
+  "api_docs": "https://developers.google.com/maps/documentation/geocoding/overview",
+  "api_base_url": "https://maps.googleapis.com/",
+  "sdk_package": "google-maps-services-python",
+  "endpoint_categories": [
+    "Geocoding"
+  ],
+  "created_at": "2026-03-03T03:09:07Z"
+}

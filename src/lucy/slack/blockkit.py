@@ -11,7 +11,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 _HEADER_RE = re.compile(r"^\*([^*]+)\*$")
 _BULLET_RE = re.compile(r"^[\u2022\-\*]\s+")
 _DIVIDER_RE = re.compile(r"^-{3,}$")

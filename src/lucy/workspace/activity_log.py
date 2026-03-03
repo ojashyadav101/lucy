@@ -6,7 +6,7 @@ crons (heartbeat, monitors) can read what Lucy did recently.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
 
@@ -17,7 +17,7 @@ logger = structlog.get_logger()
 
 async def log_activity(ws: WorkspaceFS, message: str) -> None:
     """Append a timestamped entry to today's log file."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S UTC")
     log_path = f"logs/{date_str}.md"
@@ -33,7 +33,7 @@ async def log_activity(ws: WorkspaceFS, message: str) -> None:
 
 async def get_recent_activity(ws: WorkspaceFS, days: int = 1) -> str:
     """Read the most recent activity log(s)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     lines: list[str] = []
 
     for offset in range(days):

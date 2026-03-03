@@ -7,6 +7,6 @@ Exports:
 """
 
 from lucy.db.models import Base
-from lucy.db.session import AsyncSessionLocal, get_db, db_session
+from lucy.db.session import AsyncSessionLocal, db_session, get_db
 
 __all__ = ["Base", "AsyncSessionLocal", "get_db", "db_session"]

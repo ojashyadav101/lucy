@@ -16,9 +16,7 @@ Each line: [HH:MM:SS] <USER_ID> message text
 from __future__ import annotations
 
 import re
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -28,7 +26,7 @@ from lucy.workspace.filesystem import WorkspaceFS
 logger = structlog.get_logger()
 
 _LOG_LINE_RE = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s+<([^>]+)>\s+(.+)$")
-_QUESTION_RE = re.compile(r"\?$|^(what|how|when|where|why|who|can|could|should|is|are|do|does|did|will|would)\b", re.IGNORECASE)
+_QUESTION_RE = re.compile(r"\?$|^(what|how|when|where|why|who|can|could|should|is|are|do|does|did|will|would)\b", re.IGNORECASE)  # noqa: E501
 _MAX_CHARS_PER_CHANNEL = 3000
 _MAX_TOTAL_CHARS = 12000
 
@@ -78,10 +76,10 @@ async def get_new_slack_messages(
         return "No Slack history available yet. Messages are synced every 10 minutes."
 
     if since is None:
-        since = datetime.now(timezone.utc) - timedelta(hours=4)
+        since = datetime.now(UTC) - timedelta(hours=4)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
     since_time_str = since.strftime("%H:%M:%S")
     since_date_str = since.strftime("%Y-%m-%d")
 
@@ -145,17 +143,17 @@ async def get_new_slack_messages(
                 for thread_file in sorted(threads_dir.glob("*.md"), reverse=True)[:5]:
                     try:
                         ts_float = float(thread_file.stem)
-                        thread_dt = datetime.fromtimestamp(ts_float, tz=timezone.utc)
+                        thread_dt = datetime.fromtimestamp(ts_float, tz=UTC)
                         if thread_dt < since:
                             continue
                         content = thread_file.read_text(encoding="utf-8")
-                        thread_lines = [l for l in content.splitlines() if l.strip()]
+                        thread_lines = [ln for ln in content.splitlines() if ln.strip()]
                         if thread_lines:
                             thread_snippets.append(
                                 f"  [thread {thread_file.stem}]:"
                                 + " | ".join(
-                                    (parsed[2][:60] if (parsed := _parse_log_line(l)) else l[:60])
-                                    for l in thread_lines[-3:]
+                                    (parsed[2][:60] if (parsed := _parse_log_line(ln)) else ln[:60])
+                                    for ln in thread_lines[-3:]
                                 )
                             )
                     except (ValueError, OSError, UnicodeDecodeError):
@@ -194,12 +192,6 @@ async def get_last_heartbeat_time(ws: WorkspaceFS) -> datetime | None:
 
     # Log format: ## 2026-02-28T18:30:00+00:00 (elapsed: 12340ms, status: delivered)
     # or:         ## 2026-02-28T18:30:00+00:00 (elapsed: 1240ms, status: skipped)
-    ts_pattern = re.compile(
-        r"^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+\-]\d{2}:\d{2})",
-        re.MULTILINE,
-    )
-    matches = ts_pattern.findall(log_content)
-
     # Walk backwards to find the most recent non-FAILED run
     for line in reversed(log_content.splitlines()):
         m = re.match(r"^## (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+\-\d:]+)", line)
@@ -232,9 +224,9 @@ async def get_channel_summary(
     if not logs_dir.is_dir():
         return "No Slack history available."
 
-    since = datetime.now(timezone.utc) - timedelta(hours=hours_back)
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    since = datetime.now(UTC) - timedelta(hours=hours_back)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
     since_time_str = since.strftime("%H:%M:%S")
     since_date_str = since.strftime("%Y-%m-%d")
 
@@ -313,7 +305,7 @@ async def get_unanswered_questions(
         return []
 
     bot_ids = set(bot_user_ids or [])
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(hours=hours_back)
     today = now.strftime("%Y-%m-%d")
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -344,7 +336,7 @@ async def get_unanswered_questions(
                 time_str, user, text = parsed
                 msg_dt = datetime.strptime(
                     f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=timezone.utc)
+                ).replace(tzinfo=UTC)
                 if msg_dt < since:
                     continue
                 all_msgs.append((date_str, time_str, user, text))
@@ -359,7 +351,7 @@ async def get_unanswered_questions(
 
             msg_dt = datetime.strptime(
                 f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+            ).replace(tzinfo=UTC)
 
             # Check if any message followed this one within 2 hours
             answered = False
@@ -367,7 +359,7 @@ async def get_unanswered_questions(
                 next_date, next_time, _, _ = all_msgs[j]
                 next_dt = datetime.strptime(
                     f"{next_date} {next_time}", "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=timezone.utc)
+                ).replace(tzinfo=UTC)
                 if (next_dt - msg_dt).total_seconds() > 7200:
                     break
                 answered = True

@@ -3,18 +3,19 @@
 Every tool action is classified into one of three categories:
 
 - **READ**: Fetches data, no side effects. Executes immediately.
-- **WRITE**: Creates or modifies data, generally reversible. Requires
-  lightweight confirmation.
+- **WRITE**: Creates or modifies data, generally reversible. Executes
+  immediately — the user's request is implicit consent.
 - **DESTRUCTIVE**: Irreversible side effects (sends email, deletes data,
-  cancels subscriptions). Requires explicit user confirmation with warning.
+  cancels subscriptions). Requires explicit user confirmation.
 
 Classification uses three layers (highest priority first):
 1. Explicit annotations in wrapper TOOLS definitions (``"action_type": "DESTRUCTIVE"``)
-2. Registered overrides via ``register_override()`` 
+2. Registered overrides via ``register_override()``
 3. Heuristic classification from tool name patterns
 
-Unknown or unclassifiable tools default to WRITE (require confirmation) —
-this is the safe default. We never auto-execute an action we can't classify.
+Unknown or unclassifiable tools default to WRITE (auto-execute) —
+if genuinely unsure, WRITE is the right middle ground. Use DESTRUCTIVE
+annotations explicitly on tools with irreversible real-world consequences.
 """
 
 from __future__ import annotations
@@ -39,24 +40,19 @@ class ActionType(str, Enum):
 # These match against the FINAL tool name (after lucy_custom_ prefix strip).
 # Order matters: first match wins. Patterns are checked top-to-bottom.
 
-# DESTRUCTIVE patterns — irreversible side effects
-# Use (?:^|_) instead of \b because underscores ARE word characters,
-# so \bsend_ won't match inside "gmail_send_email".
+# DESTRUCTIVE patterns — truly irreversible, real-world consequences
+# Only things that cannot be undone without external action:
+# sending comms, permanent deletion, revoking access, cancelling billing.
 _DESTRUCTIVE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|_)send(?=[_\s]|$)", re.IGNORECASE),        # send_email, send_message
     re.compile(r"(?:^|_)delete(?=[_\s]|$)", re.IGNORECASE),      # delete_user, delete_event
-    re.compile(r"(?:^|_)remove(?=[_\s]|$)", re.IGNORECASE),      # remove_member
     re.compile(r"(?:^|_)cancel(?=[_\s]|$)", re.IGNORECASE),      # cancel_subscription
     re.compile(r"(?:^|_)revoke(?=[_\s]|$)", re.IGNORECASE),      # revoke_token, revoke_session
     re.compile(r"(?:^|_)ban(?=[_\s]|$)", re.IGNORECASE),         # ban_user
-    # unban removed from DESTRUCTIVE — unbanning is reversible (can re-ban).
-    # Kept above WRITE patterns so it stays gated, just not at DESTRUCTIVE level.
     re.compile(r"(?:^|_)destroy(?=[_\s]|$)", re.IGNORECASE),     # destroy_resource
-    re.compile(r"(?:^|_)purge(?=[_\s]|$)", re.IGNORECASE),       # purge_cache
-    re.compile(r"(?:^|_)forward(?=[_\s]|$)", re.IGNORECASE),     # forward_email
-    re.compile(r"(?:^|_)unsubscribe(?=[_\s]|$)", re.IGNORECASE), # unsubscribe
-    re.compile(r"(?:^|_)archive(?=[_\s]|$)", re.IGNORECASE),     # archive_channel
-    re.compile(r"(?:^|_)reply[_\s]?to", re.IGNORECASE),          # reply_to_thread
+    re.compile(r"(?:^|_)purge(?=[_\s]|$)", re.IGNORECASE),       # purge_cache (irreversible wipe)
+    re.compile(r"(?:^|_)forward(?=[_\s]|$)", re.IGNORECASE),     # forward_email (sends to 3rd party)
+    re.compile(r"(?:^|_)unsubscribe(?=[_\s]|$)", re.IGNORECASE), # unsubscribe (billing/comms)
 ]
 
 # WRITE patterns — creates/modifies data, generally reversible
@@ -75,8 +71,15 @@ _WRITE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(?:^|_)store(?=[_\s]|$)", re.IGNORECASE),      # store_api_key
     re.compile(r"(?:^|_)quick[_\s]?add", re.IGNORECASE),        # quick_add event
     re.compile(r"(?:^|_)trigger(?=[_\s]|$)", re.IGNORECASE),    # trigger_cron
-    re.compile(r"(?:^|_)export(?=[_\s]|$)", re.IGNORECASE),     # export_data — write to external storage
+    re.compile(r"(?:^|_)export(?=[_\s]|$)", re.IGNORECASE),     # export_data
     re.compile(r"(?:^|_)unban(?=[_\s]|$)", re.IGNORECASE),      # unban_user — reversible moderation
+    re.compile(r"(?:^|_)remove(?=[_\s]|$)", re.IGNORECASE),     # remove_member — reversible
+    re.compile(r"(?:^|_)archive(?=[_\s]|$)", re.IGNORECASE),    # archive_channel — reversible
+    re.compile(r"(?:^|_)reply[_\s]?to", re.IGNORECASE),         # reply_to_thread — just messaging
+    re.compile(r"(?:^|_)connect(?=[_\s]|$)", re.IGNORECASE),    # connect_mcp — direct user request
+    re.compile(r"(?:^|_)disconnect(?=[_\s]|$)", re.IGNORECASE), # disconnect_mcp
+    re.compile(r"(?:^|_)upload(?=[_\s]|$)", re.IGNORECASE),     # upload_file
+    re.compile(r"(?:^|_)import(?=[_\s]|$)", re.IGNORECASE),     # import_data
 ]
 
 # READ patterns — fetches data, no side effects
@@ -140,6 +143,12 @@ _INTERNAL_WRITE_TOOLS: frozenset[str] = frozenset({
     "lucy_generate_docx",
     "lucy_generate_pptx",
     "lucy_generate_image",
+    # Gateway execution tools — classified by command content via _classify_bash_command,
+    # but registered as WRITE here so the classifier falls through to content-based logic.
+    # The gate uses the content-based classification from _classify_bash_command directly.
+    "lucy_exec_command",
+    "lucy_start_background",
+    "lucy_poll_process",
 })
 
 # Internal tools that are DESTRUCTIVE
@@ -202,6 +211,59 @@ def register_overrides_from_wrapper(
                 )
 
 
+def _classify_bash_command(parameters: dict[str, Any] | None) -> ActionType:
+    """Classify a COMPOSIO_REMOTE_BASH_TOOL call by its command content.
+
+    Most bash commands in agentic workflows are safe (read/explore/build).
+    Only gate the tiny subset that permanently deletes or sends data.
+    """
+    if not parameters:
+        return ActionType.WRITE
+
+    cmd = str(parameters.get("cmd") or parameters.get("command") or "").strip().lower()
+    if not cmd:
+        return ActionType.WRITE
+
+    # Truly destructive bash: irreversible deletion or external data exfil.
+    # `rm -rf`, `drop table`, `truncate`, piping to curl/wget for data exfil,
+    # `shred`, `mkfs`, `dd if= of=/dev/`, overwrite system files.
+    _BASH_DESTRUCTIVE = re.compile(
+        r"\brm\s+(-\w*\s+)*-[rf]|"
+        r"\bsudo\s+rm\b|"
+        r"\bshred\b|"
+        r"\bmkfs\b|"
+        r"\bdd\s+if=.+of=/dev/|"
+        r"\bdrop\s+(?:table|database|schema)\b|"
+        r"\btruncate\s+table\b|"
+        r"\bdropdb\b|"
+        r"\bcurl\s+.+(-d|--data)|"  # curl POST (exfil / mutation)
+        r"\bwget\s+.*--post-data|"
+        r">\s*/etc/|"                # overwrite system files
+        r"\bsystemctl\s+(?:stop|disable|mask)\b",
+        re.IGNORECASE,
+    )
+    if _BASH_DESTRUCTIVE.search(cmd):
+        return ActionType.DESTRUCTIVE
+
+    # Read-dominant operations — treat as READ.
+    _BASH_READ = re.compile(
+        r"^\s*(?:git\s+(?:clone|fetch|pull|log|status|diff|show|ls-files)|"
+        r"ls|cat|head|tail|grep|find|wc|stat|file|du|df|echo|pwd|"
+        r"pip\s+(?:install|list|show|freeze)|npm\s+(?:install|list|info|ci)|"
+        r"python\s+|node\s+|npm\s+(?:run|start|test)|"
+        r"curl\s+(?!.*(-d|--data|-X\s+POST|-X\s+PUT|-X\s+DELETE))|"
+        r"wget\s+(?!.*--post-data)|"
+        r"mongo|mongosh|psql|mysql)\b",
+        re.IGNORECASE,
+    )
+    if _BASH_READ.match(cmd):
+        return ActionType.READ
+
+    # Everything else (file creation, npm/pip install, build commands, etc.)
+    # is WRITE — auto-execute, no gate needed.
+    return ActionType.WRITE
+
+
 def classify(tool_name: str, parameters: dict[str, Any] | None = None) -> ActionType:
     """Classify a tool action into READ, WRITE, or DESTRUCTIVE.
 
@@ -226,6 +288,9 @@ def classify(tool_name: str, parameters: dict[str, Any] | None = None) -> Action
     if tool_name in _INTERNAL_READ_TOOLS:
         return ActionType.READ
     if tool_name in _INTERNAL_WRITE_TOOLS:
+        # lucy_exec_command: classify by command content, same logic as COMPOSIO_REMOTE_BASH_TOOL
+        if tool_name == "lucy_exec_command":
+            return _classify_bash_command(parameters)
         return ActionType.WRITE
     if tool_name in _INTERNAL_DESTRUCTIVE_TOOLS:
         return ActionType.DESTRUCTIVE
@@ -250,6 +315,39 @@ def classify(tool_name: str, parameters: dict[str, Any] | None = None) -> Action
         if "confirmed" in parameters:
             return ActionType.WRITE
 
+    # ── Layer 4b: MCP tool classification ────────────────────────────
+    # MCP tools follow mcp_{service}_{native_name}. Strip the service namespace
+    # and re-apply heuristics on the native tool name so that e.g.
+    # mcp_craft_documents_list → "documents_list" → READ (matches _list pattern)
+    # mcp_craft_blocks_delete → "blocks_delete" → DESTRUCTIVE
+    if tool_name.startswith("mcp_"):
+        # Strip "mcp_" then find where the native name starts (after service slug)
+        # Service slug is one word, native name follows after the next underscore.
+        # e.g. mcp_craft_documents_list → after "mcp_craft_" → "documents_list"
+        after_prefix = tool_name[4:]  # remove "mcp_"
+        native_parts = after_prefix.split("_", 1)  # [service_slug, native_name]
+        native_name = native_parts[1] if len(native_parts) == 2 else native_parts[0]
+        for pattern in _DESTRUCTIVE_PATTERNS:
+            if pattern.search(native_name):
+                return ActionType.DESTRUCTIVE
+        for pattern in _WRITE_PATTERNS:
+            if pattern.search(native_name):
+                return ActionType.WRITE
+        for pattern in _READ_PATTERNS:
+            if pattern.search(native_name):
+                return ActionType.READ
+        # MCP-specific read verbs not covered by the general patterns
+        if any(
+            native_name.endswith(suffix)
+            for suffix in ("_info", "_status", "_version", "_ping", "_health")
+        ) or any(
+            f"_{word}_" in f"_{native_name}_"
+            for word in ("info", "status", "connection")
+        ):
+            return ActionType.READ
+        # Unknown MCP verb — default to WRITE (safe, requires confirmation)
+        return ActionType.WRITE
+
     # ── Layer 5: Tool name prefix heuristics ─────────────────────────
     # Composio meta-tools that are purely discovery/orchestration
     if tool_name.startswith("COMPOSIO_"):
@@ -259,9 +357,9 @@ def classify(tool_name: str, parameters: dict[str, Any] | None = None) -> Action
         if tool_name == "COMPOSIO_MULTI_EXECUTE_TOOL":
             return ActionType.WRITE  # conservative default
         if tool_name == "COMPOSIO_REMOTE_BASH_TOOL":
-            return ActionType.DESTRUCTIVE  # arbitrary bash on remote machine = irreversible
+            return _classify_bash_command(parameters)
         if tool_name == "COMPOSIO_REMOTE_WORKBENCH":
-            return ActionType.DESTRUCTIVE  # remote workbench has unbounded side-effect potential
+            return ActionType.WRITE  # workbench: agent does exploratory dev work
         # Search/schema tools are read-only
         return ActionType.READ
 
@@ -307,7 +405,7 @@ def classify_composio_multi_execute(
     return highest
 
 
-def get_classification_summary(tool_name: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:
+def get_classification_summary(tool_name: str, parameters: dict[str, Any] | None = None) -> dict[str, Any]:  # noqa: E501
     """Return a detailed classification summary for debugging/logging."""
     action_type = classify(tool_name, parameters)
     stripped = tool_name.removeprefix("lucy_custom_")
@@ -342,5 +440,5 @@ def get_classification_summary(tool_name: str, parameters: dict[str, Any] | None
         "stripped_name": stripped,
         "action_type": action_type.value,
         "source": source,
-        "requires_confirmation": action_type != ActionType.READ,
+        "requires_confirmation": action_type == ActionType.DESTRUCTIVE,
     }

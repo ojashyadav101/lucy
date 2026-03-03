@@ -18,7 +18,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 import structlog
 
@@ -32,27 +31,29 @@ logger = structlog.get_logger()
 
 class ResponseType(str, Enum):
     """Classification of what kind of response this is."""
-    DATA_REPORT = "data_report"       # Numbers, metrics, lists of records
-    DATA_LOOKUP = "data_lookup"       # Single data point fetch
-    ANALYSIS = "analysis"             # Already contains interpretation
-    ACTION_CONFIRM = "action_confirm" # Confirmation of an action taken
-    EXPLANATION = "explanation"        # Educational / how-to content
-    CASUAL = "casual"                 # Greetings, small talk
-    ERROR = "error"                   # Error or "can't do" response
+
+    DATA_REPORT = "data_report"  # Numbers, metrics, lists of records
+    DATA_LOOKUP = "data_lookup"  # Single data point fetch
+    ANALYSIS = "analysis"  # Already contains interpretation
+    ACTION_CONFIRM = "action_confirm"  # Confirmation of an action taken
+    EXPLANATION = "explanation"  # Educational / how-to content
+    CASUAL = "casual"  # Greetings, small talk
+    ERROR = "error"  # Error or "can't do" response
     UNKNOWN = "unknown"
 
 
 @dataclass
 class DepthAssessment:
     """Result of assessing a response's analytical depth."""
+
     response_type: ResponseType
-    depth_score: int              # 1-10: 1=raw dump, 10=deep analysis
-    has_data: bool                # Contains numbers, metrics, or records
-    has_interpretation: bool      # Contains "what this means" analysis
-    has_comparison: bool          # Contains period-over-period or benchmark comparison
-    has_recommendations: bool     # Contains actionable next steps
-    has_anomaly_flags: bool       # Flags outliers or unusual patterns
-    is_shallow: bool              # True if this should be deeper
+    depth_score: int  # 1-10: 1=raw dump, 10=deep analysis
+    has_data: bool  # Contains numbers, metrics, or records
+    has_interpretation: bool  # Contains "what this means" analysis
+    has_comparison: bool  # Contains period-over-period or benchmark comparison
+    has_recommendations: bool  # Contains actionable next steps
+    has_anomaly_flags: bool  # Flags outliers or unusual patterns
+    is_shallow: bool  # True if this should be deeper
     missing_layers: list[str] = field(default_factory=list)
     enrichment_instructions: str = ""
 
@@ -63,12 +64,18 @@ class DepthAssessment:
 
 # Signals that the response contains data/numbers
 _DATA_PATTERNS = [
-    re.compile(r"\b\d{1,3}(?:,\d{3})+\b"),              # formatted numbers: 1,234
-    re.compile(r"\$[\d,.]+[KkMmBb]?"),                   # currency: $42,350 or $42K
-    re.compile(r"\b\d+(?:\.\d+)?%"),                     # percentages: 8.2%
-    re.compile(r"\b\d+\s*(?:users?|customers?|subscribers?|records?|items?|rows?|entries|accounts?)\b", re.I),
+    re.compile(r"\b\d{1,3}(?:,\d{3})+\b"),  # formatted numbers: 1,234
+    re.compile(r"\$[\d,.]+[KkMmBb]?"),  # currency: $42,350 or $42K
+    re.compile(r"\b\d+(?:\.\d+)?%"),  # percentages: 8.2%
+    re.compile(
+        r"\b\d+\s*(?:users?|customers?|subscribers?|records?|items?|rows?|entries|accounts?)\b",
+        re.I,
+    ),
     re.compile(r"\b(?:MRR|ARR|LTV|CAC|NPS|DAU|MAU|WAU|ARPU|GMV|AOV|CVR)\b"),
-    re.compile(r"\b(?:revenue|churn|growth|conversion|retention|signup)\s*(?:rate|ratio)?\s*(?:is|was|:)\s", re.I),
+    re.compile(
+        r"\b(?:revenue|churn|growth|conversion|retention|signup)\s*(?:rate|ratio)?\s*(?:is|was|:)\s",  # noqa: E501
+        re.I,
+    ),
     re.compile(r"(?:total|count|sum|average|median|mean)\s*(?:of|:)\s*\d", re.I),
 ]
 
@@ -77,8 +84,13 @@ _INTERPRETATION_PATTERNS = [
     re.compile(r"\b(?:this (?:means|suggests|indicates|shows|implies)|what this means)\b", re.I),
     re.compile(r"\b(?:trend|pattern|shift|spike|dip|drop|surge|plateau|decline|growth)\b", re.I),
     re.compile(r"\b(?:because|driven by|likely due to|caused by|attributed to|correlat)\b", re.I),
-    re.compile(r"\b(?:worth (?:noting|flagging|watching)|interesting(?:ly)?|notable|noteworthy)\b", re.I),
-    re.compile(r"\b(?:compared to|vs\.?|versus|relative to|period-over-period|month-over-month|year-over-year|MoM|YoY|WoW)\b", re.I),
+    re.compile(
+        r"\b(?:worth (?:noting|flagging|watching)|interesting(?:ly)?|notable|noteworthy)\b", re.I
+    ),
+    re.compile(
+        r"\b(?:compared to|vs\.?|versus|relative to|period-over-period|month-over-month|year-over-year|MoM|YoY|WoW)\b",  # noqa: E501
+        re.I,
+    ),
     re.compile(r"\b(?:insight|takeaway|finding|observation)\b", re.I),
     re.compile(r"\b(?:up|down|increased|decreased|grew|fell|rose|dropped)\s+(?:by\s+)?\d", re.I),
 ]
@@ -89,12 +101,15 @@ _COMPARISON_PATTERNS = [
     re.compile(r"\b(?:from|up from|down from|compared to|vs\.?)\s+[\$\d]", re.I),
     re.compile(r"\b(?:benchmark|baseline|target|goal|average|industry)\b", re.I),
     re.compile(r"\b(?:higher|lower|better|worse|above|below)\s+(?:than|average)\b", re.I),
-    re.compile(r"[+\-]\d+(?:\.\d+)?%"),                  # +8.2% or -3.1%
+    re.compile(r"[+\-]\d+(?:\.\d+)?%"),  # +8.2% or -3.1%
 ]
 
 # Signals that the response includes actionable recommendations
 _RECOMMENDATION_PATTERNS = [
-    re.compile(r"\b(?:recommend|suggest|consider|should|could|might want to|worth (?:trying|exploring|considering))\b", re.I),
+    re.compile(
+        r"\b(?:recommend|suggest|consider|should|could|might want to|worth (?:trying|exploring|considering))\b",  # noqa: E501
+        re.I,
+    ),
     re.compile(r"\b(?:next step|action item|to-do|follow[- ]?up|want me to)\b", re.I),
     re.compile(r"\b(?:set (?:this |it )?up as|automate|schedule|recurring|weekly report)\b", re.I),
     re.compile(r"\b(?:dig(?:ging)? deeper|look(?:ing)? into|investigate|monitor)\b", re.I),
@@ -112,7 +127,10 @@ _ANOMALY_PATTERNS = [
 
 # Patterns that indicate a "data dump" — lots of data with no analysis
 _DATA_DUMP_PATTERNS = [
-    re.compile(r"(?:here (?:is|are)|here's) (?:the|your|a)\s+(?:data|list|report|breakdown|summary|export|results?)", re.I),
+    re.compile(
+        r"(?:here (?:is|are)|here's) (?:the|your|a)\s+(?:data|list|report|breakdown|summary|export|results?)",  # noqa: E501
+        re.I,
+    ),
     re.compile(r"(?:^|\n)\s*•\s*\*?\w[^:]*\*?:\s*[\$\d]", re.MULTILINE),  # bullet-point data lists
 ]
 
@@ -123,7 +141,10 @@ _ANALYSIS_INTENT_PATTERNS = [
     re.compile(r"\b(?:what (?:happened|changed|shifted)|why (?:did|is|are))\b", re.I),
     re.compile(r"\b(?:compare|comparison|vs|versus)\b", re.I),
     re.compile(r"\b(?:report|overview|summary|status|update|check)\b", re.I),
-    re.compile(r"\b(?:pull|show|get|fetch)\s+(?:my|our|the)\s+(?:\w+\s+)?(?:data|metrics|numbers|stats)\b", re.I),
+    re.compile(
+        r"\b(?:pull|show|get|fetch)\s+(?:my|our|the)\s+(?:\w+\s+)?(?:data|metrics|numbers|stats)\b",
+        re.I,
+    ),
 ]
 
 
@@ -148,16 +169,31 @@ def classify_response_type(
 
     # Error / can't-do responses
     error_signals = [
-        "i can't", "i couldn't", "i wasn't able", "not connected",
-        "need access", "connect it here", "error", "failed",
+        "i can't",
+        "i couldn't",
+        "i wasn't able",
+        "not connected",
+        "need access",
+        "connect it here",
+        "error",
+        "failed",
     ]
     if any(s in resp_lower for s in error_signals) and len(response_text) < 400:
         return ResponseType.ERROR
 
     # Action confirmations (short responses after doing something)
     action_signals = [
-        "done", "created", "sent", "scheduled", "updated", "deleted",
-        "saved", "uploaded", "deployed", "set up", "✅",
+        "done",
+        "created",
+        "sent",
+        "scheduled",
+        "updated",
+        "deleted",
+        "saved",
+        "uploaded",
+        "deployed",
+        "set up",
+        "✅",
     ]
     is_action = any(s in resp_lower for s in action_signals)
     command_words = ["send", "create", "schedule", "delete", "set", "update", "deploy"]
@@ -293,14 +329,13 @@ def assess_depth(
 
     # Determine if this response should be deeper
     is_shallow = (
-        response_type in (ResponseType.DATA_REPORT, ResponseType.DATA_LOOKUP)
-        and len(missing_layers) >= 2
-    ) or (
-        user_wants_analysis and score <= 5
-    ) or (
-        is_data_dump
-    ) or (
-        tool_calls_count >= 3 and score <= 4
+        (
+            response_type in (ResponseType.DATA_REPORT, ResponseType.DATA_LOOKUP)
+            and len(missing_layers) >= 2
+        )
+        or (user_wants_analysis and score <= 5)
+        or (is_data_dump)
+        or (tool_calls_count >= 3 and score <= 4)
     )
 
     # Generate enrichment instructions

@@ -11,7 +11,6 @@ this module uses direct HTTP calls to the Composio web API.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import httpx
 import structlog
@@ -215,9 +214,8 @@ def _map_auth_scheme(auth_method: str) -> str:
 
 def _spec_url_variants(original_url: str, service_name: str) -> list[str]:
     """Generate common URL variants for OpenAPI specs."""
+    _ = service_name  # reserved for future slug-based patterns
     variants = [original_url]
-
-    slug = service_name.lower().replace(" ", "").replace(".", "").replace("-", "")
 
     from urllib.parse import urlparse
     parsed = urlparse(original_url)

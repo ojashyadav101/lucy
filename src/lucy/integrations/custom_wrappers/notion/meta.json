@@ -1,0 +1,23 @@
+{
+  "service_name": "Notion",
+  "slug": "notion",
+  "auth_method": "oauth2",
+  "env_var": "NOTION_API_KEY",
+  "tools": [
+    "notion_create_page",
+    "notion_list_users",
+    "notion_query_database",
+    "notion_append_block_children"
+  ],
+  "total_tools": 4,
+  "api_docs": "https://developers.notion.com/docs",
+  "api_base_url": "https://api.notion.com",
+  "sdk_package": "@notionhq/client",
+  "endpoint_categories": [
+    "Pages",
+    "Users",
+    "Databases",
+    "Blocks"
+  ],
+  "created_at": "2026-03-03T03:20:10Z"
+}

@@ -9,7 +9,7 @@ Example categories: "revenue", "signups", "channel-stats", "linear-issues".
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -36,7 +36,7 @@ async def save_snapshot(
     Returns:
         The relative path of the saved file.
     """
-    date = date or datetime.now(timezone.utc)
+    date = date or datetime.now(UTC)
     date_str = date.strftime("%Y-%m-%d")
     path = f"data/{category}/{date_str}.json"
 
@@ -119,7 +119,7 @@ async def compute_delta(
     Returns:
         {current, previous, delta, pct_change} or None if data is missing.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     current = await load_snapshot(ws, category, now)
     previous = await load_snapshot(
         ws, category, now - timedelta(days=days_back)

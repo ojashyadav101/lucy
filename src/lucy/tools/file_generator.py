@@ -20,7 +20,6 @@ Dependencies (add to pyproject.toml):
 from __future__ import annotations
 
 import csv
-import io
 import json
 import tempfile
 from pathlib import Path
@@ -137,7 +136,7 @@ async def generate_excel(
     """
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.styles import Border, Font, PatternFill, Side
     except ImportError:
         raise RuntimeError(
             "openpyxl not installed. Add to pyproject.toml: "
@@ -363,7 +362,7 @@ def get_file_tool_definitions() -> list[dict[str, Any]]:
                         },
                         "old_string": {
                             "type": "string",
-                            "description": "The exact block of text to replace. Must include enough context to be unique.",
+                            "description": "The exact block of text to replace. Must include enough context to be unique.",  # noqa: E501
                         },
                         "new_string": {
                             "type": "string",
@@ -660,7 +659,7 @@ async def execute_file_tool(
 
             if not p.exists():
                 return {"error": f"File not found: {path_str}"}
-                
+
             file_content = p.read_text(encoding="utf-8")
             if old_string not in file_content:
                 return {
@@ -671,7 +670,7 @@ async def execute_file_tool(
                         "of the block."
                     )
                 }
-                
+
             if file_content.count(old_string) > 1:
                 return {
                     "error": (
@@ -680,14 +679,14 @@ async def execute_file_tool(
                         "to make the replacement block unique."
                     )
                 }
-                
+
             new_content = file_content.replace(old_string, new_string)
             p.write_text(new_content, encoding="utf-8")
             return {
-                "result": f"Successfully edited {path_str} (replaced {len(old_string)} chars with {len(new_string)} chars)",
+                "result": f"Successfully edited {path_str} (replaced {len(old_string)} chars with {len(new_string)} chars)",  # noqa: E501
                 "file_path": str(path_str),
             }
-            
+
         elif tool_name == "lucy_generate_pdf":
             content_html = parameters.get("content_html", "")
             if len(content_html.strip()) < 200:

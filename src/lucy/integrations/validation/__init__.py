@@ -12,15 +12,15 @@ before they reach users.  Import the top-level functions from here:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
 from .runtime_validator import (
     RuntimeValidationResult,
-    validate_all_wrappers,
     validate_wrapper_runtime,
 )
 from .schema_validator import SchemaValidationResult, validate_tool_definitions

@@ -293,7 +293,7 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
         validation_warnings: list[str] = []
 
         try:
-            from lucy.integrations.validation import validate_wrapper, WrapperHealth
+            from lucy.integrations.validation import WrapperHealth, validate_wrapper
 
             health: WrapperHealth = validate_wrapper(
                 slug=slug,
@@ -353,7 +353,7 @@ def load_custom_wrapper_tools() -> list[dict[str, Any]]:
 
             prefixed_name = f"lucy_custom_{original_name}"
             raw_desc = tool.get("description", f"{original_name} from {service_name}")
-            description = f"{raw_desc} (Call this tool directly — do NOT use COMPOSIO_MULTI_EXECUTE_TOOL for this.)"
+            description = f"{raw_desc} (Call this tool directly — do NOT use COMPOSIO_MULTI_EXECUTE_TOOL for this.)"  # noqa: E501
             parameters = tool.get("parameters", {"type": "object", "properties": {}})
 
             tool_defs.append({

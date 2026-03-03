@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,7 @@ class WorkspaceFS:
                 "state.json",
                 json.dumps(
                     {
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": datetime.now(UTC).isoformat(),
                         "workspace_id": self.workspace_id,
                     },
                     indent=2,
@@ -79,7 +79,7 @@ class WorkspaceFS:
         path = self._resolve(relative_path)
         if not path.is_file():
             return None
-        async with aiofiles.open(path, mode="r", encoding="utf-8") as f:
+        async with aiofiles.open(path, encoding="utf-8") as f:
             return await f.read()
 
     async def write_file(self, relative_path: str, content: str) -> Path:
@@ -112,8 +112,8 @@ class WorkspaceFS:
         if not path.is_file():
             return None
 
-        from datetime import datetime as _dt, timezone as _tz
-        ts = _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
+        from datetime import datetime as _dt
+        ts = _dt.now(UTC).strftime("%Y%m%d_%H%M%S")
         backup_dir = self.root / "data" / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
 
@@ -238,7 +238,7 @@ class WorkspaceFS:
         """Merge updates into state.json."""
         state = await self.read_state()
         state.update(updates)
-        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        state["updated_at"] = datetime.now(UTC).isoformat()
         await self.write_file("state.json", json.dumps(state, indent=2))
 
     def _resolve(self, relative_path: str) -> Path:

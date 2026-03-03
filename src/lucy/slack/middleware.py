@@ -6,16 +6,17 @@ Creates workspaces/users on first encounter (lazy onboarding).
 
 from __future__ import annotations
 
-from typing import Callable, Any
+from collections.abc import Callable
+from typing import Any
 from uuid import UUID
 
+import structlog
 from slack_bolt.request.async_request import AsyncBoltRequest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from lucy.db.models import Workspace, User, Channel
+from lucy.db.models import Channel, User, Workspace
 from lucy.db.session import AsyncSessionLocal
-import structlog
 
 logger = structlog.get_logger()
 
@@ -24,16 +25,16 @@ async def resolve_workspace_middleware(
     request: AsyncBoltRequest, context: Any, next: Callable[[], Any]
 ) -> None:
     """Resolve workspace_id from Slack team_id.
-    
+
     Creates workspace on first encounter (lazy onboarding).
     Attaches workspace_id to context.
     """
     team_id = request.body.get("team_id") if request.body else None
-    
+
     if not team_id:
         await next()
         return
-    
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Workspace).where(
@@ -42,7 +43,7 @@ async def resolve_workspace_middleware(
             )
         )
         workspace = result.scalar_one_or_none()
-        
+
         if workspace is None:
             team_name = f"Team {team_id}"
             domain = None
@@ -54,7 +55,7 @@ async def resolve_workspace_middleware(
                     domain = team_info.get("team", {}).get("domain")
             except Exception as e:
                 logger.warning("team_info_fetch_failed", error=str(e))
-            
+
             try:
                 workspace = Workspace(
                     slack_team_id=team_id,
@@ -72,10 +73,10 @@ async def resolve_workspace_middleware(
                     select(Workspace).where(Workspace.slack_team_id == team_id)
                 )
                 workspace = result2.scalar_one()
-        
+
         # Use dict-style context to avoid the setter restriction
         context["workspace_id"] = workspace.id
-    
+
     await next()
 
 
@@ -83,27 +84,27 @@ async def resolve_user_middleware(
     request: AsyncBoltRequest, context: Any, next: Callable[[], Any]
 ) -> None:
     """Resolve user_id from Slack user_id.
-    
+
     Creates user on first encounter. Attaches user_id to context.
     """
     slack_user_id = None
-    
+
     if request.body:
         slack_user_id = (
             request.body.get("event", {}).get("user")
             or request.body.get("user_id")
             or request.body.get("user", {}).get("id")
         )
-    
+
     if not slack_user_id or slack_user_id.startswith("B"):
         await next()
         return
-    
+
     workspace_id: UUID | None = context.get("workspace_id")
     if not workspace_id:
         await next()
         return
-    
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(User).where(
@@ -113,7 +114,7 @@ async def resolve_user_middleware(
             )
         )
         user = result.scalar_one_or_none()
-        
+
         if user is None:
             display_name = f"User {slack_user_id}"
             email = None
@@ -132,7 +133,7 @@ async def resolve_user_middleware(
                     avatar_url = profile.get("profile", {}).get("image_72")
             except Exception as e:
                 logger.warning("user_info_fetch_failed", error=str(e))
-            
+
             try:
                 user = User(
                     workspace_id=workspace_id,
@@ -154,17 +155,17 @@ async def resolve_user_middleware(
                     )
                 )
                 user = result2.scalar_one()
-        
+
         # Update last_seen_at without crashing if it errors
         try:
             user.touch()
             await db.commit()
         except Exception:
             await db.rollback()
-        
+
         context["user_id"] = user.id
         context["slack_user_id"] = slack_user_id  # Store Slack user ID for thread tracking
-    
+
     await next()
 
 
@@ -172,27 +173,27 @@ async def resolve_channel_middleware(
     request: AsyncBoltRequest, context: Any, next: Callable[[], Any]
 ) -> None:
     """Resolve channel from Slack channel_id.
-    
+
     Creates channel record on first encounter. Attaches channel_id to context.
     """
     slack_channel_id = None
-    
+
     if request.body:
         slack_channel_id = (
             request.body.get("event", {}).get("channel")
             or request.body.get("channel_id")
             or request.body.get("channel", {}).get("id")
         )
-    
+
     if not slack_channel_id:
         await next()
         return
-    
+
     workspace_id: UUID | None = context.get("workspace_id")
     if not workspace_id:
         await next()
         return
-    
+
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Channel).where(
@@ -202,7 +203,7 @@ async def resolve_channel_middleware(
             )
         )
         channel = result.scalar_one_or_none()
-        
+
         if channel is None:
             try:
                 channel = Channel(
@@ -224,7 +225,7 @@ async def resolve_channel_middleware(
                     )
                 )
                 channel = result2.scalar_one()
-        
+
         context["channel_id"] = channel.id
-    
+
     await next()

@@ -105,7 +105,7 @@ def register_handlers(app: AsyncApp) -> None:
         except Exception as exc:
             logger.debug("hitl_expiry_notify_failed", error=str(exc))
 
-    from lucy.slack.hitl import register_expiry_callback, PENDING_TTL_SECONDS
+    from lucy.slack.hitl import PENDING_TTL_SECONDS, register_expiry_callback
     register_expiry_callback(_on_hitl_expired)
 
     # ═══ APP MENTION (@Lucy) ════════════════════════════════════════════
@@ -351,12 +351,10 @@ def register_handlers(app: AsyncApp) -> None:
 
         logger.info("hitl_approved", action_id=action_id, user=user_name)
 
-        from lucy.slack.hitl import resolve_pending_action
-
         # Ownership check: only the user who triggered the action can approve it.
         # This prevents other workspace members from executing actions on behalf
         # of someone else without their knowledge.
-        from lucy.slack.hitl import get_pending_action_metadata
+        from lucy.slack.hitl import get_pending_action_metadata, resolve_pending_action
         metadata = get_pending_action_metadata(action_id)
         if metadata:
             requesting_user = metadata.get("requesting_user_id", "")
@@ -372,7 +370,7 @@ def register_handlers(app: AsyncApp) -> None:
                     updated_blocks = [b for b in original_blocks if b.get("type") != "actions"]
                     updated_blocks.append({
                         "type": "context",
-                        "elements": [{"type": "mrkdwn", "text": "⚠️  Only the person who requested this action can approve it."}],
+                        "elements": [{"type": "mrkdwn", "text": "⚠️  Only the person who requested this action can approve it."}],  # noqa: E501
                     })
                     try:
                         await client.chat_update(
@@ -407,7 +405,17 @@ def register_handlers(app: AsyncApp) -> None:
                 except Exception as _upd_err:
                     logger.warning("hitl_approve_message_update_failed", error=str(_upd_err))
 
-            workspace_id = str(context.get("workspace_id") or context.get("team_id") or "")
+            # Prefer the workspace_id that was stored inside the action when the gate
+            # fired — this is the UUID (e.g. "8e302095-...") written by middleware
+            # during the original message event. Bolt's block_actions handler may not
+            # run the same middleware chain, so context["workspace_id"] can be None or
+            # the raw Slack team-ID here — both wrong for WorkspaceFS lookups.
+            workspace_id = str(
+                resolved.get("workspace_id")
+                or context.get("workspace_id")
+                or context.get("team_id")
+                or ""
+            )
             await _execute_approved_action(
                 resolved, workspace_id, channel, thread_ts, say, client, context,
             )
@@ -419,7 +427,7 @@ def register_handlers(app: AsyncApp) -> None:
                 updated_blocks.append({
                     "type": "context",
                     "elements": [
-                        {"type": "mrkdwn", "text": "⚠️  This action has already been handled or expired."},
+                        {"type": "mrkdwn", "text": "⚠️  This action has already been handled or expired."},  # noqa: E501
                     ],
                 })
                 try:
@@ -505,7 +513,6 @@ def register_handlers(app: AsyncApp) -> None:
         item = event.get("item", {})
         channel = item.get("channel", "")
         message_ts = item.get("ts", "")
-        item_user = event.get("item_user", "")  # who owns the message being reacted to
 
         # Only log celebration/high-signal emojis OR reactions to Lucy's messages
         celebration_emojis = {
@@ -757,7 +764,6 @@ async def _handle_message(
 
     # ── Edge case: status queries & task cancellation ─────────────────
     from lucy.pipeline.edge_cases import (
-        decide_thread_interrupt,
         format_task_status,
         handle_task_cancellation,
         is_status_query,
@@ -790,7 +796,7 @@ async def _handle_message(
         tlock = await _get_thread_lock(effective_thread)
         try:
             acquired = await asyncio.wait_for(tlock.acquire(), timeout=0.1)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.info(
                 "thread_busy_skipped",
                 thread_ts=effective_thread,
@@ -928,7 +934,7 @@ async def _handle_message(
             response_text = await asyncio.wait_for(
                 asyncio.shield(agent_task), timeout=HANDLER_EXECUTION_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             agent_task.cancel()
             logger.error(
                 "handler_execution_timeout",
@@ -1072,7 +1078,6 @@ async def _run_with_recovery(
         should_give_up,
     )
 
-    last_exc: Exception | None = None
     classification = None
 
     for attempt in range(4):  # attempt 0 = first try, 1-3 = recovery attempts
@@ -1105,7 +1110,6 @@ async def _run_with_recovery(
             return await agent.run(**run_kwargs)
 
         except OpenClawError as e:
-            last_exc = e
             classification = classify_error(e)
             logger.warning(
                 "agent_run_failed",
@@ -1118,7 +1122,6 @@ async def _run_with_recovery(
                 raise
 
         except Exception as e:
-            last_exc = e
             classification = classify_error(e)
             logger.warning(
                 "agent_run_error",
@@ -1188,11 +1191,11 @@ async def _register_channel_background(
     Only fetches if the channel isn't already registered (cheap disk check).
     """
     try:
-        from lucy.workspace.filesystem import get_workspace
         from lucy.workspace.channel_registry import (
             get_channel_context,
             register_channel,
         )
+        from lucy.workspace.filesystem import get_workspace
 
         ws = get_workspace(workspace_id)
         existing = get_channel_context(ws, channel_id)
@@ -1336,7 +1339,7 @@ async def _execute_approved_action(
             output = "The action completed but produced no visible output."
         await say(text=output, thread_ts=thread_ts)
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "approved_action_timeout",
             tool=tool_name,

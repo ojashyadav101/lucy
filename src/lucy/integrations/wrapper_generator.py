@@ -392,7 +392,7 @@ def _format_endpoint_inventory(classification: IntegrationClassification) -> str
                 f"  {ep.method} {ep.path} — {ep.description}{params_str}"
             )
 
-    lines.append(f"\nTotal endpoints: {sum(len(c.endpoints) for c in classification.endpoint_categories)}")
+    lines.append(f"\nTotal endpoints: {sum(len(c.endpoints) for c in classification.endpoint_categories)}")  # noqa: E501
     return "\n".join(lines)
 
 

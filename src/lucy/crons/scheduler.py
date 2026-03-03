@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -32,6 +33,23 @@ logger = structlog.get_logger()
 MAX_RETRIES = 2
 RETRY_DELAY_BASE = 30
 _MISFIRE_GRACE_TIME_S = 300
+
+# Workspace directories are UUID v4 format: 8-4-4-4-12 hex chars
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_workspace_dir(name: str) -> bool:
+    """Return True only for UUID-format workspace directory names.
+
+    Rejects Slack team IDs (T04...), test slugs, and other artifacts that
+    end up in the workspace root but don't correspond to real workspaces.
+    """
+    return bool(_UUID_RE.match(name))
+
+
 _HIGH_FREQ_THRESHOLD = 24
 _MODERATE_FREQ_THRESHOLD = 6
 _SCRIPT_TIMEOUT_S = 1800
@@ -134,6 +152,13 @@ class CronScheduler:
             if not ws_dir.is_dir():
                 continue
             ws_id = ws_dir.name
+            # Only schedule crons for UUID-format workspace directories.
+            # Slack team IDs (T04...), test directories, and other stale
+            # artifacts are skipped to prevent spurious cron runs and
+            # false "workspace exists" hits from WorkspaceFS.
+            if not _is_valid_workspace_dir(ws_id):
+                logger.debug("scheduler_skipping_non_uuid_workspace", ws_id=ws_id)
+                continue
             crons = await self._load_crons(ws_id)
             for cron in crons:
                 try:
@@ -164,8 +189,7 @@ class CronScheduler:
     async def stop(self) -> None:
         if self._running:
             running_jobs = [
-                job.name for job in self.scheduler.get_jobs()
-                if job.next_run_time is not None
+                job.name for job in self.scheduler.get_jobs() if job.next_run_time is not None
             ]
             if running_jobs:
                 logger.info(
@@ -288,7 +312,7 @@ class CronScheduler:
         slug = "".join(c for c in slug if c.isalnum() or c == "-")
         path = f"/{slug}"
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         task_data = {
             "path": path,
             "cron": cron_expr,
@@ -366,9 +390,7 @@ class CronScheduler:
             result["cost_warning"] = cost_warning
         return result
 
-    async def delete_cron(
-        self, workspace_id: str, cron_name: str
-    ) -> dict[str, Any]:
+    async def delete_cron(self, workspace_id: str, cron_name: str) -> dict[str, Any]:
         """Delete a cron job: remove task.json directory and unschedule.
 
         Supports fuzzy matching: if exact slug not found, searches by
@@ -458,11 +480,9 @@ class CronScheduler:
         if new_tz is not None:
             data["timezone"] = new_tz
 
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        data["updated_at"] = datetime.now(UTC).isoformat()
 
-        task_file.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        task_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         count = await self.reload_workspace(workspace_id)
         return {
             "success": True,
@@ -477,17 +497,11 @@ class CronScheduler:
             entry: dict[str, Any] = {
                 "id": job.id,
                 "name": job.name,
-                "next_run": (
-                    job.next_run_time.isoformat()
-                    if job.next_run_time
-                    else None
-                ),
+                "next_run": (job.next_run_time.isoformat() if job.next_run_time else None),
             }
             if hasattr(job.trigger, "FIELD_NAMES"):
                 try:
-                    fields = {
-                        f.name: str(f) for f in job.trigger.fields
-                    }
+                    fields = {f.name: str(f) for f in job.trigger.fields}
                     entry["schedule_fields"] = fields
                 except Exception as e:
                     logger.warning("cron_schedule_fields_parse_failed", error=str(e))
@@ -530,6 +544,7 @@ class CronScheduler:
         ws = get_workspace(workspace_id)
         try:
             from lucy.workspace.memory import consolidate_session_to_knowledge
+
             promoted = await consolidate_session_to_knowledge(ws)
             if promoted > 0:
                 logger.info(
@@ -563,6 +578,7 @@ class CronScheduler:
         """Regenerate LLM message pools."""
         try:
             from lucy.pipeline.humanize import refresh_pools
+
             await refresh_pools()
         except Exception as e:
             logger.error("humanize_pool_refresh_failed", error=str(e))
@@ -588,6 +604,7 @@ class CronScheduler:
         """Evaluate all due heartbeat monitors."""
         try:
             from lucy.crons.heartbeat import evaluate_due_heartbeats
+
             evaluated = await evaluate_due_heartbeats(self.slack_client)
             if evaluated > 0:
                 logger.debug("heartbeat_eval_complete", evaluated=evaluated)
@@ -722,25 +739,27 @@ class CronScheduler:
                     )
                     continue
 
-                configs.append(CronConfig(
-                    path=data["path"],
-                    cron=data["cron"],
-                    title=data["title"],
-                    description=data["description"],
-                    workspace_dir=workspace_id,
-                    type=data.get("type", "agent"),
-                    condition_script_path=data.get("condition_script_path", ""),
-                    max_runs=int(data.get("max_runs", 0)),
-                    depends_on=data.get("depends_on", ""),
-                    created_at=data.get("created_at", ""),
-                    updated_at=data.get("updated_at", ""),
-                    timezone=data.get("timezone", ""),
-                    max_retries=int(data.get("max_retries", MAX_RETRIES)),
-                    notify_on_failure=data.get("notify_on_failure", True),
-                    delivery_channel=data.get("delivery_channel", ""),
-                    requesting_user_id=data.get("requesting_user_id", ""),
-                    delivery_mode=data.get("delivery_mode", "channel"),
-                ))
+                configs.append(
+                    CronConfig(
+                        path=data["path"],
+                        cron=data["cron"],
+                        title=data["title"],
+                        description=data["description"],
+                        workspace_dir=workspace_id,
+                        type=data.get("type", "agent"),
+                        condition_script_path=data.get("condition_script_path", ""),
+                        max_runs=int(data.get("max_runs", 0)),
+                        depends_on=data.get("depends_on", ""),
+                        created_at=data.get("created_at", ""),
+                        updated_at=data.get("updated_at", ""),
+                        timezone=data.get("timezone", ""),
+                        max_retries=int(data.get("max_retries", MAX_RETRIES)),
+                        notify_on_failure=data.get("notify_on_failure", True),
+                        delivery_channel=data.get("delivery_channel", ""),
+                        requesting_user_id=data.get("requesting_user_id", ""),
+                        delivery_mode=data.get("delivery_mode", "channel"),
+                    )
+                )
             except Exception as e:
                 logger.warning(
                     "cron_parse_failed",
@@ -752,7 +771,10 @@ class CronScheduler:
         return configs
 
     def _build_cron_instruction(
-        self, cron: CronConfig, learnings: str | None, global_context: str | None = None,
+        self,
+        cron: CronConfig,
+        learnings: str | None,
+        global_context: str | None = None,
     ) -> str:
         """Build the instruction that the cron agent receives.
 
@@ -819,6 +841,7 @@ class CronScheduler:
             parts.append(f"\n## Global Context\n{global_context}")
 
         from lucy.config import settings as _s
+
         if _s.agentmail_enabled and _s.agentmail_api_key:
             email_addr = f"lucy@{_s.agentmail_domain}"
             parts.append(
@@ -877,8 +900,8 @@ class CronScheduler:
         6. Retry on failure with exponential backoff
         7. Enforce max_runs (self-deletion)
         """
-        import time as _time
         import os
+        import time as _time
 
         t0 = _time.monotonic()
         logger.info(
@@ -899,27 +922,40 @@ class CronScheduler:
             try:
                 dep_log = await ws.read_file(f"crons/{dep_slug}/execution.log")
                 if not dep_log:
-                    logger.info("cron_dependency_not_met_no_log", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
+                    logger.info(
+                        "cron_dependency_not_met_no_log",
+                        workspace_id=workspace_id,
+                        cron_path=cron.path,
+                        depends_on=dep_slug,
+                    )
                     return
-                    
+
                 import zoneinfo as _zi
-                cron_tz = timezone.utc
+
+                cron_tz = UTC
                 if cron.timezone:
                     try:
                         cron_tz = _zi.ZoneInfo(cron.timezone)
                     except Exception as e:
-                        logger.warning("cron_timezone_parse_failed", timezone=cron.timezone, error=str(e))
+                        logger.warning(
+                            "cron_timezone_parse_failed", timezone=cron.timezone, error=str(e)
+                        )
                 today = datetime.now(cron_tz).strftime("%Y-%m-%d")
-                
+
                 ran_today = False
                 for line in reversed(dep_log.splitlines()):
                     if line.startswith("## ") and today in line:
                         if "FAILED" not in line:
                             ran_today = True
                         break
-                
+
                 if not ran_today:
-                    logger.info("cron_dependency_not_met", workspace_id=workspace_id, cron_path=cron.path, depends_on=dep_slug)
+                    logger.info(
+                        "cron_dependency_not_met",
+                        workspace_id=workspace_id,
+                        cron_path=cron.path,
+                        depends_on=dep_slug,
+                    )
                     return
             except Exception as e:
                 logger.warning("cron_dependency_check_failed", error=str(e))
@@ -929,14 +965,17 @@ class CronScheduler:
             script_path = ws.root / cron.condition_script_path.lstrip("/")
             if script_path.exists():
                 process = await asyncio.create_subprocess_exec(
-                    "python3", str(script_path),
+                    "python3",
+                    str(script_path),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env={**os.environ, "WORKSPACE_ID": workspace_id}
+                    env={**os.environ, "WORKSPACE_ID": workspace_id},
                 )
                 try:
-                    await asyncio.wait_for(process.communicate(), timeout=_CONDITION_SCRIPT_TIMEOUT_S)
-                except asyncio.TimeoutError:
+                    await asyncio.wait_for(
+                        process.communicate(), timeout=_CONDITION_SCRIPT_TIMEOUT_S
+                    )
+                except TimeoutError:
                     process.kill()
                     await process.wait()
                     logger.warning(
@@ -947,30 +986,39 @@ class CronScheduler:
                     )
                     return
                 if process.returncode != 0:
-                    logger.info("cron_condition_unmet", workspace_id=workspace_id, cron_path=cron.path)
+                    logger.info(
+                        "cron_condition_unmet", workspace_id=workspace_id, cron_path=cron.path
+                    )
                     return
             else:
-                logger.warning("cron_condition_script_not_found", workspace_id=workspace_id, path=str(script_path))
+                logger.warning(
+                    "cron_condition_script_not_found",
+                    workspace_id=workspace_id,
+                    path=str(script_path),
+                )
 
         learnings = await ws.read_file(f"crons/{cron_dir_name}/LEARNINGS.md")
-        
+
         company_ctx = await ws.read_file("company/SKILL.md") or ""
         team_ctx = await ws.read_file("team/SKILL.md") or ""
-        
-        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        
+
+        now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
         global_context_parts = [f"Current Time: {now_utc}"]
         if company_ctx.strip():
             global_context_parts.append(f"\n[Company Context]\n{company_ctx.strip()}")
         if team_ctx.strip():
             global_context_parts.append(f"\n[Team Directory]\n{team_ctx.strip()}")
-            
+
         try:
             from lucy.integrations.composio_client import get_composio_client
+
             cclient = get_composio_client()
             connected_apps = await cclient.get_connected_app_names_reliable(workspace_id)
             if connected_apps:
-                global_context_parts.append(f"\n[Connected Integrations]\n{', '.join(connected_apps)}")
+                global_context_parts.append(
+                    f"\n[Connected Integrations]\n{', '.join(connected_apps)}"
+                )
         except Exception as e:
             logger.debug("failed_to_inject_integrations", error=str(e))
 
@@ -986,6 +1034,7 @@ class CronScheduler:
                     format_events_for_prompt,
                     read_and_clear_proactive_events,
                 )
+
                 events = await read_and_clear_proactive_events(ws)
                 if events:
                     proactive_event_ctx = format_events_for_prompt(events)
@@ -993,7 +1042,11 @@ class CronScheduler:
                 logger.debug("proactive_events_inject_failed", error=str(e))
 
             try:
-                from lucy.workspace.slack_local_reader import get_channel_summary, get_last_heartbeat_time
+                from lucy.workspace.slack_local_reader import (
+                    get_channel_summary,
+                    get_last_heartbeat_time,
+                )
+
                 last_hb = await get_last_heartbeat_time(ws)
                 channel_summary_ctx = await get_channel_summary(ws, hours_back=1 if last_hb else 4)
             except Exception as e:
@@ -1021,14 +1074,15 @@ class CronScheduler:
                         script_file = script_file.replace("/work/", "")
                     elif script_file.startswith("/workspace/"):
                         script_file = script_file.replace("/workspace/", "")
-                    
+
                     target_script = ws.root / script_file.lstrip("/")
                     if not target_script.exists():
                         raise RuntimeError(f"Script file not found: {target_script}")
-                    
+
                     _script_timeout = _SCRIPT_TIMEOUT_S
                     process = await asyncio.create_subprocess_exec(
-                        "python3", str(target_script),
+                        "python3",
+                        str(target_script),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         env={
@@ -1042,18 +1096,19 @@ class CronScheduler:
                             process.communicate(),
                             timeout=_script_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         process.kill()
                         await process.wait()
-                        raise RuntimeError(
-                            f"Script timed out after {_script_timeout}s"
-                        )
+                        raise RuntimeError(f"Script timed out after {_script_timeout}s")
                     if process.returncode != 0:
-                        raise RuntimeError(f"Script failed (exit {process.returncode}): {stderr.decode()}")
-                    
+                        raise RuntimeError(
+                            f"Script failed (exit {process.returncode}): {stderr.decode()}"
+                        )
+
                     response = stdout.decode().strip()
                 else:
                     from lucy.core.agent import AgentContext, get_agent
+
                     agent = get_agent()
                     ctx = AgentContext(
                         workspace_id=workspace_id,
@@ -1077,7 +1132,13 @@ class CronScheduler:
                 )
 
                 delivery_succeeded = False
-                if not skip and response and response.strip() and delivery_target and self.slack_client:
+                if (
+                    not skip
+                    and response
+                    and response.strip()
+                    and delivery_target
+                    and self.slack_client
+                ):
                     try:
                         await self._deliver_to_slack(delivery_target, response)
                         delivery_succeeded = True
@@ -1096,7 +1157,7 @@ class CronScheduler:
                         response_length=len(response),
                     )
 
-                now = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(UTC).isoformat()
                 if skip:
                     status = "skipped"
                 elif not delivery_target:
@@ -1120,12 +1181,13 @@ class CronScheduler:
                 if len(existing_log) > _MAX_LOG_BYTES:
                     # Find the first `## ` section header after the trim point and
                     # discard everything before it so we keep complete entries.
-                    trim_target = existing_log[-(int(_MAX_LOG_BYTES * 0.75)):]
+                    trim_target = existing_log[-(int(_MAX_LOG_BYTES * 0.75)) :]
                     first_entry = trim_target.find("\n## ")
                     trimmed_log = trim_target[first_entry:] if first_entry >= 0 else trim_target
                     await ws.write_file(log_path, trimmed_log)
 
                 from lucy.workspace.activity_log import log_activity
+
                 await log_activity(ws, f"Cron '{cron.title}' {status} in {elapsed_ms}ms")
 
                 logger.info(
@@ -1143,7 +1205,6 @@ class CronScheduler:
                 # Track run count in task.json (run_count field) instead of parsing
                 # the log file to avoid O(n) reads that grow with every execution.
                 if cron.max_runs > 0 and not skip:
-                    from lucy.workspace.filesystem import WorkspaceFS
                     _task_path = f"crons/{cron_dir_name}/task.json"
                     try:
                         _task_raw = await ws.read_file(_task_path)
@@ -1154,7 +1215,9 @@ class CronScheduler:
                     except Exception:
                         _run_count = 1
                     if _run_count >= cron.max_runs:
-                        logger.info("cron_max_runs_reached", workspace_id=workspace_id, cron_path=cron.path)
+                        logger.info(
+                            "cron_max_runs_reached", workspace_id=workspace_id, cron_path=cron.path
+                        )
                         await self.delete_cron(workspace_id, cron.path)
 
                 return
@@ -1177,7 +1240,8 @@ class CronScheduler:
                     # - AUTH errors are never transient; skip remaining attempts
                     # - Rate-limit errors use Retry-After from the error itself
                     # - Other transient errors use standard exponential backoff
-                    from lucy.pipeline.error_strategy import classify_error, ErrorCategory
+                    from lucy.pipeline.error_strategy import classify_error
+
                     err_cls = classify_error(e)
 
                     if not err_cls.is_transient:
@@ -1218,10 +1282,10 @@ class CronScheduler:
             exc_info=True,
         )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await ws.append_file(
             f"crons/{cron_dir_name}/execution.log",
-            f"\n## {now} -- FAILED after {max_attempts} attempts ({elapsed_ms}ms)\n{error_str[:300]}\n",
+            f"\n## {now} -- FAILED after {max_attempts} attempts ({elapsed_ms}ms)\n{error_str[:300]}\n",  # noqa: E501
         )
 
         if cron.notify_on_failure and self.slack_client:
@@ -1261,7 +1325,9 @@ class CronScheduler:
             )
 
     async def _deliver_to_slack(
-        self, channel: str, text: str,
+        self,
+        channel: str,
+        text: str,
     ) -> None:
         """Post the cron result to a Slack channel or DM.
 
@@ -1272,7 +1338,11 @@ class CronScheduler:
         """
         # Check if output is a Block Kit JSON payload
         text_trimmed = text.strip()
-        if text_trimmed.startswith("{") and text_trimmed.endswith("}") and '"blocks"' in text_trimmed:
+        if (
+            text_trimmed.startswith("{")
+            and text_trimmed.endswith("}")
+            and '"blocks"' in text_trimmed
+        ):
             try:
                 payload = json.loads(text_trimmed)
                 if "blocks" in payload:
@@ -1281,7 +1351,11 @@ class CronScheduler:
                         blocks=payload["blocks"],
                         text=payload.get("text", "Automated report"),
                     )
-                    logger.info("cron_result_delivered_blocks", channel=channel, blocks=len(payload["blocks"]))
+                    logger.info(
+                        "cron_result_delivered_blocks",
+                        channel=channel,
+                        blocks=len(payload["blocks"]),
+                    )
                     return
             except json.JSONDecodeError:
                 pass  # fallback to plain text processing
@@ -1323,9 +1397,7 @@ class CronScheduler:
             blocks=len(blocks) if blocks else 0,
         )
 
-    async def _fuzzy_find_cron(
-        self, workspace_id: str, query: str
-    ) -> CronConfig | None:
+    async def _fuzzy_find_cron(self, workspace_id: str, query: str) -> CronConfig | None:
         """Find a cron by fuzzy matching on title or path."""
         crons = await self._load_crons(workspace_id)
         if not crons:
@@ -1360,8 +1432,9 @@ class CronScheduler:
     async def _resolve_workspace_owner(self, workspace_id: str) -> str | None:
         """Find the Slack user ID of the workspace owner for DM notifications."""
         try:
-            from lucy.db.session import db_session
             from sqlalchemy import text
+
+            from lucy.db.session import db_session
 
             async with db_session() as session:
                 result = await session.execute(
