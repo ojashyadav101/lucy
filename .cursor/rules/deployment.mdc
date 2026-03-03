@@ -1,0 +1,73 @@
+---
+description: Deployment and infrastructure context for Lucy. Always applies so agents understand where the code runs and how to deploy.
+globs: ["**/*.py", "deploy/**", "scripts/**", ".env*"]
+alwaysApply: true
+---
+
+# Lucy Infrastructure & Deployment Context
+
+## Where Lucy Runs
+
+**Lucy is NOT running on your laptop. It runs on a Contabo VPS.**
+
+- **VPS IP**: `167.86.82.46`
+- **SSH**: `ssh -i ~/.ssh/id_lucy_vps root@167.86.82.46` (or `ssh contabo-lucy` via `~/.ssh/config`)
+- **App directory**: `/opt/lucy/app` on the VPS
+- **Service**: `systemctl status lucy` (systemd, auto-starts on boot, auto-restarts on crash)
+
+## How to Deploy
+
+```bash
+git push origin main
+```
+
+That's it. This pushes to **both** GitHub and Contabo simultaneously:
+- `origin` push URL 1: `https://github.com/ojashyadav101/lucy.git`
+- `origin` push URL 2: `ssh://contabo-lucy/opt/lucy/repo.git`
+
+The bare repo at `/opt/lucy/repo.git` has a `post-receive` hook that:
+1. Pulls latest from GitHub (`git fetch origin main && git reset --hard origin/main`)
+2. Runs `pip install -e .`
+3. Runs `systemctl restart lucy`
+
+Lucy is live ~10 seconds after push.
+
+## Checking Logs
+
+**Always check VPS logs, never your laptop:**
+
+```bash
+ssh contabo-lucy "journalctl -u lucy -f"               # live tail
+ssh contabo-lucy "journalctl -u lucy -n 100 --no-pager" # last 100 lines
+ssh contabo-lucy "journalctl -u lucy -p err -n 50 --no-pager" # errors only
+```
+
+Deploy hook log: `ssh contabo-lucy "tail -20 /var/log/lucy-deploy.log"`
+
+## VPS Services
+
+| Service | How to check |
+|---|---|
+| Lucy | `systemctl status lucy` |
+| PostgreSQL | `docker ps` (lucy-postgres container) |
+| Qdrant | `docker ps` (lucy-qdrant container) |
+| OpenClaw gateway | `ps aux \| grep openclaw` (port 18789) |
+| ClawRoute | `systemctl status clawroute` |
+
+## Production `.env`
+
+Lives at `/opt/lucy/app/.env` on the VPS. **Not in git.** Key production values:
+- `LUCY_DATABASE_URL=postgresql+asyncpg://lucy:lucy@localhost:5432/lucy`
+- `LUCY_OPENCLAW_BASE_URL=http://127.0.0.1:18789`
+- `LUCY_QDRANT_URL=http://localhost:6333`
+- `LUCY_ENV=production`
+
+To update production env:
+```bash
+ssh contabo-lucy "nano /opt/lucy/app/.env && systemctl restart lucy"
+```
+
+## Documentation
+
+Full deployment guide: `docs/how-lucy-works/DEPLOYMENT.md`
+Architecture overview: `docs/how-lucy-works/README.md`

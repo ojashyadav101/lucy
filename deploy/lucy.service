@@ -3,6 +3,8 @@ Description=Lucy Slack Bot (AI Coworker)
 Documentation=https://github.com/ojashyadav101/lucy
 After=network.target docker.service
 Wants=docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,8 +18,6 @@ ExecStart=/opt/lucy/app/.venv/bin/python scripts/run.py
 # Always restart — this is a long-running service
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Logging — all output goes to journald
 StandardOutput=journal
