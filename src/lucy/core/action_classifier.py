@@ -419,6 +419,13 @@ def get_classification_summary(tool_name: str, parameters: dict[str, Any] | None
         source = "internal_write_set"
     elif tool_name in _INTERNAL_DESTRUCTIVE_TOOLS:
         source = "internal_destructive_set"
+    elif tool_name.startswith("mcp_"):
+        source = "mcp_heuristic"
+    elif tool_name.startswith("COMPOSIO_"):
+        if tool_name == "COMPOSIO_REMOTE_BASH_TOOL":
+            source = "composio_bash_content_based"
+        else:
+            source = "composio_heuristic"
     else:
         for pattern in _DESTRUCTIVE_PATTERNS:
             if pattern.search(stripped):
