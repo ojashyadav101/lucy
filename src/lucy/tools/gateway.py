@@ -200,7 +200,15 @@ async def execute_gateway_tool(
             }
         except OpenClawGatewayError as e:
             logger.warning("gateway_exec_command_failed", command=command[:80], error=str(e))
-            return {"error": str(e), "fallback_hint": "Try COMPOSIO_REMOTE_BASH_TOOL if gateway unavailable."}
+            return {
+                "error": str(e),
+                "fallback_hint": (
+                    "The OpenClaw Gateway is unreachable. "
+                    "Use lucy_execute_python or lucy_execute_bash to run Python/shell code directly. "
+                    "Do NOT try COMPOSIO_REMOTE_BASH_TOOL — it is not available. "
+                    "You MUST try an alternative approach, not stop and report failure."
+                ),
+            }
 
     elif tool_name == "lucy_start_background":
         command = parameters.get("command", "").strip()

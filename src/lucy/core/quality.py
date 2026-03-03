@@ -296,6 +296,27 @@ def assess_response_quality(
             )
             confidence -= 1
 
+    # 3b. Tool/infrastructure failure reported without exhausting alternatives
+    # If Lucy reported an execution failure on a user-requested action, confidence
+    # must drop hard enough to trigger escalation so the retry uses a different path.
+    _FAILURE_PHRASES = [
+        "connection attempts failed",
+        "all connection attempts",
+        "failed to connect",
+        "connection failed",
+        "unable to connect",
+        "could not connect",
+        "couldn't connect",
+        "error connecting",
+    ]
+    _CONNECT_REQUEST_WORDS = ["connect", "access", "read", "check", "verify", "database", "db"]
+    if any(p in resp_lower for p in _FAILURE_PHRASES):
+        if any(w in user_lower for w in _CONNECT_REQUEST_WORDS):
+            issues.append(
+                "Reported infrastructure/tool failure without exhausting alternative approaches"
+            )
+            confidence -= 4  # pushes to ≤6 → forces escalation retry
+
     # 4. Response is very short for a complex question
     _COMMAND_WORDS = {"save", "delete", "remove", "create", "set", "update",
                       "write", "store", "add", "send", "deploy", "start",
