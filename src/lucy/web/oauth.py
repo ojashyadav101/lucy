@@ -34,20 +34,27 @@ BOT_SCOPES = ",".join([
     "channels:join",
     "channels:read",
     "chat:write",
+    "chat:write.customize",
+    "chat:write.public",
     "commands",
+    "emoji:read",
     "files:read",
+    "files:write",
     "groups:history",
     "groups:read",
+    "groups:write",
     "im:history",
     "im:read",
     "im:write",
     "mpim:history",
     "mpim:read",
+    "mpim:write",
     "reactions:read",
     "reactions:write",
     "team:read",
     "users:read",
     "users:read.email",
+    "users.profile:read",
 ])
 
 
@@ -155,7 +162,7 @@ async def oauth_callback(
 
     return {
         "ok": True,
-        "message": f"Lucy installed in {team_name}!",
+        "message": f"Zeeya installed in {team_name}!",
         "workspace_id": str(workspace_id),
     }
 
@@ -226,7 +233,7 @@ async def _provision_workspace(
         channels = await client.conversations_list(types="public_channel", limit=200)
         for ch in channels.get("channels", []):
             name = ch.get("name", "")
-            if name in ("general", "talk-to-lucy", "lucy", "lucy-my-ai"):
+            if name in ("general", "talk-to-lucy", "lucy", "lucy-my-ai", "zeeya"):
                 try:
                     await client.conversations_join(channel=ch["id"])
                 except Exception:
