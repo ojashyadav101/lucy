@@ -223,18 +223,22 @@ class RateLimiter:
         self,
         api_name: str,
         timeout: float = 15.0,
+        workspace_id: str = "",
     ) -> bool:
         """Acquire rate limit token for an external API call.
 
         Returns True if acquired, False if rate limited.
+        When workspace_id is provided, the bucket is scoped per-workspace.
         """
-        bucket = self._get_api_bucket(api_name)
+        scoped_name = f"{workspace_id}:{api_name}" if workspace_id else api_name
+        bucket = self._get_api_bucket(scoped_name)
         acquired = await bucket.acquire(timeout=timeout)
 
         if not acquired:
             logger.warning(
                 "api_rate_limited",
                 api_name=api_name,
+                workspace_id=workspace_id,
                 available_tokens=bucket.available_tokens,
             )
 
@@ -245,6 +249,7 @@ class RateLimiter:
         api_name: str,
         retries: int = 3,
         base_wait: float = 0.5,
+        workspace_id: str = "",
     ) -> bool:
         """Acquire rate limit token with exponential backoff retries.
 
@@ -258,7 +263,9 @@ class RateLimiter:
         Backoff schedule (base_wait=0.5): 0.5s → 1.0s → 2.0s
         """
         for attempt in range(retries):
-            acquired = await self.acquire_api(api_name, timeout=5.0)
+            acquired = await self.acquire_api(
+                api_name, timeout=5.0, workspace_id=workspace_id,
+            )
             if acquired:
                 return True
             wait = base_wait * (2 ** attempt)

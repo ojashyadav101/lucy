@@ -85,17 +85,18 @@ def _cache_key(
     messages: list[dict[str, Any]],
     model: str,
     system_prompt: str | None = None,
+    workspace_id: str = "",
 ) -> str | None:
     """Build a cache key for deterministic single-turn calls only.
 
-    Includes the system_prompt hash to prevent cross-contamination between
-    callers that share a model but use different system prompts.
+    Includes the system_prompt hash and workspace_id to prevent
+    cross-contamination between callers/workspaces.
     """
     if len(messages) == 1 and messages[0].get("role") == "user":
         content = messages[0].get("content", "")
         if isinstance(content, str) and len(content) < _CACHE_MAX_INPUT_LEN:
             sp_hash = hash(system_prompt) if system_prompt else 0
-            return f"{model}:{sp_hash}:{content}"
+            return f"{workspace_id}:{model}:{sp_hash}:{content}"
     return None
 
 
@@ -230,7 +231,7 @@ class OpenClawClient:
         model = config.model or settings.openclaw_model
 
         cache_key = (
-            _cache_key(messages, model, config.system_prompt)
+            _cache_key(messages, model, config.system_prompt, workspace_id or "")
             if not config.tools
             else None
         )

@@ -48,6 +48,12 @@ dependencies = [
     "croniter>=6.0,<7",
     "python-dateutil>=2.9,<3",
 
+    # Encryption (Fernet for bot tokens at rest)
+    "cryptography>=44.0,<45",
+
+    # JWT for dashboard auth
+    "pyjwt>=2.10,<3",
+
     # SSL
     "certifi",
 

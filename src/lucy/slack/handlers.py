@@ -628,6 +628,42 @@ def register_handlers(app: AsyncApp) -> None:
         """Acknowledge app home opens (required to avoid Slack warnings)."""
         pass
 
+    @app.event("app_uninstalled")
+    async def handle_app_uninstalled(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Mark workspace inactive when Lucy is uninstalled."""
+        team_id = str(context.get("team_id") or "")
+        if team_id:
+            from lucy.core.token_store import invalidate_cache
+            invalidate_cache(team_id)
+            try:
+                from lucy.db.session import db_session
+                from lucy.db.models import Workspace
+                from sqlalchemy import update
+                async with db_session() as session:
+                    await session.execute(
+                        update(Workspace)
+                        .where(Workspace.slack_team_id == team_id)
+                        .values(is_active=False)
+                    )
+            except Exception:
+                logger.exception("app_uninstalled_db_update_failed", team_id=team_id)
+        logger.info("app_uninstalled", team_id=team_id)
+
+    @app.event("tokens_revoked")
+    async def handle_tokens_revoked(
+        event: dict[str, Any],
+        context: AsyncBoltContext,
+    ) -> None:
+        """Invalidate cache when tokens are revoked."""
+        team_id = str(context.get("team_id") or "")
+        if team_id:
+            from lucy.core.token_store import invalidate_cache
+            invalidate_cache(team_id)
+        logger.info("tokens_revoked", team_id=team_id)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # PROGRESS UPDATE (3-MINUTE DECISION GATE)
@@ -711,7 +747,12 @@ async def _handle_message(
         return
 
     # Dedup by team_id:event_ts to avoid cross-workspace collisions
-    team_id_for_dedup = str(context.get("team_id") or "")
+    team_id_for_dedup = str(
+        context.get("team_id")
+        or context.get("enterprise_id")
+        or workspace_id
+        or ""
+    )
     if event_ts:
         dedup_key = f"{team_id_for_dedup}:{event_ts}" if team_id_for_dedup else event_ts
         lock = _get_dedup_lock()

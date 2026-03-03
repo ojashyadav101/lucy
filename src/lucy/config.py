@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""
     slack_app_token: str = ""
     slack_signing_secret: str = ""
+    slack_client_id: str = ""
+    slack_client_secret: str = ""
+
+    # Encryption key for bot tokens at rest (Fernet)
+    fernet_key: str = ""
+
+    # JWT for dashboard auth
+    jwt_secret: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 1440  # 24h
 
     # LLM via OpenRouter (all requests go through OpenRouter)
     openrouter_api_key: str = ""

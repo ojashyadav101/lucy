@@ -157,6 +157,43 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Slack OAuth tokens (encrypted at rest via Fernet)
+    slack_bot_token_encrypted: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Fernet-encrypted xoxb-... bot token"
+    )
+    slack_bot_user_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True,
+        comment="Lucy's bot user ID in this workspace (U...)"
+    )
+    slack_team_name: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Human-readable team name from Slack"
+    )
+    slack_team_domain: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Slack team domain slug (e.g. 'table' from table.slack.com)"
+    )
+
+    # AgentMail
+    agent_email: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Per-workspace agent email (e.g. table@zeeyamail.com)"
+    )
+
+    # Installation metadata
+    owner_email: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Email of the user who installed Lucy"
+    )
+    installed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False,
+        comment="False when uninstalled or token revoked"
+    )
+
     # Plan & limits
     plan: Mapped[str] = mapped_column(
         String(20), default="starter", nullable=False,
@@ -1286,3 +1323,105 @@ class ThreadConversation(Base):
     # Relationships
     workspace: Mapped[Workspace] = relationship()
     initiator: Mapped[User | None] = relationship()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OAUTH & AUTH TABLES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OAuthState(Base):
+    """CSRF-protection state for Slack OAuth flow.
+
+    Created when a user clicks "Add to Slack", verified on callback.
+    """
+
+    __tablename__ = "oauth_states"
+    __table_args__ = (
+        Index("ix_oauth_states_expires", "expires_at"),
+        {"comment": "CSRF state tokens for Slack OAuth (short-lived)"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    state: Mapped[str] = mapped_column(
+        String(128), unique=True, nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class AuthCode(Base):
+    """Magic-link / OTP codes for passwordless login."""
+
+    __tablename__ = "auth_codes"
+    __table_args__ = (
+        Index("ix_auth_codes_email_code", "email", "code"),
+        Index("ix_auth_codes_expires", "expires_at"),
+        {"comment": "One-time login codes sent via email"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    code: Mapped[str] = mapped_column(
+        String(64), nullable=False,
+        comment="6-digit OTP or URL-safe token",
+    )
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True,
+    )
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+
+class BackgroundTask(Base):
+    """Persisted in-flight background work for restart recovery."""
+
+    __tablename__ = "background_tasks"
+    __table_args__ = (
+        Index("ix_bg_tasks_workspace_status", "workspace_id", "status"),
+        {"comment": "Persisted background tasks for restart resilience"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False,
+    )
+    task_type: Mapped[str] = mapped_column(
+        String(50), nullable=False,
+        comment="agent_run|scheduled_job|email_process",
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False,
+        comment="Serialized inputs needed to resume/retry",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), default="running", nullable=False,
+        comment="running|completed|interrupted|failed",
+    )
+    slack_channel_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True,
+    )
+    slack_thread_ts: Mapped[str | None] = mapped_column(
+        String(50), nullable=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

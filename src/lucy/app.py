@@ -21,6 +21,7 @@ except ImportError:
     _ssl_ctx = None
 
 import asyncio
+import signal
 from contextlib import asynccontextmanager
 
 import structlog
@@ -58,18 +59,30 @@ structlog.configure(
 
 from slack_sdk.web.async_client import AsyncWebClient as _AsyncWebClient  # noqa: E402
 
-_bolt_client = (
-    _AsyncWebClient(token=settings.slack_bot_token, ssl=_ssl_ctx)
-    if _ssl_ctx
-    else None
-)
+_multi_tenant = bool(settings.slack_client_id)
 
-bolt = AsyncApp(
-    token=settings.slack_bot_token,
-    signing_secret=settings.slack_signing_secret,
-    client=_bolt_client,
-    process_before_response=False,
-)
+if _multi_tenant:
+    from lucy.web.authorize import multi_tenant_authorize
+
+    bolt = AsyncApp(
+        signing_secret=settings.slack_signing_secret,
+        authorize=multi_tenant_authorize,
+        process_before_response=False,
+    )
+    logger.info("bolt_init_multi_tenant")
+else:
+    _bolt_client = (
+        _AsyncWebClient(token=settings.slack_bot_token, ssl=_ssl_ctx)
+        if _ssl_ctx
+        else None
+    )
+    bolt = AsyncApp(
+        token=settings.slack_bot_token,
+        signing_secret=settings.slack_signing_secret,
+        client=_bolt_client,
+        process_before_response=False,
+    )
+    logger.info("bolt_init_single_tenant")
 
 bolt.middleware(resolve_workspace_middleware)
 bolt.middleware(resolve_user_middleware)
@@ -82,9 +95,25 @@ register_handlers(bolt)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# Shutdown coordination: set when SIGTERM received, checked by handlers
+shutting_down = asyncio.Event()
+_active_agents: set[asyncio.Task] = set()  # type: ignore[type-arg]
+_DRAIN_TIMEOUT = 60
+
+
+def track_agent_task(task: asyncio.Task) -> None:  # type: ignore[type-arg]
+    """Register an in-flight agent task for graceful drain."""
+    _active_agents.add(task)
+    task.add_done_callback(_active_agents.discard)
+
+
+def is_shutting_down() -> bool:
+    return shutting_down.is_set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
+    """Application lifespan manager with graceful shutdown."""
     logger.info("app_starting", env=settings.env)
 
     from lucy.pipeline.humanize import initialize_pools
@@ -98,13 +127,33 @@ async def lifespan(app: FastAPI):
 
     email_listener = await _start_email_listener(bolt.client)
 
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: shutting_down.set())
+
     yield
+
+    logger.info("app_shutting_down", active_agents=len(_active_agents))
+
+    if _active_agents:
+        logger.info("draining_agents", count=len(_active_agents))
+        done, pending = await asyncio.wait(
+            _active_agents, timeout=_DRAIN_TIMEOUT,
+        )
+        if pending:
+            logger.warning(
+                "drain_timeout_forcing_cancel",
+                cancelled=len(pending),
+                completed=len(done),
+            )
+            for task in pending:
+                task.cancel()
 
     if email_listener:
         await email_listener.stop()
     await scheduler.stop()
-    logger.info("app_shutting_down")
     await close_db()
+    logger.info("app_shutdown_complete")
 
 
 api = FastAPI(
@@ -142,6 +191,10 @@ async def slack_events(req: Request) -> object:
     """Slack events endpoint for HTTP mode (Events API + interactivity)."""
     return await handler.handle(req)  # type: ignore[arg-type]
 
+
+from lucy.web.oauth import router as _oauth_router
+
+api.include_router(_oauth_router)
 
 if settings.spaces_enabled:
     from lucy.spaces.http_endpoints import router as _spaces_router
