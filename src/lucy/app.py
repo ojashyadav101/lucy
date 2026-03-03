@@ -24,7 +24,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
@@ -68,6 +68,7 @@ bolt = AsyncApp(
     token=settings.slack_bot_token,
     signing_secret=settings.slack_signing_secret,
     client=_bolt_client,
+    process_before_response=False,
 )
 
 bolt.middleware(resolve_workspace_middleware)
@@ -85,6 +86,10 @@ register_handlers(bolt)
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     logger.info("app_starting", env=settings.env)
+
+    from lucy.pipeline.humanize import initialize_pools
+
+    asyncio.create_task(initialize_pools())
 
     from lucy.crons.scheduler import get_scheduler
 
@@ -133,8 +138,8 @@ async def health_db() -> dict[str, str]:
 
 
 @api.post("/slack/events")
-async def slack_events(req: object) -> object:
-    """Slack events endpoint for HTTP mode."""
+async def slack_events(req: Request) -> object:
+    """Slack events endpoint for HTTP mode (Events API + interactivity)."""
     return await handler.handle(req)  # type: ignore[arg-type]
 
 

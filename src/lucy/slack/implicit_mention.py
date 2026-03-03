@@ -85,19 +85,24 @@ _last_implicit_trigger: dict[str, float] = {}
 _rate_lock = asyncio.Lock()
 
 
-async def _check_rate_limit(channel_id: str) -> bool:
-    """Return True if we're within cooldown (should NOT trigger)."""
+async def _check_rate_limit(channel_id: str, workspace_id: str = "") -> bool:
+    """Return True if we're within cooldown (should NOT trigger).
+
+    Keys include workspace_id to avoid cross-tenant rate limit collisions.
+    """
+    key = f"{workspace_id}:{channel_id}" if workspace_id else channel_id
     async with _rate_lock:
-        last = _last_implicit_trigger.get(channel_id, 0.0)
+        last = _last_implicit_trigger.get(key, 0.0)
         if time.monotonic() - last < _COOLDOWN_SECONDS:
             return True  # rate limited
         return False
 
 
-async def _record_trigger(channel_id: str) -> None:
+async def _record_trigger(channel_id: str, workspace_id: str = "") -> None:
     """Record that we triggered in this channel."""
+    key = f"{workspace_id}:{channel_id}" if workspace_id else channel_id
     async with _rate_lock:
-        _last_implicit_trigger[channel_id] = time.monotonic()
+        _last_implicit_trigger[key] = time.monotonic()
 
 
 # ── Layer 1: Regex check ─────────────────────────────────────────────────

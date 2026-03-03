@@ -43,8 +43,12 @@ def _get_thread_lock_registry() -> asyncio.Lock:
     return _thread_lock_registry
 
 
-async def _get_thread_lock(thread_ts: str) -> asyncio.Lock:
-    """Get or create a per-thread lock to prevent concurrent agent runs."""
+async def _get_thread_lock(thread_ts: str, workspace_id: str = "") -> asyncio.Lock:
+    """Get or create a per-thread lock to prevent concurrent agent runs.
+
+    Keys include workspace_id to avoid cross-tenant lock collisions.
+    """
+    lock_key = f"{workspace_id}:{thread_ts}" if workspace_id else thread_ts
     registry = _get_thread_lock_registry()
     async with registry:
         now = time.monotonic()
@@ -56,11 +60,11 @@ async def _get_thread_lock(thread_ts: str) -> asyncio.Lock:
         for k in stale:
             del _thread_locks[k]
 
-        if thread_ts not in _thread_locks:
+        if lock_key not in _thread_locks:
             lock = asyncio.Lock()
             lock._created_at = now  # type: ignore[attr-defined]
-            _thread_locks[thread_ts] = lock
-        return _thread_locks[thread_ts]
+            _thread_locks[lock_key] = lock
+        return _thread_locks[lock_key]
 
 
 def _get_dedup_lock() -> asyncio.Lock:
@@ -694,14 +698,29 @@ async def _handle_message(
     """Handle a user message: add reaction, run agent, post response."""
     global _processed_events
 
+    # Skip Slack retries (HTTP Events API sends x-slack-retry-num on retry)
+    retry_num = context.get("retry_num") or context.get("x-slack-retry-num")
+    retry_reason = context.get("retry_reason") or context.get("x-slack-retry-reason")
+    if retry_num and str(retry_num) != "0":
+        logger.debug(
+            "slack_retry_skipped",
+            retry_num=retry_num,
+            retry_reason=retry_reason,
+            event_ts=event_ts,
+        )
+        return
+
+    # Dedup by team_id:event_ts to avoid cross-workspace collisions
+    team_id_for_dedup = str(context.get("team_id") or "")
     if event_ts:
+        dedup_key = f"{team_id_for_dedup}:{event_ts}" if team_id_for_dedup else event_ts
         lock = _get_dedup_lock()
         async with lock:
             now = time.monotonic()
-            if event_ts in _processed_events:
+            if dedup_key in _processed_events:
                 logger.debug("event_dedup_skip", event_ts=event_ts)
                 return
-            _processed_events[event_ts] = now
+            _processed_events[dedup_key] = now
             _processed_events = {
                 k: v for k, v in _processed_events.items()
                 if now - v < EVENT_DEDUP_TTL
@@ -792,7 +811,7 @@ async def _handle_message(
     acquired = False
     tlock = None
     if effective_thread:
-        tlock = await _get_thread_lock(effective_thread)
+        tlock = await _get_thread_lock(effective_thread, workspace_id)
         try:
             acquired = await asyncio.wait_for(tlock.acquire(), timeout=0.1)
         except TimeoutError:
@@ -859,7 +878,13 @@ async def _handle_message(
             get_task_manager,
             should_run_as_background_task,
         )
+        from lucy.pipeline.router import classify_and_route
 
+        route = classify_and_route(
+            text,
+            thread_depth=0,
+            prev_had_tool_calls=False,
+        )
         if should_run_as_background_task(text, route.tier):
             task_mgr = get_task_manager()
 
