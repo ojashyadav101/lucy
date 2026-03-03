@@ -1,21 +1,31 @@
 """Confirmation Gate — intercepts tool calls that require user approval.
 
 This module sits between the agent's tool dispatch and actual execution.
-The gate fires ONLY for DESTRUCTIVE actions — operations that are
-irreversible and have significant real-world consequences (sending email,
-deleting data, cancelling subscriptions, forwarding messages).
+The gate fires ONLY for actions with serious, hard-to-reverse real-world
+consequences. The bar is intentionally HIGH.
 
-WRITE actions (creating a cron, connecting an MCP, storing an API key,
-generating a file, etc.) are auto-executed immediately without a gate.
-The user explicitly requested these — interrupting them is bad UX.
+Things that DO trigger the gate (truly irreversible consequences):
+  - Sending email or SMS to external people
+  - Cancelling a paid billing subscription
+  - Revoking auth tokens, banning users
+  - Purging / destroying data with no recycle bin
+
+Things that do NOT trigger the gate (normal, low-stakes operations):
+  - Deleting a ticket, issue, or calendar event (reversible in the app)
+  - Cancelling a meeting or appointment
+  - Sending a Slack/Teams message (internal comms, not external email)
+  - Removing a member from a channel
+  - Creating, editing, or archiving anything
+  - Running code or shell commands (except destructive bash like rm -rf)
+
+WRITE actions (creating, editing, deleting recoverable data) are
+auto-executed immediately without a gate. The user explicitly requested
+them — interrupting every delete with "are you sure?" is terrible UX.
 
 Gate levels:
   READ        → always auto-execute
   WRITE       → always auto-execute (trust the user's request)
   DESTRUCTIVE → gate with Approve / Reject prompt
-
-The gate also handles COMPOSIO_MULTI_EXECUTE_TOOL specially, inspecting
-inner actions to determine the aggregate risk level.
 """
 
 from __future__ import annotations
@@ -225,15 +235,6 @@ def _build_hitl_narrative_inner(
         detail = "  ·  ".join(parts) if parts else "an email"
         return f"I'm about to send {detail}. Approve to send it."
 
-    # ── Calendar event creation ───────────────────────────────────────
-    if any(kw in tool_name.lower() for kw in ("create_event", "create_calendar")):
-        title = parameters.get("title") or parameters.get("summary", "")
-        when = parameters.get("start_datetime") or parameters.get("start", "")
-        desc = f"*{title}*" if title else "a new event"
-        if when:
-            desc += f" at {when}"
-        return f"I need your confirmation to add {desc} to your calendar."
-
     # ── Cron / heartbeat creation ─────────────────────────────────────
     if "create_cron" in tool_name.lower():
         title = parameters.get("title") or parameters.get("name", "")
@@ -246,7 +247,9 @@ def _build_hitl_narrative_inner(
         return f"I'll create a heartbeat monitor{detail}."
 
     # ── Deletions ─────────────────────────────────────────────────────
-    if any(kw in tool_name.lower() for kw in ("delete", "remove", "destroy")):
+    # Only truly destructive deletes reach this point (billing records, purges, etc.)
+    # Regular delete_ticket / delete_event are classified as WRITE and never reach the gate.
+    if any(kw in tool_name.lower() for kw in ("destroy", "purge")):
         thing = (
             parameters.get("title")
             or parameters.get("name")
@@ -255,8 +258,8 @@ def _build_hitl_narrative_inner(
             or "this item"
         )
         return (
-            f"I'm about to permanently delete *{thing}*. "
-            "This can't be undone — approve only if you're sure."
+            f"I'm about to permanently wipe *{thing}*. "
+            "This cannot be undone — approve only if you're sure."
         )
 
     # ── Generic fallback ──────────────────────────────────────────────

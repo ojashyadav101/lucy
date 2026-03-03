@@ -26,6 +26,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,35 @@ _NARRATION_RE = re.compile(
     r"|I'm going to (?:start|check|look|search|get|find|fetch))",
     re.IGNORECASE,
 )
+
+
+# ── Test-fix-retry state machine ─────────────────────────────────────────────
+
+class _TFPhase(str, Enum):
+    """Phases of the test-fix-retry state machine."""
+    BUILDING = "building"       # Agent is creating / modifying something
+    TESTING = "testing"         # Agent has been told to test; awaiting result
+    FIXING = "fixing"           # Test failed; agent is fixing, will re-test
+    ESCALATED = "escalated"     # Moved to frontier model after fix budget exhausted
+    REAPPROACH = "reapproach"   # Trying a completely different implementation approach
+    PASSED = "passed"           # Tests confirmed passing — loop should break
+    GAVE_UP = "gave_up"         # All attempts exhausted — surface failure to user
+
+
+@dataclass
+class _TestFixState:
+    """Per-run state for the test-fix-retry escalation ladder."""
+    phase: _TFPhase = _TFPhase.BUILDING
+    # Number of fix cycles tried at the current model tier
+    fix_attempts: int = 0
+    # Whether we have already escalated to the frontier model
+    escalated: bool = False
+    # Number of completely-different-approach attempts tried
+    approach_attempts: int = 0
+    # Accumulated failure reasons across all attempts (for the give-up message)
+    failure_log: list[str] = field(default_factory=list)
+    # The specific tool categories that have been mutated (for verify hints)
+    mutating_tools: list[str] = field(default_factory=list)
 
 
 # ── Agent regex patterns ─────────────────────────────────────────────────────
@@ -560,12 +590,24 @@ class LucyAgent:
                                     "type": "string",
                                     "enum": ["agent", "script"],
                                     "description": (
-                                        "Type of cron job. 'agent' spins up a full LLM "
-                                        "session with your personality and tools (default). "
-                                        "'script' runs a deterministic python script without "
-                                        "invoking the LLM. If type is 'script', the description "
-                                        "field MUST be the exact path to the python script to run "
-                                        "(e.g. 'scripts/report.py')."
+                                        "Execution model. 'agent' (default) spins up a full "
+                                        "LLM session with tools — use for tasks that require "
+                                        "reasoning, Composio calls, or dynamic decisions. "
+                                        "'script' runs a Python script directly, no LLM cost — "
+                                        "use for lightweight checks like polling a URL, querying "
+                                        "a DB, or running a deterministic condition. When type "
+                                        "is 'script', provide script_code with the Python source."
+                                    ),
+                                },
+                                "script_code": {
+                                    "type": "string",
+                                    "description": (
+                                        "Python source code to run (only used when type='script'). "
+                                        "Lucy writes this code to a file and runs it on schedule. "
+                                        "The script has WORKSPACE_ID and WORKSPACE_ROOT env vars. "
+                                        "Print to stdout to deliver output to Slack. Print nothing "
+                                        "for a normal (no-alert) run. Can import standard library "
+                                        "and common packages like pymongo, requests, httpx."
                                     ),
                                 },
                                 "condition_script_path": {
@@ -629,9 +671,15 @@ class LucyAgent:
                     "function": {
                         "name": "lucy_modify_cron",
                         "description": (
-                            "Update an existing scheduled task's schedule, "
-                            "title, or description. Only provide the fields "
-                            "you want to change."
+                            "Update an existing scheduled task's schedule, title, "
+                            "description, timezone, or execution type. Only provide "
+                            "the fields you want to change.\n\n"
+                            "To convert an agent-type cron into a lightweight script "
+                            "(no LLM cost per run), set new_type='script' and provide "
+                            "script_code — a Python script that runs the check directly. "
+                            "The script must exit 0 on success. Output is delivered to "
+                            "Slack if the script prints anything. Return nothing for "
+                            "normal (no-alert) runs."
                         ),
                         "parameters": {
                             "type": "object",
@@ -650,11 +698,31 @@ class LucyAgent:
                                 },
                                 "new_description": {
                                     "type": "string",
-                                    "description": "New task instructions (if changing)",
+                                    "description": "New task instructions (if changing, agent type only)",
                                 },
                                 "new_timezone": {
                                     "type": "string",
                                     "description": "New IANA timezone (if changing)",
+                                },
+                                "new_type": {
+                                    "type": "string",
+                                    "enum": ["agent", "script"],
+                                    "description": (
+                                        "Change execution model. 'agent' = LLM-driven (expensive), "
+                                        "'script' = Python script (free, no LLM cost). "
+                                        "When switching to 'script', you MUST also provide script_code."
+                                    ),
+                                },
+                                "script_code": {
+                                    "type": "string",
+                                    "description": (
+                                        "Python source code for the script (required when new_type='script', "
+                                        "or to update an existing script). The script runs in the workspace "
+                                        "directory with WORKSPACE_ID and WORKSPACE_ROOT env vars available. "
+                                        "Print output to stdout to deliver it to Slack. Print nothing (or "
+                                        "return SKIP) for a normal no-alert run. The script can use any "
+                                        "standard library or pre-installed packages (pymongo, requests, etc)."
+                                    ),
                                 },
                             },
                             "required": ["cron_name"],
@@ -1457,8 +1525,13 @@ class LucyAgent:
             if corrected:
                 response_text = corrected
 
-        # 6b4. Verification gate: check completeness and retry if needed
-        _MAX_RETRY_DEPTH = 1
+        # 6b4. Verification gate: check completeness and retry if needed.
+        # Retry depth meaning:
+        #   0 = first try (can retry)
+        #   1 = frontier model with failure context
+        #   2 = frontier model with "try a completely different approach" instruction
+        #   3 = frontier model with yet another approach — final attempt
+        _MAX_RETRY_DEPTH = 3
         if not failure_context and _retry_depth < _MAX_RETRY_DEPTH:
             verification = _verify_output(
                 message,
@@ -1476,20 +1549,54 @@ class LucyAgent:
                 )
                 from lucy.pipeline.router import MODEL_TIERS
 
-                escalated_model = MODEL_TIERS.get("code", model)
+                # Depth 0 → 1: escalate to frontier with failure context.
+                # Depth 1 → 2: frontier + explicitly try a different approach.
+                # Depth 2 → 3: frontier + yet another completely different approach.
+                _frontier = MODEL_TIERS.get("frontier", model)
+                if _retry_depth == 0:
+                    _retry_model = MODEL_TIERS.get("code", model)
+                    _retry_context = (
+                        f"Previous attempt failed verification: {failure_desc}"
+                    )
+                elif _retry_depth == 1:
+                    _retry_model = _frontier
+                    _retry_context = (
+                        f"Two attempts have failed: {failure_desc}. "
+                        f"You are now on a more capable model. Rebuild or "
+                        f"rewrite the failing parts with a fundamentally better "
+                        f"approach and verify it works."
+                    )
+                elif _retry_depth == 2:
+                    _retry_model = _frontier
+                    _retry_context = (
+                        f"Three attempts have failed: {failure_desc}. "
+                        f"Do NOT repeat the same implementation. Use a completely "
+                        f"different approach, technology, or strategy to solve "
+                        f"the problem, then verify it works before confirming."
+                    )
+                else:
+                    _retry_model = _frontier
+                    _retry_context = (
+                        f"All prior attempts failed: {failure_desc}. "
+                        f"This is the final attempt. Try the most robust, "
+                        f"different approach possible, verify it thoroughly, "
+                        f"and if it still fails explain the root blocker clearly."
+                    )
+
                 try:
                     retried = await self.run(
                         message=message,
                         ctx=ctx,
                         slack_client=slack_client,
-                        model_override=escalated_model,
-                        failure_context=(f"Previous attempt failed verification: {failure_desc}"),
+                        model_override=_retry_model,
+                        failure_context=_retry_context,
                         _retry_depth=_retry_depth + 1,
                     )
                     if retried and len(retried) > len(response_text or ""):
                         response_text = retried
                         logger.info(
                             "verification_retry_succeeded",
+                            depth=_retry_depth + 1,
                             workspace_id=ctx.workspace_id,
                         )
                 except Exception as e:
@@ -1498,21 +1605,21 @@ class LucyAgent:
                         workspace_id=ctx.workspace_id,
                         error=str(e),
                     )
-                    # Persist double-failure to workspace learnings so Lucy
-                    # avoids the same approach on the next user request.
-                    try:
-                        from lucy.workspace.filesystem import get_workspace
-                        from lucy.workspace.memory import append_learning
+                    if _retry_depth == 0:
+                        # Persist double-failure so Lucy avoids the same approach
+                        try:
+                            from lucy.workspace.filesystem import get_workspace
+                            from lucy.workspace.memory import append_learning
 
-                        _ws = get_workspace(ctx.workspace_id)
-                        await append_learning(
-                            _ws,
-                            f"Intent '{route.intent}': verification retry also failed "
-                            f"({failure_desc}). Approach change needed for: {message[:150]}",
-                            section="Mistakes",
-                        )
-                    except Exception:
-                        pass
+                            _ws = get_workspace(ctx.workspace_id)
+                            await append_learning(
+                                _ws,
+                                f"Intent '{route.intent}': verification retry also failed "
+                                f"({failure_desc}). Approach change needed for: {message[:150]}",
+                                section="Mistakes",
+                            )
+                        except Exception:
+                            pass
 
         # 6b5. Abort mechanism: if the model flagged itself as unhelpful
         # with very low confidence, retry once (like Viktor's do_send=False)
@@ -1853,6 +1960,10 @@ class LucyAgent:
         tool_name_counts: dict[str, int] = {}
         self._empty_retries = 0
         self._narration_retries = 0
+        self._action_nudge_done = False
+        self._verification_done = False
+        self._mutating_tools_used: list[str] = []
+        self._test_fix_state = _TestFixState()
         self._edit_attempts = 0
         self._400_recovery_count = 0
         self._504_frontier_retried = False
@@ -1927,10 +2038,46 @@ class LucyAgent:
 
             try:
                 async with trace.span(f"llm_call_{turn}", model=current_model) as _llm_span:
-                    response = await client.chat_completion(
-                        messages=all_messages,
-                        config=config,
-                    )
+                    # For streaming calls, enforce a per-call wall-clock cap so
+                    # slow providers (low t/s) don't block the whole agent turn.
+                    # If the call exceeds agent_max_llm_call_seconds, escalate to
+                    # the frontier model and retry — same path as silence detection.
+                    _max_call_s = settings.agent_max_llm_call_seconds
+                    if use_streaming and _max_call_s > 0:
+                        try:
+                            response = await asyncio.wait_for(
+                                client.chat_completion(
+                                    messages=all_messages,
+                                    config=config,
+                                ),
+                                timeout=_max_call_s,
+                            )
+                        except asyncio.TimeoutError:
+                            from lucy.pipeline.router import MODEL_TIERS
+                            frontier = MODEL_TIERS.get("frontier", current_model)
+                            logger.warning(
+                                "llm_call_wallclock_exceeded",
+                                model=current_model,
+                                max_s=_max_call_s,
+                                turn=turn,
+                                escalating_to=frontier,
+                                workspace_id=ctx.workspace_id,
+                            )
+                            if frontier != current_model:
+                                current_model = frontier
+                                continue
+                            # Already on frontier — fall through to the existing
+                            # error path by raising as a 504 OpenClawError.
+                            from lucy.core.openclaw import OpenClawError as _OCE
+                            raise _OCE(
+                                f"LLM call exceeded {_max_call_s}s wall-clock cap",
+                                status_code=504,
+                            )
+                    else:
+                        response = await client.chat_completion(
+                            messages=all_messages,
+                            config=config,
+                        )
                     if response.usage:
                         for k, v in response.usage.items():
                             if isinstance(v, (int, float)):
@@ -2150,6 +2297,45 @@ class LucyAgent:
                     )
                     continue
 
+                # Action-intent verification: if the intent requires tool
+                # execution (tool_use, monitoring, command, code), tools are
+                # available, it's the first turn, and no tools were called,
+                # the LLM likely described the action instead of performing it.
+                # Nudge it once to actually execute.
+                _action_intents = frozenset({
+                    "tool_use", "monitoring", "command", "code",
+                })
+                _action_nudge_done = getattr(self, "_action_nudge_done", False)
+                if (
+                    turn == 0
+                    and tools
+                    and not _action_nudge_done
+                    and getattr(route, "intent", "") in _action_intents
+                ):
+                    self._action_nudge_done = True
+                    logger.warning(
+                        "action_intent_no_tools",
+                        intent=route.intent,
+                        turn=turn,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append({"role": "assistant", "content": response_text})
+                    all_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "You described what you would do but didn't "
+                                "actually do it. Please call the tools now "
+                                "to execute this. If you need to modify a "
+                                "cron, use lucy_modify_cron. If you need to "
+                                "create something, use the appropriate tool. "
+                                "Don't just describe the outcome — make it "
+                                "happen."
+                            ),
+                        }
+                    )
+                    continue
+
                 narration_retries = getattr(self, "_narration_retries", 0)
                 _is_setup_intent = getattr(route, "intent", "") in (
                     "monitoring",
@@ -2175,6 +2361,225 @@ class LucyAgent:
                             "content": (
                                 "I need the actual data, not a plan. "
                                 "Please call the tools now and give me the results."
+                            ),
+                        }
+                    )
+                    continue
+
+                # ── Test-fix-retry state machine ──────────────────
+                # Replaces the old single-shot verification flag.
+                # Phases: BUILDING → TESTING → (FIXING → TESTING)* →
+                #         ESCALATED → (FIXING → TESTING)* →
+                #         REAPPROACH → (FIXING → TESTING)* → PASSED | GAVE_UP
+                from lucy.core.quality import response_indicates_test_pass
+
+                tfs = self._test_fix_state
+
+                # ── Transition from BUILDING to TESTING ───────────
+                # If we have unused mutating tools and haven't started
+                # the test cycle yet, kick it off.
+                if (
+                    self._mutating_tools_used
+                    and tfs.phase == _TFPhase.BUILDING
+                    and turn > 0
+                ):
+                    tfs.phase = _TFPhase.TESTING
+                    tfs.mutating_tools.extend(self._mutating_tools_used)
+                    _unique_tools = sorted(set(tfs.mutating_tools))
+                    _verify_hints = self._build_verify_hints(_unique_tools)
+                    logger.info(
+                        "test_fix_testing_start",
+                        turn=turn,
+                        tools=_unique_tools,
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Before you confirm to me that this is done, "
+                                "test that it actually works right now. "
+                                + _verify_hints
+                                + " Report the result as exactly one of:\n"
+                                "• TEST PASSED: <what you tested and what confirmed it works>\n"
+                                "• TEST FAILED: <what you tested and what went wrong>\n"
+                                "Do not say Done or confirm success until you have a TEST PASSED result."
+                            ),
+                        }
+                    )
+                    continue
+
+                # ── Evaluate test result (TESTING phase) ──────────
+                if tfs.phase == _TFPhase.TESTING:
+                    passed, fail_reason = response_indicates_test_pass(response_text)
+
+                    if passed:
+                        tfs.phase = _TFPhase.PASSED
+                        logger.info(
+                            "test_fix_passed",
+                            turn=turn,
+                            fix_attempts=tfs.fix_attempts,
+                            escalated=tfs.escalated,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        break  # Tests confirmed — normal exit
+
+                    # Test failed. Decide next move based on how many fixes
+                    # we've already tried at the current tier.
+                    tfs.failure_log.append(fail_reason)
+                    _max_fixes = (
+                        settings.test_fix_max_attempts_frontier
+                        if tfs.escalated
+                        else settings.test_fix_max_attempts_default
+                    )
+
+                    if tfs.fix_attempts < _max_fixes:
+                        # Still have fix budget — transition to FIXING
+                        tfs.phase = _TFPhase.FIXING
+                        tfs.fix_attempts += 1
+                        logger.warning(
+                            "test_fix_fixing",
+                            turn=turn,
+                            fix_attempt=tfs.fix_attempts,
+                            reason=fail_reason[:120],
+                            workspace_id=ctx.workspace_id,
+                        )
+                        all_messages.append(
+                            {"role": "assistant", "content": response_text}
+                        )
+                        all_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"TEST FAILED: {fail_reason}\n\n"
+                                    "Fix the issue and re-test. "
+                                    "Fix attempt "
+                                    f"{tfs.fix_attempts}/{_max_fixes}. "
+                                    "After fixing, run the test again and "
+                                    "report TEST PASSED or TEST FAILED."
+                                ),
+                            }
+                        )
+                        continue
+
+                    if not tfs.escalated:
+                        # Fix budget exhausted at default model — escalate
+                        tfs.phase = _TFPhase.ESCALATED
+                        tfs.escalated = True
+                        tfs.fix_attempts = 0
+                        from lucy.pipeline.router import MODEL_TIERS as _MT
+                        _frontier = _MT.get("frontier", current_model)
+                        if _frontier != current_model:
+                            current_model = _frontier
+                        logger.warning(
+                            "test_fix_escalated_to_frontier",
+                            turn=turn,
+                            failures=tfs.failure_log,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        _failures_summary = "; ".join(tfs.failure_log[-3:])
+                        all_messages.append(
+                            {"role": "assistant", "content": response_text}
+                        )
+                        all_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Previous fix attempts failed. "
+                                    f"Failures so far: {_failures_summary}\n\n"
+                                    "You are now using a more capable model. "
+                                    "Rebuild or rewrite the failing parts "
+                                    "from scratch with a better approach, "
+                                    "then test again and report "
+                                    "TEST PASSED or TEST FAILED."
+                                ),
+                            }
+                        )
+                        continue
+
+                    if tfs.approach_attempts < settings.test_fix_max_approaches:
+                        # Frontier fix budget also exhausted — try a different approach
+                        tfs.phase = _TFPhase.REAPPROACH
+                        tfs.fix_attempts = 0
+                        tfs.approach_attempts += 1
+                        logger.warning(
+                            "test_fix_reapproach",
+                            turn=turn,
+                            approach_attempt=tfs.approach_attempts,
+                            failures=tfs.failure_log,
+                            workspace_id=ctx.workspace_id,
+                        )
+                        _failures_summary = "; ".join(tfs.failure_log[-4:])
+                        all_messages.append(
+                            {"role": "assistant", "content": response_text}
+                        )
+                        all_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"All previous approaches have failed "
+                                    f"(attempt {tfs.approach_attempts}/"
+                                    f"{settings.test_fix_max_approaches}). "
+                                    f"Failures: {_failures_summary}\n\n"
+                                    "Do NOT retry the same implementation. "
+                                    "Think of a completely different way to "
+                                    "accomplish the goal, implement it from "
+                                    "scratch, and test it. Report TEST PASSED "
+                                    "or TEST FAILED."
+                                ),
+                            }
+                        )
+                        continue
+
+                    # All approaches exhausted — give up gracefully
+                    tfs.phase = _TFPhase.GAVE_UP
+                    _all_failures = "; ".join(tfs.failure_log)
+                    logger.error(
+                        "test_fix_gave_up",
+                        turn=turn,
+                        approach_attempts=tfs.approach_attempts,
+                        total_failures=len(tfs.failure_log),
+                        workspace_id=ctx.workspace_id,
+                    )
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "All approaches have failed. Tell the user "
+                                "clearly: (1) what you were trying to build, "
+                                "(2) what the specific blocker is, "
+                                "(3) what you tried "
+                                f"({tfs.approach_attempts + 1} approaches), "
+                                "(4) what would be needed to solve it. "
+                                "Be honest and specific. Do not apologize excessively."
+                            ),
+                        }
+                    )
+                    continue
+
+                # FIXING phase: re-test after fix was applied
+                if tfs.phase == _TFPhase.FIXING or tfs.phase == _TFPhase.REAPPROACH:
+                    # The agent produced text (presumably after applying a fix).
+                    # Move back to TESTING so the next iteration evaluates the result.
+                    tfs.phase = _TFPhase.TESTING
+                    _unique_tools = sorted(set(tfs.mutating_tools + self._mutating_tools_used))
+                    _verify_hints = self._build_verify_hints(_unique_tools)
+                    all_messages.append(
+                        {"role": "assistant", "content": response_text}
+                    )
+                    all_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Now run the test and report the result as "
+                                "TEST PASSED: <details> or TEST FAILED: <details>. "
+                                + _verify_hints
                             ),
                         }
                     )
@@ -2352,6 +2757,21 @@ class LucyAgent:
             )
             self._current_run_tool_count += len(tool_calls)
 
+            # Track tools that create/modify/delete state so we can
+            # require verification before the agent says "Done."
+            _MUTATING_PREFIXES = (
+                "lucy_create_", "lucy_modify_", "lucy_delete_",
+                "lucy_start_", "lucy_stop_",
+                "lucy_store_", "lucy_exec_command",
+                "lucy_execute_python", "lucy_execute_bash",
+                "lucy_spaces_deploy",
+            )
+            for tc in tool_calls:
+                _tn = tc.get("name", "")
+                if any(_tn.startswith(p) or _tn == p for p in _MUTATING_PREFIXES):
+                    self._mutating_tools_used.append(_tn)
+                elif _tn == "COMPOSIO_MULTI_EXECUTE_TOOL":
+                    self._mutating_tools_used.append(_tn)
             # Check for pending_approval BEFORE appending to messages.
             # If any tool was gated, we must stop here — not give the LLM
             # more turns to find an alternative path around the user's decision.
@@ -3796,8 +4216,9 @@ class LucyAgent:
                 condition_script_path = parameters.get("condition_script_path", "")
                 max_runs = parameters.get("max_runs", 0)
                 depends_on = parameters.get("depends_on", "")
+                script_code = parameters.get("script_code", "")
 
-                return await scheduler.create_cron(
+                result = await scheduler.create_cron(
                     workspace_id=workspace_id,
                     name=parameters.get("name", ""),
                     cron_expr=parameters.get("cron_expression", ""),
@@ -3812,6 +4233,50 @@ class LucyAgent:
                     max_runs=max_runs,
                     depends_on=depends_on,
                 )
+
+                # If script_code was provided with a script-type cron, write it now.
+                if result.get("success") and cron_type == "script" and script_code:
+                    import ast as _ast
+                    try:
+                        _ast.parse(script_code)
+                    except SyntaxError as e:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Script has a syntax error on line {e.lineno}: "
+                                f"{e.msg}. Fix the code and try again."
+                            ),
+                        }
+                    slug = parameters.get("name", "").lower().replace(" ", "-")
+                    slug = "".join(c for c in slug if c.isalnum() or c == "-")
+                    from lucy.workspace.filesystem import get_workspace as _get_ws
+                    ws = _get_ws(workspace_id)
+                    script_path = ws.root / "crons" / slug / "script.py"
+                    script_path.write_text(script_code, encoding="utf-8")
+
+                    # Dry-run the script before committing
+                    from lucy.crons.scheduler import _dry_run_script
+                    _dr = await _dry_run_script(str(script_path))
+                    if not _dr.get("ok"):
+                        return {
+                            "success": False,
+                            "error": (
+                                f"Script dry-run failed: "
+                                f"{_dr.get('error', 'unknown')}. "
+                                f"Fix the code and try again."
+                            ),
+                        }
+
+                    # Update description to point at the written script
+                    await scheduler.modify_cron(
+                        workspace_id=workspace_id,
+                        cron_name=slug,
+                        new_description=f"Script:crons/{slug}/script.py",
+                    )
+                    result["script_written"] = str(script_path)
+                    result["dry_run"] = "passed"
+
+                return result
 
             if tool_name == "lucy_delete_cron":
                 from lucy.crons.scheduler import get_scheduler
@@ -3833,6 +4298,8 @@ class LucyAgent:
                     new_description=parameters.get("new_description"),
                     new_title=parameters.get("new_title"),
                     new_tz=parameters.get("new_timezone"),
+                    new_type=parameters.get("new_type"),
+                    script_code=parameters.get("script_code"),
                 )
 
             if tool_name == "lucy_trigger_cron":
@@ -4942,6 +5409,55 @@ class LucyAgent:
                 "no access to",
             )
         )
+
+    @staticmethod
+    def _build_verify_hints(tool_names: list[str]) -> str:
+        """Build tool-specific verification instructions for the LLM."""
+        hints: list[str] = []
+        names_set = set(tool_names)
+        if any("create_cron" in n or "modify_cron" in n for n in names_set):
+            hints.append(
+                "For cron changes: call lucy_list_crons to confirm the cron "
+                "exists with the correct schedule and settings, then call "
+                "lucy_trigger_cron to run it immediately and verify the output."
+            )
+        if any("create_heartbeat" in n for n in names_set):
+            hints.append(
+                "For heartbeat monitors: call lucy_list_heartbeats to "
+                "confirm the monitor is active."
+            )
+        if any("exec_command" in n for n in names_set):
+            hints.append(
+                "For shell commands: check the output for errors or "
+                "unexpected results. If you wrote a file, read it "
+                "back to confirm it was written correctly."
+            )
+        if any("execute_python" in n or "execute_bash" in n for n in names_set):
+            hints.append(
+                "For code execution: check the output for errors, "
+                "tracebacks, or unexpected results."
+            )
+        if any("spaces_deploy" in n for n in names_set):
+            hints.append(
+                "For deployments: check the deployment status and URL "
+                "to confirm it's live."
+            )
+        if any("start_service" in n for n in names_set):
+            hints.append(
+                "For services: call lucy_service_logs to confirm the "
+                "service started correctly."
+            )
+        if "COMPOSIO_MULTI_EXECUTE_TOOL" in names_set:
+            hints.append(
+                "For multi-execute actions: check each result in the "
+                "response for errors or partial failures."
+            )
+        if not hints:
+            hints.append(
+                "Read back or list the thing you just changed to "
+                "confirm the result matches your intent."
+            )
+        return " ".join(hints)
 
     @staticmethod
     def _is_history_reference(message: str) -> bool:

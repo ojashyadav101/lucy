@@ -9,6 +9,12 @@ Primary model: minimax/minimax-m2.5
 - #1 on OpenRouter for programming/technology
 - $0.30/$1.10 per M tokens, 197K context
 
+Provider routing:
+    By default OpenRouter sorts by price, landing on slow providers
+    (~40-46 t/s for minimax). Provider preferences in config.py pin
+    specific models to fast providers (e.g. SambaNova at 395 t/s),
+    giving 9x speedup with identical output quality.
+
 Streaming architecture:
     Main agent loop calls (with tools, expensive) use streaming mode.
     The stream lets us distinguish "hung" from "working":
@@ -60,6 +66,19 @@ _LLM_WALLCLOCK_TIMEOUT = 1200.0
 _response_cache: collections.OrderedDict[str, tuple[str, float]] = collections.OrderedDict()
 _CACHE_TTL = 300.0
 _CACHE_MAX_INPUT_LEN = 200
+
+
+def _get_provider_routing(model: str) -> dict | None:
+    """Return OpenRouter provider routing config for a model, if configured.
+
+    Checks settings.model_provider_preferences by model prefix.
+    Returns None if no preference is set (OpenRouter uses default routing).
+    """
+    prefs = settings.model_provider_preferences
+    for prefix, routing in prefs.items():
+        if model.startswith(prefix):
+            return routing
+    return None
 
 
 def _cache_key(
@@ -243,6 +262,18 @@ class OpenClawClient:
         if config.tools:
             payload["tools"] = config.tools
             payload["tool_choice"] = "auto"
+
+        # Inject provider routing preferences if configured for this model.
+        # This pins requests to fast providers (e.g. SambaNova at 395 t/s for
+        # minimax) instead of OpenRouter's default price-sorted routing.
+        provider_routing = _get_provider_routing(model)
+        if provider_routing:
+            payload["provider"] = provider_routing
+            logger.debug(
+                "provider_routing_applied",
+                model=model,
+                provider_order=provider_routing.get("order"),
+            )
 
         logger.info(
             "chat_completion_request",

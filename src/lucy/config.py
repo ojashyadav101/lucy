@@ -50,6 +50,25 @@ class Settings(BaseSettings):
     model_tier_document: str = "minimax/minimax-m2.5"
     model_tier_frontier: str = "google/gemini-3.1-pro-preview"
 
+    # OpenRouter provider routing preferences.
+    # Keyed by model prefix (e.g. "minimax/"). When a request uses a model
+    # matching one of these prefixes, the provider config is injected into
+    # the request payload so OpenRouter routes to fast providers instead of
+    # defaulting to price-sorted routing.
+    #
+    # Background: minimax-m2.5 on OpenRouter's default routing lands on
+    # ~40-46 t/s providers (Novita, MiniMax official). The same model on
+    # SambaNova runs at 395 t/s — 9x faster for the same output quality.
+    # This setting pins minimax calls to fast providers without changing
+    # the model or its capabilities.
+    model_provider_preferences: dict[str, dict] = {
+        "minimax/": {
+            "order": ["SambaNova", "Fireworks", "Clarifai", "Together"],
+            "allow_fallbacks": True,
+            "preferred_min_throughput": 100,
+        },
+    }
+
     # OpenClaw Gateway (available for sandbox/memory, not used for chat)
     openclaw_base_url: str = "http://167.86.82.46:18791"
     openclaw_api_key: str = ""
@@ -85,6 +104,20 @@ class Settings(BaseSettings):
     agent_absolute_max_seconds: int = 14_400
     agent_silence_threshold_s: float = 360.0
     agent_wallclock_timeout_s: float = 1200.0
+    # Per-call streaming LLM cap. If a single streaming call exceeds this many
+    # seconds of wall-clock time (tokens still flowing), cancel and escalate to
+    # the frontier model for that turn. Set to 0 to disable.
+    # 45s is generous — at SambaNova speeds a 3,000-token response takes ~7s.
+    # This only fires when provider routing fails to land on a fast provider.
+    agent_max_llm_call_seconds: float = 45.0
+
+    # ── Test-fix-retry escalation thresholds ─────────────────
+    # How many fix cycles the default model gets before escalating to frontier.
+    test_fix_max_attempts_default: int = 2
+    # How many fix cycles the frontier model gets before trying a new approach.
+    test_fix_max_attempts_frontier: int = 2
+    # How many completely different approach attempts before giving up.
+    test_fix_max_approaches: int = 2
 
     # ── Slack handler limits ──────────────────────────────────
     handler_execution_timeout: int = 14400

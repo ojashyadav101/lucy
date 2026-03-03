@@ -1,0 +1,59 @@
+#!/bin/bash
+# Git post-receive hook — runs on Contabo after every `git push contabo main`
+# Pulls latest code, installs deps, runs migrations, restarts Lucy.
+set -euo pipefail
+
+DEPLOY_DIR=/opt/lucy/app
+VENV="$DEPLOY_DIR/.venv"
+LOG_FILE=/var/log/lucy-deploy.log
+TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+
+log() {
+    echo "[$TIMESTAMP] $*" | tee -a "$LOG_FILE"
+}
+
+log "=== Lucy deploy triggered ==="
+
+# Read the ref being pushed
+while read oldrev newrev refname; do
+    BRANCH=$(git rev-parse --abbrev-ref "$refname" 2>/dev/null || echo "$refname")
+    log "Branch: $BRANCH | $oldrev -> $newrev"
+
+    # Only deploy main branch
+    if [[ "$BRANCH" != "main" && "$BRANCH" != "refs/heads/main" ]]; then
+        log "Skipping non-main branch: $BRANCH"
+        exit 0
+    fi
+done
+
+log "--- Pulling latest code ---"
+cd "$DEPLOY_DIR"
+git fetch origin main
+git reset --hard origin/main
+
+log "--- Installing/updating dependencies ---"
+"$VENV/bin/pip" install -e "." -q --no-input
+
+log "--- Running database migrations ---"
+"$VENV/bin/python" scripts/init_db.py --migrate 2>&1 | tee -a "$LOG_FILE" || {
+    log "WARNING: Migration had issues — continuing anyway"
+}
+
+log "--- Restarting Lucy service ---"
+systemctl restart lucy
+
+# Wait and confirm it came back up
+sleep 3
+if systemctl is-active --quiet lucy; then
+    log "=== Lucy is UP and running ==="
+    echo ""
+    echo "✓ Lucy deployed successfully at $TIMESTAMP"
+    echo "  Logs: journalctl -u lucy -f"
+    echo "  Status: systemctl status lucy"
+else
+    log "ERROR: Lucy failed to start after deploy!"
+    journalctl -u lucy -n 30 --no-pager >> "$LOG_FILE"
+    echo ""
+    echo "✗ Lucy failed to start — check: journalctl -u lucy -n 50"
+    exit 1
+fi

@@ -120,6 +120,14 @@ _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "",
     ),
     (re.compile(r"/Users/[^\s)\"']+"), ""),
+    # Fix invalid Slack emoji names that the LLM may generate for priority labels.
+    # These render as broken text (":medium:") in Slack clients.
+    (re.compile(r":medium:"), ":large_yellow_circle:"),
+    (re.compile(r":high:"), ":large_red_circle:"),
+    (re.compile(r":low:"), ":large_green_circle:"),
+    (re.compile(r":priority_high:"), ":large_red_circle:"),
+    (re.compile(r":priority_medium:"), ":large_yellow_circle:"),
+    (re.compile(r":priority_low:"), ":large_green_circle:"),
 ]
 
 # Match only known Composio/internal tool namespaces — NOT any ALL_CAPS_IDENTIFIER.

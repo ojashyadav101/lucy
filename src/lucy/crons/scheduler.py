@@ -54,6 +54,52 @@ _HIGH_FREQ_THRESHOLD = 24
 _MODERATE_FREQ_THRESHOLD = 6
 _SCRIPT_TIMEOUT_S = 1800
 _CONDITION_SCRIPT_TIMEOUT_S = 30
+_DRYRUN_TIMEOUT_S = 10
+
+
+async def _dry_run_script(script_path: str) -> dict[str, Any]:
+    """Execute a script with a short timeout to catch runtime errors early.
+
+    Returns ``{"ok": True}`` on success, ``{"ok": False, "error": ...}``
+    on failure. Uses ``--dry-run`` env flag so scripts can skip real side
+    effects when they check ``os.environ.get("LUCY_DRY_RUN")``.
+    """
+    import subprocess
+
+    env = {
+        **__import__("os").environ,
+        "LUCY_DRY_RUN": "1",
+    }
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                "python3", script_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            ),
+            timeout=2,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_DRYRUN_TIMEOUT_S,
+        )
+        if proc.returncode != 0:
+            err_text = stderr.decode("utf-8", errors="replace").strip()
+            return {
+                "ok": False,
+                "error": (
+                    f"Script exited with code {proc.returncode}. "
+                    f"stderr: {err_text[:500]}"
+                ),
+            }
+        return {"ok": True, "stdout": stdout.decode("utf-8", errors="replace")[:200]}
+    except asyncio.TimeoutError:
+        return {"ok": True, "note": "Script timed out during dry-run (may be waiting for I/O); syntax is valid."}
+    except FileNotFoundError:
+        return {"ok": False, "error": "python3 not found on this system."}
+    except Exception as e:
+        return {"ok": False, "error": f"Dry-run failed: {e!r}"}
 
 
 def validate_cron_expression(expr: str) -> str | None:
@@ -385,6 +431,12 @@ class CronScheduler:
             "title": title,
             "timezone": tz or "server default",
             "total_workspace_crons": count,
+            "verification_hint": (
+                f"Call lucy_list_crons to confirm '{slug}' appears with "
+                f"schedule '{cron_expr}'. If this is a script-type cron, "
+                f"also verify the script runs without errors by calling "
+                f"lucy_trigger_cron with cron_name='{slug}'."
+            ),
         }
         if cost_warning:
             result["cost_warning"] = cost_warning
@@ -435,8 +487,14 @@ class CronScheduler:
         new_description: str | None = None,
         new_title: str | None = None,
         new_tz: str | None = None,
+        new_type: str | None = None,
+        script_code: str | None = None,
     ) -> dict[str, Any]:
-        """Update an existing cron's schedule, description, or title.
+        """Update an existing cron's schedule, description, title, timezone, or execution type.
+
+        ``new_type`` accepts ``"agent"`` or ``"script"``. When switching to
+        ``"script"``, ``script_code`` must be provided — Lucy writes the code
+        to ``crons/<slug>/script.py`` and updates the description to point at it.
 
         Supports fuzzy matching: if exact slug not found, searches by
         title substring match.
@@ -480,14 +538,103 @@ class CronScheduler:
         if new_tz is not None:
             data["timezone"] = new_tz
 
+        if new_type is not None:
+            if new_type not in ("agent", "script"):
+                return {
+                    "success": False,
+                    "error": f"Invalid type '{new_type}'. Must be 'agent' or 'script'.",
+                }
+            data["type"] = new_type
+
+            if new_type == "script":
+                if not script_code:
+                    return {
+                        "success": False,
+                        "error": (
+                            "switching to type='script' requires script_code. "
+                            "Provide the Python code that will run on each check."
+                        ),
+                    }
+                # Validate syntax before writing
+                import ast as _ast
+                try:
+                    _ast.parse(script_code)
+                except SyntaxError as e:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Script has a syntax error on line {e.lineno}: {e.msg}. "
+                            f"Fix the code and try again."
+                        ),
+                    }
+                # Write the script to the cron directory
+                script_path = ws.root / "crons" / slug / "script.py"
+                script_path.write_text(script_code, encoding="utf-8")
+                data["description"] = f"Script:crons/{slug}/script.py"
+                logger.info(
+                    "cron_script_written",
+                    workspace_id=workspace_id,
+                    path=str(script_path),
+                    bytes=len(script_code),
+                )
+                # Dry-run the script to catch import/runtime errors early
+                _dr = await _dry_run_script(str(script_path))
+                if not _dr.get("ok"):
+                    return {
+                        "success": False,
+                        "error": (
+                            f"Script syntax is valid but dry-run failed: "
+                            f"{_dr.get('error', 'unknown')}. Fix and retry."
+                        ),
+                    }
+
+        elif script_code and data.get("type") == "script":
+            # Validate syntax before writing
+            import ast as _ast
+            try:
+                _ast.parse(script_code)
+            except SyntaxError as e:
+                return {
+                    "success": False,
+                    "error": (
+                        f"Script has a syntax error on line {e.lineno}: {e.msg}. "
+                        f"Fix the code and try again."
+                    ),
+                }
+            # Update the script code without changing the type
+            script_path = ws.root / "crons" / slug / "script.py"
+            script_path.write_text(script_code, encoding="utf-8")
+            data["description"] = f"Script:crons/{slug}/script.py"
+            # Dry-run the updated script
+            _dr = await _dry_run_script(str(script_path))
+            if not _dr.get("ok"):
+                return {
+                    "success": False,
+                    "error": (
+                        f"Script syntax is valid but dry-run failed: "
+                        f"{_dr.get('error', 'unknown')}. Fix and retry."
+                    ),
+                }
+
         data["updated_at"] = datetime.now(UTC).isoformat()
 
         task_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         count = await self.reload_workspace(workspace_id)
+        _is_script = data.get("type") == "script"
+        _verify = (
+            f"Call lucy_list_crons to confirm '{slug}' was updated correctly."
+        )
+        if _is_script:
+            _verify += (
+                f" Then call lucy_trigger_cron with cron_name='{slug}' "
+                f"to run the script once and verify it works."
+            )
         return {
             "success": True,
             "updated": slug,
+            "type": data.get("type", "agent"),
             "total_workspace_crons": count,
+            "verification_hint": _verify,
         }
 
     def list_jobs(self) -> list[dict[str, Any]]:

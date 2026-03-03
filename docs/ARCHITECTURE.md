@@ -345,6 +345,12 @@ src/lucy/
 | [SKILLS_SEEDS.md](./SKILLS_SEEDS.md) | Platform skills, workspace seeds, default cron configurations, Spaces templates |
 | [ARCHIVED_CODE.md](./ARCHIVED_CODE.md) | Removed code reference for historical context |
 
+### How Lucy Works (In-Depth)
+
+| Document | What It Covers |
+|----------|----------------|
+| [how-lucy-works/TEST-FIX-RETRY-FRAMEWORK.md](./how-lucy-works/TEST-FIX-RETRY-FRAMEWORK.md) | The universal testing system — 7-stage escalation ladder, script validation, pass/fail detection, full test coverage |
+
 ### External Reference
 
 | Directory | What It Covers |

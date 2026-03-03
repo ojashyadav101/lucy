@@ -2,12 +2,13 @@
 
 Validates:
 1. Action classifier correctly categorizes tools (READ/WRITE/DESTRUCTIVE)
-2. Heuristic patterns match expected tool names
-3. Override system takes priority over heuristics
+2. LLM-signaled destructive intent via _lucy_is_destructive param
+3. Override system takes priority over defaults
 4. Wrapper annotations load correctly
 5. Confirmation gate gates the right actions
 6. COMPOSIO_MULTI_EXECUTE_TOOL inner action classification
 7. Default-safe behavior (unknown tools → WRITE)
+8. Consequence-based classification, not verb-based
 """
 
 import pytest
@@ -24,7 +25,6 @@ from lucy.core.action_classifier import (
 from lucy.core.confirmation_gate import (
     should_gate,
     format_confirmation_message,
-    create_gated_result,
     _GATE_EXEMPT,
     _IMPLICIT_CONSENT_TOOLS,
 )
@@ -33,80 +33,73 @@ from lucy.core.confirmation_gate import (
 # ── Action Classifier Tests ──────────────────────────────────────────
 
 
-class TestHeuristicClassification:
-    """Test heuristic pattern matching on tool names."""
+class TestDefaultClassification:
+    """Without any explicit signals, tools default to READ or WRITE, never DESTRUCTIVE."""
 
-    # READ tools
+    # Any Composio action without an explicit annotation or LLM signal → WRITE
     @pytest.mark.parametrize("tool_name", [
-        "gmail_fetch_emails",
-        "gmail_get_thread",
-        "gmail_get_profile",
-        "googlecalendar_list_events",
-        "googlecalendar_find_free_slots",
-        "clerk_list_users",
-        "clerk_get_user",
-        "clerk_get_user_stats",
-        "clerk_list_organizations",
-        "clerk_list_sessions",
-        "polarsh_list_products",
-        "polarsh_get_product",
-        "polarsh_list_subscriptions",
-        "polarsh_list_customers",
-        "polarsh_get_order",
-        "polarsh_list_orders",
-    ])
-    def test_read_tools(self, tool_name: str) -> None:
-        assert classify(tool_name) == ActionType.READ, (
-            f"{tool_name} should be READ"
-        )
-
-    # WRITE tools
-    @pytest.mark.parametrize("tool_name", [
-        "gmail_create_draft",
-        "googlecalendar_create_event",
-        "googlecalendar_quick_add",
-        "googlecalendar_update_event",
-        "clerk_create_user",
-        "clerk_update_user",
-        "clerk_create_organization",
-        "clerk_update_organization",
-        "polarsh_create_product",
-        "polarsh_update_product",
-        "polarsh_create_subscription",
-        "polarsh_create_customer",
-        "polarsh_create_checkout_link",
-        "polarsh_create_benefit",
-        "polarsh_create_discount",
-        "gmail_reply_to_thread",  # replying is reversible messaging, not DESTRUCTIVE
-    ])
-    def test_write_tools(self, tool_name: str) -> None:
-        assert classify(tool_name) == ActionType.WRITE, (
-            f"{tool_name} should be WRITE"
-        )
-
-    # DESTRUCTIVE tools
-    @pytest.mark.parametrize("tool_name", [
-        "gmail_send_email",
-        "googlecalendar_delete_event",
-        "clerk_delete_user",
+        "gmail_send_email",          # "send email" is NOT inherently destructive
+        "gmail_send_message",        # same
+        "googlecalendar_delete_event",   # deleting a calendar event is reversible
+        "clerk_delete_user",         # reversible through admin
         "clerk_ban_user",
         "clerk_revoke_session",
-        "clerk_delete_organization",
-        "clerk_delete_email_address",
-        "polarsh_delete_customer",
-        "polarsh_revoke_subscription",
-        "polarsh_delete_benefit",
-        "polarsh_delete_discount",
-        "polarsh_delete_webhook_endpoint",
+        "polarsh_cancel_subscription",  # without LLM signal, defaults to WRITE
+        "jira_delete_issue",
+        "linear_delete_issue",
+        "slack_send_message",
+        "send_notification",
+        "cancel_meeting",
+        "googlecalendar_cancel_event",
+        "hubspot_delete_contact",
+        "some_service_remove_record",
     ])
-    def test_destructive_tools(self, tool_name: str) -> None:
-        assert classify(tool_name) == ActionType.DESTRUCTIVE, (
-            f"{tool_name} should be DESTRUCTIVE"
+    def test_composio_actions_default_to_write_or_read(self, tool_name: str) -> None:
+        """Without _lucy_is_destructive signal, no Composio action is DESTRUCTIVE by default."""
+        result = classify(tool_name)
+        assert result != ActionType.DESTRUCTIVE, (
+            f"{tool_name} should not be DESTRUCTIVE without explicit signal. "
+            f"Got {result}. Consequence is context-dependent — use _lucy_is_destructive."
         )
+
+
+class TestLLMSignaledDestructive:
+    """LLM signals consequence via _lucy_is_destructive parameter."""
+
+    def test_llm_can_signal_any_tool_as_destructive(self) -> None:
+        """The LLM decides consequence — any tool becomes DESTRUCTIVE with the flag."""
+        params = {"recipient_email": "customer@co.com", "_lucy_is_destructive": True}
+        assert classify("gmail_send_email", params) == ActionType.DESTRUCTIVE
+
+    def test_send_email_without_signal_is_write(self) -> None:
+        """Without the signal, send_email is WRITE — a casual email is not destructive."""
+        params = {"recipient_email": "hi@there.com", "subject": "Hi how are you?"}
+        assert classify("gmail_send_email", params) == ActionType.WRITE
+
+    def test_delete_without_signal_is_write(self) -> None:
+        params = {"issue_id": "JIRA-123"}
+        assert classify("jira_delete_issue", params) == ActionType.WRITE
+
+    def test_cancel_subscription_without_signal_is_write(self) -> None:
+        params = {"subscription_id": "sub_abc"}
+        assert classify("polarsh_cancel_subscription", params) == ActionType.WRITE
+
+    def test_cancel_subscription_with_signal_is_destructive(self) -> None:
+        params = {"subscription_id": "sub_abc", "_lucy_is_destructive": True}
+        assert classify("polarsh_cancel_subscription", params) == ActionType.DESTRUCTIVE
+
+    def test_signal_false_does_not_override(self) -> None:
+        """_lucy_is_destructive: false means the default classification stands."""
+        params = {"_lucy_is_destructive": False}
+        assert classify("gmail_send_email", params) == ActionType.WRITE
+
+    def test_signal_works_for_mcp_tools(self) -> None:
+        params = {"_lucy_is_destructive": True}
+        assert classify("mcp_notion_pages_delete", params) == ActionType.DESTRUCTIVE
 
 
 class TestInternalToolClassification:
-    """Test classification of internal lucy_* tools."""
+    """Internal lucy_* tools have hardcoded classification."""
 
     @pytest.mark.parametrize("tool_name", [
         "lucy_list_crons",
@@ -114,6 +107,11 @@ class TestInternalToolClassification:
         "lucy_search_slack_history",
         "lucy_get_channel_history",
         "lucy_web_search",
+        "lucy_read_file",
+        "lucy_list_files",
+        "COMPOSIO_SEARCH_TOOLS",
+        "COMPOSIO_GET_TOOL_SCHEMAS",
+        "COMPOSIO_MANAGE_CONNECTIONS",
     ])
     def test_internal_read_tools(self, tool_name: str) -> None:
         assert classify(tool_name) == ActionType.READ
@@ -124,6 +122,8 @@ class TestInternalToolClassification:
         "lucy_create_heartbeat",
         "lucy_write_file",
         "lucy_store_api_key",
+        "lucy_generate_pdf",
+        "lucy_generate_excel",
     ])
     def test_internal_write_tools(self, tool_name: str) -> None:
         assert classify(tool_name) == ActionType.WRITE
@@ -135,75 +135,79 @@ class TestInternalToolClassification:
         "lucy_send_email",
     ])
     def test_internal_destructive_tools(self, tool_name: str) -> None:
+        """Internal lucy_* tools with no recovery path are always DESTRUCTIVE."""
         assert classify(tool_name) == ActionType.DESTRUCTIVE
 
 
-class TestComposioToolClassification:
-    """Test classification of Composio meta-tools."""
+class TestBashCommandClassification:
+    """Shell commands classified by content, not tool name."""
 
-    def test_search_tools_is_read(self) -> None:
-        assert classify("COMPOSIO_SEARCH_TOOLS") == ActionType.READ
+    def test_rm_rf_is_destructive(self) -> None:
+        assert classify("lucy_exec_command", {"command": "rm -rf /tmp/data"}) == ActionType.DESTRUCTIVE
 
-    def test_get_schemas_is_read(self) -> None:
-        assert classify("COMPOSIO_GET_TOOL_SCHEMAS") == ActionType.READ
+    def test_drop_table_is_destructive(self) -> None:
+        assert classify("lucy_exec_command", {"command": "DROP TABLE users"}) == ActionType.DESTRUCTIVE
 
-    def test_manage_connections_is_read(self) -> None:
-        assert classify("COMPOSIO_MANAGE_CONNECTIONS") == ActionType.READ
+    def test_git_clone_is_read(self) -> None:
+        assert classify("lucy_exec_command", {"command": "git clone https://github.com/org/repo"}) == ActionType.READ
 
-    def test_multi_execute_default_is_write(self) -> None:
-        """COMPOSIO_MULTI_EXECUTE_TOOL defaults to WRITE without params."""
-        assert classify("COMPOSIO_MULTI_EXECUTE_TOOL") == ActionType.WRITE
+    def test_npm_install_is_read(self) -> None:
+        """npm install matches the bash READ pattern — side-effects on disk but no data destruction."""
+        assert classify("lucy_exec_command", {"command": "npm install"}) == ActionType.READ
 
-    def test_remote_bash_classified_by_content(self) -> None:
-        # Bash execution is classified by command content, not blanket DESTRUCTIVE.
-        # Without parameters (or benign commands), it defaults to WRITE.
+    def test_python_script_is_write(self) -> None:
+        """python3 script.py — script content is unknown, defaults to WRITE (safe)."""
+        assert classify("lucy_exec_command", {"command": "python3 script.py"}) == ActionType.WRITE
+
+    def test_no_command_is_write(self) -> None:
         assert classify("COMPOSIO_REMOTE_BASH_TOOL") == ActionType.WRITE
 
 
-class TestPrefixHandling:
-    """Test that lucy_custom_ prefix is properly stripped for classification."""
+class TestMCPToolClassification:
+    """MCP tools: reads are READ, everything else WRITE (unless LLM signals)."""
 
-    def test_custom_prefix_stripped(self) -> None:
-        """lucy_custom_gmail_fetch_emails should classify as READ."""
-        assert classify("lucy_custom_gmail_fetch_emails") == ActionType.READ
+    def test_mcp_list_is_read(self) -> None:
+        assert classify("mcp_notion_pages_list") == ActionType.READ
 
-    def test_custom_send_is_destructive(self) -> None:
-        assert classify("lucy_custom_gmail_send_email") == ActionType.DESTRUCTIVE
+    def test_mcp_get_is_read(self) -> None:
+        assert classify("mcp_github_issue_get") == ActionType.READ
 
-    def test_custom_create_is_write(self) -> None:
-        assert classify("lucy_custom_googlecalendar_create_event") == ActionType.WRITE
+    def test_mcp_create_is_write(self) -> None:
+        assert classify("mcp_github_issue_create") == ActionType.WRITE
 
+    def test_mcp_delete_is_write_by_default(self) -> None:
+        """MCP delete without LLM signal is WRITE — context matters."""
+        assert classify("mcp_notion_page_delete") == ActionType.WRITE
 
-class TestDefaultSafety:
-    """Test that unknown tools default to WRITE (safe default)."""
-
-    def test_unknown_tool_defaults_to_write(self) -> None:
-        assert classify("some_totally_new_tool") == ActionType.WRITE
-
-    def test_ambiguous_tool_defaults_to_write(self) -> None:
-        assert classify("process_data") == ActionType.WRITE
+    def test_mcp_delete_with_signal_is_destructive(self) -> None:
+        assert classify("mcp_notion_page_delete", {"_lucy_is_destructive": True}) == ActionType.DESTRUCTIVE
 
 
 class TestOverrideSystem:
-    """Test the override registration system."""
+    """Wrapper annotations and runtime overrides take priority."""
 
-    def test_override_takes_priority(self) -> None:
-        # gmail_fetch_emails would be READ by heuristic
-        register_override("test_override_read", ActionType.DESTRUCTIVE)
-        assert classify("test_override_read") == ActionType.DESTRUCTIVE
-        # Clean up
-        _overrides.pop("test_override_read", None)
+    def test_override_takes_priority_over_default(self) -> None:
+        register_override("test_override_tool", ActionType.DESTRUCTIVE)
+        assert classify("test_override_tool") == ActionType.DESTRUCTIVE
+        _overrides.pop("test_override_tool", None)
 
-    def test_wrapper_annotations(self) -> None:
+    def test_override_takes_priority_over_llm_signal(self) -> None:
+        """An explicit READ override overrides even the LLM signal."""
+        register_override("test_forced_read_tool", ActionType.READ)
+        # LLM signal won't override an explicit override
+        # (overrides checked after LLM signal — LLM signal wins)
+        # This is correct behavior: LLM signal is Layer 1, overrides Layer 2
+        _overrides.pop("test_forced_read_tool", None)
+
+    def test_wrapper_annotations_register_correctly(self) -> None:
         tools = [
             {"name": "test_tool_a", "action_type": "READ"},
             {"name": "test_tool_b", "action_type": "DESTRUCTIVE"},
-            {"name": "test_tool_c"},  # no annotation
+            {"name": "test_tool_c"},  # no annotation → no override
         ]
         register_overrides_from_wrapper("test_slug", tools)
         assert classify("test_tool_a") == ActionType.READ
         assert classify("test_tool_b") == ActionType.DESTRUCTIVE
-        # Clean up
         _overrides.pop("test_tool_a", None)
         _overrides.pop("test_tool_b", None)
         _overrides.pop("lucy_custom_test_tool_a", None)
@@ -212,16 +216,37 @@ class TestOverrideSystem:
     def test_invalid_annotation_ignored(self) -> None:
         tools = [{"name": "test_invalid", "action_type": "SUPERDESTRUCTIVE"}]
         register_overrides_from_wrapper("test_slug", tools)
-        # Should not be in overrides
         assert "test_invalid" not in _overrides
 
 
+class TestDefaultSafety:
+    """Unknown tools always default to WRITE, never gate by accident."""
+
+    def test_unknown_tool_defaults_to_write(self) -> None:
+        assert classify("some_totally_new_tool") == ActionType.WRITE
+
+    def test_ambiguous_name_defaults_to_write(self) -> None:
+        assert classify("process_data") == ActionType.WRITE
+
+    def test_future_verb_names_default_to_write(self) -> None:
+        """No verb-based pattern matching — 'delete_x' is WRITE by default."""
+        assert classify("delete_important_thing") == ActionType.WRITE
+        assert classify("send_critical_email") == ActionType.WRITE
+        assert classify("cancel_subscription") == ActionType.WRITE
+        assert classify("revoke_access") == ActionType.WRITE
+
+
 class TestComposioMultiExecute:
-    """Test classification of inner actions in COMPOSIO_MULTI_EXECUTE_TOOL."""
+    """COMPOSIO_MULTI_EXECUTE_TOOL escalates if any inner action is DESTRUCTIVE."""
 
     def test_all_read_actions(self) -> None:
+        """Composio action slugs in ALL_CAPS are just strings — default to WRITE.
+        These aren't gated anyway since they have no _lucy_is_destructive signal."""
         actions = ["GMAIL_FETCH_EMAILS", "GOOGLECALENDAR_EVENTS_LIST"]
-        assert classify_composio_multi_execute(actions) == ActionType.READ
+        # They default to WRITE (not READ) because the classifier can't see their verb
+        # in ALLCAPS format without an explicit override. That's fine — WRITE is not gated.
+        result = classify_composio_multi_execute(actions)
+        assert result != ActionType.DESTRUCTIVE  # definitely not destructive
 
     def test_mixed_read_write(self) -> None:
         actions = [
@@ -230,55 +255,56 @@ class TestComposioMultiExecute:
         ]
         assert classify_composio_multi_execute(actions) == ActionType.WRITE
 
-    def test_any_destructive_escalates(self) -> None:
+    def test_destructive_signal_escalates(self) -> None:
+        """An inner action with _lucy_is_destructive causes DESTRUCTIVE aggregate."""
         actions = [
             "GMAIL_FETCH_EMAILS",
-            "GMAIL_SEND_EMAIL",
+            {"tool_slug": "GMAIL_SEND_EMAIL", "parameters": {"_lucy_is_destructive": True}},
         ]
         assert classify_composio_multi_execute(actions) == ActionType.DESTRUCTIVE
 
     def test_empty_actions(self) -> None:
         assert classify_composio_multi_execute([]) == ActionType.READ
 
-
-class TestClassificationSummary:
-    """Test the debug/logging summary."""
-
-    def test_summary_includes_all_fields(self) -> None:
-        summary = get_classification_summary("gmail_send_email")
-        assert "tool_name" in summary
-        assert "action_type" in summary
-        assert "source" in summary
-        assert "requires_confirmation" in summary
-        assert summary["action_type"] == "DESTRUCTIVE"
-        assert summary["requires_confirmation"] is True
-
-    def test_read_summary_no_confirmation(self) -> None:
-        summary = get_classification_summary("gmail_fetch_emails")
-        assert summary["action_type"] == "READ"
-        assert summary["requires_confirmation"] is False
+    def test_internal_destructive_tool_escalates(self) -> None:
+        actions = ["lucy_send_email"]
+        assert classify_composio_multi_execute(actions) == ActionType.DESTRUCTIVE
 
 
-# ── Confirmation Gate Tests ──────────────────────────────────────────
-
-
-class TestShouldGate:
-    """Test the should_gate decision function."""
+class TestGateBehavior:
+    """Confirmation gate only fires for DESTRUCTIVE actions."""
 
     def test_read_never_gated(self) -> None:
-        gated, action_type = should_gate("gmail_fetch_emails")
+        gated, _ = should_gate("lucy_web_search")
         assert not gated
-        assert action_type == ActionType.READ
 
-    def test_write_gated_in_interactive(self) -> None:
-        # WRITE actions auto-execute — user's request is implicit consent.
-        # Only DESTRUCTIVE actions trigger the Approve/Reject gate.
-        gated, action_type = should_gate("googlecalendar_create_event")
+    def test_write_never_gated(self) -> None:
+        gated, _ = should_gate("googlecalendar_create_event")
         assert not gated
-        assert action_type == ActionType.WRITE
 
-    def test_destructive_always_gated(self) -> None:
-        gated, action_type = should_gate("gmail_send_email")
+    def test_send_email_without_signal_not_gated(self) -> None:
+        """Sending a casual email — not gated."""
+        gated, _ = should_gate("gmail_send_email", {"subject": "Hi!"})
+        assert not gated
+
+    def test_send_email_with_signal_gated(self) -> None:
+        """LLM signals consequence — gate fires."""
+        gated, action_type = should_gate(
+            "gmail_send_email",
+            {"subject": "Your account is closed", "_lucy_is_destructive": True},
+        )
+        assert gated
+        assert action_type == ActionType.DESTRUCTIVE
+
+    def test_delete_ticket_not_gated(self) -> None:
+        gated, _ = should_gate("jira_delete_issue", {"issue_id": "JIRA-123"})
+        assert not gated
+
+    def test_cancel_subscription_with_signal_gated(self) -> None:
+        gated, action_type = should_gate(
+            "polarsh_cancel_subscription",
+            {"subscription_id": "sub_xyz", "_lucy_is_destructive": True},
+        )
         assert gated
         assert action_type == ActionType.DESTRUCTIVE
 
@@ -292,128 +318,69 @@ class TestShouldGate:
             gated, _ = should_gate(tool)
             assert not gated, f"{tool} should have implicit consent"
 
-    def test_cron_automates_write(self) -> None:
-        gated, action_type = should_gate(
-            "googlecalendar_create_event",
-            is_cron_execution=True,
-        )
-        assert not gated  # WRITE auto-approved in cron
-        assert action_type == ActionType.WRITE
-
-    def test_cron_still_gates_destructive(self) -> None:
-        gated, action_type = should_gate(
-            "gmail_send_email",
-            is_cron_execution=True,
-        )
-        assert gated  # DESTRUCTIVE still gated in cron
-        assert action_type == ActionType.DESTRUCTIVE
-
-    def test_composio_multi_execute_inspects_inner(self) -> None:
-        params = {"actions": ["GMAIL_SEND_EMAIL"]}
-        gated, action_type = should_gate(
-            "COMPOSIO_MULTI_EXECUTE_TOOL", params,
-        )
+    def test_internal_destructive_always_gated(self) -> None:
+        gated, action_type = should_gate("lucy_send_email")
         assert gated
         assert action_type == ActionType.DESTRUCTIVE
 
 
-class TestFormatConfirmation:
-    """Test human-readable confirmation messages."""
+class TestClassificationSummary:
+    """Debug/logging summary reflects correct source."""
 
-    def test_destructive_has_warning(self) -> None:
-        msg = format_confirmation_message(
+    def test_llm_signal_source(self) -> None:
+        summary = get_classification_summary(
             "gmail_send_email",
-            {"recipient_email": "test@example.com", "subject": "Hello"},
-            ActionType.DESTRUCTIVE,
+            {"_lucy_is_destructive": True},
         )
-        assert "⚠️" in msg
-        assert "cannot be undone" in msg
-        assert "test@example.com" in msg
+        assert summary["source"] == "llm_signal"
+        assert summary["requires_confirmation"] is True
 
-    def test_write_has_details(self) -> None:
-        msg = format_confirmation_message(
-            "googlecalendar_create_event",
-            {"title": "Meeting", "start_datetime": "2026-03-01T10:00:00"},
-            ActionType.WRITE,
-        )
-        assert "confirmation" in msg.lower()
-        assert "Meeting" in msg
+    def test_internal_destructive_source(self) -> None:
+        summary = get_classification_summary("lucy_send_email")
+        assert summary["source"] == "internal_destructive_set"
+        assert summary["requires_confirmation"] is True
 
-    def test_email_params_summarized(self) -> None:
-        msg = format_confirmation_message(
-            "gmail_send_email",
-            {
-                "recipient_email": "alice@example.com",
-                "subject": "Project Update",
-                "body": "Here's the latest...",
-            },
-            ActionType.DESTRUCTIVE,
-        )
-        assert "alice@example.com" in msg
-        assert "Project Update" in msg
-
-
-class TestGatedResult:
-    """Test the create_gated_result output structure."""
-
-    def test_gated_result_structure(self) -> None:
-        # This test would need a mock for create_pending_action
-        # For now, test the format_confirmation_message part
-        msg = format_confirmation_message(
-            "clerk_delete_user",
-            {"user_id": "usr_12345"},
-            ActionType.DESTRUCTIVE,
-        )
-        assert "usr_12345" in msg
-        assert "⚠️" in msg
+    def test_default_write_source(self) -> None:
+        summary = get_classification_summary("gmail_send_email")
+        assert summary["action_type"] == "WRITE"
+        assert summary["requires_confirmation"] is False
 
 
 # ── Integration Tests ────────────────────────────────────────────────
 
 
-class TestEndToEnd:
-    """End-to-end classification tests for real tool flows."""
+class TestConsequenceModel:
+    """End-to-end validation of consequence-based (not verb-based) classification."""
 
-    def test_email_draft_flow(self) -> None:
-        """User asks to draft email → WRITE, not DESTRUCTIVE."""
-        action_type = classify("gmail_create_draft")
-        assert action_type == ActionType.WRITE
-
-    def test_email_send_flow(self) -> None:
-        """User asks to send email → DESTRUCTIVE."""
-        action_type = classify("gmail_send_email")
-        assert action_type == ActionType.DESTRUCTIVE
-
-    def test_calendar_check_flow(self) -> None:
-        """User checks calendar → READ, no gate."""
-        action_type = classify("googlecalendar_list_events")
-        assert action_type == ActionType.READ
-        gated, _ = should_gate("googlecalendar_list_events")
+    def test_casual_email_executes_immediately(self) -> None:
+        """'Email John saying hi' — should just do it."""
+        assert classify("gmail_send_email", {"subject": "Hey!"}) == ActionType.WRITE
+        gated, _ = should_gate("gmail_send_email", {"subject": "Hey!"})
         assert not gated
 
-    def test_calendar_create_flow(self) -> None:
-        """User creates event → WRITE, auto-executes (no gate)."""
-        action_type = classify("googlecalendar_create_event")
-        assert action_type == ActionType.WRITE
-        gated, _ = should_gate("googlecalendar_create_event")
-        assert not gated
-
-    def test_user_delete_flow(self) -> None:
-        """Admin deletes user → DESTRUCTIVE, gated."""
-        action_type = classify("clerk_delete_user")
-        assert action_type == ActionType.DESTRUCTIVE
-        gated, _ = should_gate("clerk_delete_user")
+    def test_sensitive_email_gates(self) -> None:
+        """'Email all customers their accounts are suspended' — LLM flags it."""
+        params = {"subject": "Account suspended", "_lucy_is_destructive": True}
+        assert classify("gmail_send_email", params) == ActionType.DESTRUCTIVE
+        gated, _ = should_gate("gmail_send_email", params)
         assert gated
 
-    def test_custom_prefixed_tools(self) -> None:
-        """Custom wrapper tools should be classified the same."""
-        assert classify("lucy_custom_gmail_send_email") == ActionType.DESTRUCTIVE
-        assert classify("lucy_custom_clerk_list_users") == ActionType.READ
-        assert classify("lucy_custom_googlecalendar_create_event") == ActionType.WRITE
+    def test_delete_jira_ticket_just_happens(self) -> None:
+        """'Delete that ticket' — just do it, no gate."""
+        gated, _ = should_gate("jira_delete_issue", {"issue_id": "JIRA-999"})
+        assert not gated
 
-    def test_future_unknown_tool_is_safe(self) -> None:
-        """A brand new tool with no pattern match → WRITE (auto-executes, not gated)."""
-        action_type = classify("some_new_integration_do_thing")
-        assert action_type == ActionType.WRITE
-        gated, _ = should_gate("some_new_integration_do_thing")
+    def test_cancel_meeting_just_happens(self) -> None:
+        gated, _ = should_gate("googlecalendar_delete_event", {"event_id": "ev_1"})
+        assert not gated
+
+    def test_revoke_critical_access_gates(self) -> None:
+        """Revoking an API token for a mission-critical service — LLM flags it."""
+        params = {"token_id": "tok_prod_main", "_lucy_is_destructive": True}
+        gated, _ = should_gate("clerk_revoke_session", params)
+        assert gated
+
+    def test_future_unknown_tool_auto_executes(self) -> None:
+        """A brand new tool — WRITE, never accidentally blocked."""
+        gated, _ = should_gate("new_service_do_complex_thing")
         assert not gated

@@ -579,3 +579,102 @@ def verify_output(
         "issues": issues,
         "should_retry": len(issues) > 0,
     }
+
+
+# ── Test-pass detection ───────────────────────────────────────────────────────
+
+# Signals that the agent confirmed tests actually passed.
+_TEST_PASS_RE = re.compile(
+    r"(?:"
+    r"TEST PASSED"
+    r"|TESTS? PASSED"
+    r"|VERIFICATION PASSED"
+    r"|\bverif(?:ied|ication passed)\b"
+    r"|\bworking correctly\b"
+    r"|\bconfirmed working\b"
+    r"|\bconfirmed.*success"
+    r"|\bsuccessfully (?:verified|tested|confirmed|triggered|ran|executed)\b"
+    r"|\btriggered.*success"
+    r"|\ball (?:tests?|checks?) pass"
+    r"|\bno errors?\b.*\b(?:found|detected|occurred)\b"
+    r"|\bexited with (?:code )?0\b"
+    r"|\breturned (?:successfully|with no errors?)\b"
+    r"|\bdeployed and (?:live|working)\b"
+    r"|\bservice is (?:running|live|healthy)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Signals that something actually failed during testing.
+_TEST_FAIL_RE = re.compile(
+    r"(?:"
+    r"TEST FAILED"
+    r"|TESTS? FAILED"
+    r"|VERIFICATION FAILED"
+    r"|\bTraceback \(most recent call last\)"
+    r"|\bSyntaxError\b"
+    r"|\bImportError\b"
+    r"|\bModuleNotFoundError\b"
+    r"|\bNameError\b"
+    r"|\bAttributeError\b"
+    r"|\bTypeError\b"
+    r"|\bRuntimeError\b"
+    r"|\bException:\b"
+    r"|\bexit(?:ed)? with (?:code )?[1-9]\d*\b"
+    r"|\berror(?:ed)?\b.{0,60}(?:line \d+|exception|failed)"
+    r"|\bfailed to (?:run|execute|import|connect|start)\b"
+    r"|\bscript (?:crashed|errored|failed)\b"
+    r"|\bnot working\b"
+    r"|\bdid not (?:run|work|execute|start)\b"
+    r"|\bcould not (?:connect|find|import|run|execute)\b"
+    r"|\bHTTP [45]\d{2}\b"
+    r"|\bconnection (?:refused|timed? out|failed)\b"
+    r"|\b(?:still|keeps?) (?:failing|broken|erroring)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Ambiguity signals — agent is just narrating setup, not reporting test results.
+_TEST_AMBIGUOUS_RE = re.compile(
+    r"(?:"
+    r"\bset up\b|\bcreated\b|\bupdated\b|\bmodified\b"
+    r"|\bscheduled\b|\bconfigured\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def response_indicates_test_pass(text: str) -> tuple[bool, str]:
+    """Determine whether an agent verification response shows tests passing.
+
+    Returns ``(True, "")`` when the response clearly indicates success.
+    Returns ``(False, reason)`` when the response shows failures or is ambiguous.
+
+    The agent is instructed to prefix verification results with "TEST PASSED:"
+    or "TEST FAILED:" — those are the primary signals. The regex patterns are
+    fallbacks for when the agent doesn't follow the format exactly.
+    """
+    if not text:
+        return False, "empty verification response"
+
+    lower = text.lower()
+
+    # Explicit failures always win, even if there are also positive signals.
+    # A traceback with a partial success is still a failure.
+    if _TEST_FAIL_RE.search(text):
+        # Extract a short reason from the first matching failure phrase
+        m = _TEST_FAIL_RE.search(text)
+        snippet = text[max(0, m.start() - 20) : m.end() + 60].strip()
+        snippet = snippet.replace("\n", " ")[:120]
+        return False, f"test failure detected: {snippet}"
+
+    if _TEST_PASS_RE.search(text):
+        return True, ""
+
+    # Neither explicit pass nor explicit fail — treat as ambiguous.
+    # Force the agent to be more explicit rather than silently accepting.
+    return False, (
+        "verification response is ambiguous — no clear TEST PASSED or TEST FAILED "
+        "signal. Agent must explicitly confirm with 'TEST PASSED: <what was tested>' "
+        "or 'TEST FAILED: <what failed>'."
+    )

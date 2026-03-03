@@ -132,16 +132,21 @@ def _get_model_limit(model: str) -> tuple[float, float]:
 # ═══════════════════════════════════════════════════════════════════════════
 # EXTERNAL API RATE LIMITS
 # ═══════════════════════════════════════════════════════════════════════════
-# Conservative limits for external services accessed through Composio.
+# Limits tuned to published vendor values where available.
+# Linear: 1500 req/min = 25/s (we use 5/s to be safe under burst)
+# GitHub: 5000 req/hr = ~1.4/s (but burst to 90/min for authenticated calls)
+# Gmail: 250 quota units/s (each send = ~100 units → ~4 sends/s burst)
+# Slack: 1 msg/s per channel, but API calls are higher
+# Google Calendar/Sheets/Drive: 100 req/s shared quota (we cap conservatively)
 
 _API_LIMITS: dict[str, tuple[float, float]] = {
     # api_name: (requests_per_second, burst_capacity)
     "google_calendar": (2.0, 5),
     "google_sheets": (2.0, 5),
     "google_drive": (2.0, 5),
-    "gmail": (2.0, 5),
-    "github": (5.0, 15),           # GitHub is generous
-    "linear": (3.0, 10),
+    "gmail": (4.0, 10),            # 250 quota units/s, send=~100 → ~4 sends/s
+    "github": (10.0, 20),          # 5000/hr authenticated = up to 10/s burst
+    "linear": (5.0, 15),           # 1500 req/min = 25/s; 5/s conservative
     "slack": (3.0, 10),
     "clickup": (2.0, 5),
     "_default": (2.0, 5),
@@ -234,6 +239,45 @@ class RateLimiter:
             )
 
         return acquired
+
+    async def acquire_api_with_backoff(
+        self,
+        api_name: str,
+        retries: int = 3,
+        base_wait: float = 0.5,
+    ) -> bool:
+        """Acquire rate limit token with exponential backoff retries.
+
+        Unlike ``acquire_api`` which waits passively inside the bucket,
+        this method retries the acquire call with increasing sleeps between
+        attempts. This avoids holding the bucket lock while sleeping.
+
+        On final failure it returns False with a structured warning so the
+        caller can handle the failure without burning an LLM turn.
+
+        Backoff schedule (base_wait=0.5): 0.5s → 1.0s → 2.0s
+        """
+        for attempt in range(retries):
+            acquired = await self.acquire_api(api_name, timeout=5.0)
+            if acquired:
+                return True
+            wait = base_wait * (2 ** attempt)
+            logger.warning(
+                "api_rate_limit_backoff",
+                api_name=api_name,
+                attempt=attempt + 1,
+                retries=retries,
+                next_wait_s=wait,
+            )
+            await asyncio.sleep(wait)
+
+        logger.error(
+            "api_rate_limit_exhausted",
+            api_name=api_name,
+            retries=retries,
+            retry_after_ms=int(base_wait * (2 ** retries) * 1000),
+        )
+        return False
 
     def classify_api_from_tool(self, tool_name: str, params: dict[str, Any]) -> str | None:
         """Infer which external API a tool call targets.

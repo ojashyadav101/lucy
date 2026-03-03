@@ -1,0 +1,31 @@
+[Unit]
+Description=Lucy Slack Bot (AI Coworker)
+Documentation=https://github.com/ojashyadav101/lucy
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/lucy/app
+EnvironmentFile=/opt/lucy/app/.env
+
+# Lucy runs in Socket Mode (persistent WebSocket to Slack)
+ExecStart=/opt/lucy/app/.venv/bin/python scripts/run.py
+
+# Always restart — this is a long-running service
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Logging — all output goes to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lucy
+
+# Give it time to shut down cleanly (graceful Slack disconnect)
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
